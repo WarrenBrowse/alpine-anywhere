@@ -50,7 +50,9 @@ transfer_files() {
 
     log_step "Transferring files to remote host..."
 
-    # Create remote directory (no sudo needed, /tmp is world-writable)
+    # Create unique remote directory (no sudo needed, /tmp is world-writable)
+    # Using $$ for PID to avoid conflicts with previous runs
+    REMOTE_WORK_DIR="/tmp/alpine-anywhere-$$"
     ssh_exec "mkdir -p ${REMOTE_WORK_DIR}"
 
     # Transfer vmlinuz
