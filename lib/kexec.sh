@@ -104,9 +104,10 @@ ensure_kexec_installed() {
     distro=$(ssh_exec_capture "cat /etc/os-release 2>/dev/null | grep '^ID=' | cut -d= -f2 | tr -d '\"'" || true)
 
     case "$distro" in
-        debian|ubuntu)
+        debian|ubuntu|armbian)
             log_info "Installing kexec-tools via apt..."
-            ssh_exec_sudo "DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq kexec-tools"
+            ssh_exec_sudo "apt-get update -qq"
+            ssh_exec_sudo "apt-get install -y kexec-tools"
             ;;
         centos|rhel|fedora|rocky|alma)
             log_info "Installing kexec-tools via dnf/yum..."
