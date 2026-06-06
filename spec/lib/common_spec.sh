@@ -188,4 +188,72 @@ Describe 'common.sh'
             End
         End
     End
+
+    Describe 'parse_arguments() - new options'
+        setup() {
+            # Reset all variables
+            INSTALL_MODE=false
+            UPGRADE_MODE=false
+            KEEP_EXISTING=false
+            OVERLAY_DEVICE=""
+            LOCAL_MODE=false
+            TARGET_USER=""
+            TARGET_HOST=""
+        }
+        Before 'setup'
+
+        It 'parses --install flag'
+            When call parse_arguments --install --local
+            The variable INSTALL_MODE should equal "true"
+        End
+
+        It 'parses --keep flag'
+            When call parse_arguments --keep --local
+            The variable KEEP_EXISTING should equal "true"
+        End
+
+        It 'parses --overlay with device'
+            When call parse_arguments --overlay /dev/sda3 --local
+            The variable OVERLAY_DEVICE should equal "/dev/sda3"
+        End
+
+        It 'parses --overlay= format'
+            When call parse_arguments --overlay=/dev/nvme0n1p3 --local
+            The variable OVERLAY_DEVICE should equal "/dev/nvme0n1p3"
+        End
+
+        It 'parses upgrade command'
+            When call parse_arguments upgrade --local
+            The variable UPGRADE_MODE should equal "true"
+        End
+
+        It 'parses combined install options'
+            When call parse_arguments --install --overlay /dev/sda3 --keep --local
+            The variable INSTALL_MODE should equal "true"
+            The variable OVERLAY_DEVICE should equal "/dev/sda3"
+            The variable KEEP_EXISTING should equal "true"
+        End
+    End
+
+    Describe 'Default variables'
+        It 'INSTALL_MODE defaults to false'
+            The variable INSTALL_MODE should equal "false"
+        End
+
+        It 'UPGRADE_MODE defaults to false'
+            The variable UPGRADE_MODE should equal "false"
+        End
+
+        It 'KEEP_EXISTING defaults to false'
+            The variable KEEP_EXISTING should equal "false"
+        End
+
+        It 'OVERLAY_DEVICE defaults to empty'
+            The variable OVERLAY_DEVICE should equal ""
+        End
+
+        It 'BOOT_SLOT defaults to A'
+            The variable BOOT_SLOT should equal "A"
+        End
+    End
 End
