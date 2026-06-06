@@ -1,0 +1,167 @@
+#!/bin/sh
+# Alpine Anywhere - Initramfs init script
+# Boots immutable Alpine from squashfs with optional overlay
+
+set -e
+
+# Mount essential filesystems
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+
+# Parse kernel command line
+BOOT_SLOT="A"
+OVERLAY_DEVICE=""
+DEBUG=""
+
+for opt in $(cat /proc/cmdline); do
+    case "$opt" in
+        alpine.slot=*)
+            BOOT_SLOT="${opt#alpine.slot=}"
+            ;;
+        alpine.overlay=*)
+            OVERLAY_DEVICE="${opt#alpine.overlay=}"
+            ;;
+        alpine.debug)
+            DEBUG=1
+            ;;
+        root=live:*)
+            BOOT_LABEL="${opt#root=live:LABEL=}"
+            ;;
+        rd.live.dir=*)
+            LIVE_DIR="${opt#rd.live.dir=}"
+            ;;
+        rd.live.squashimg=*)
+            SQUASHFS_NAME="${opt#rd.live.squashimg=}"
+            ;;
+    esac
+done
+
+log() {
+    echo "[init] $*"
+}
+
+debug() {
+    [ -n "$DEBUG" ] && log "DEBUG: $*"
+}
+
+log "Alpine Anywhere init starting..."
+log "Boot slot: $BOOT_SLOT"
+
+# Find boot partition
+log "Locating boot partition..."
+BOOT_DEV=""
+
+# Wait for devices
+sleep 2
+
+if [ -n "$BOOT_LABEL" ]; then
+    BOOT_DEV=$(findfs LABEL="$BOOT_LABEL" 2>/dev/null || true)
+fi
+
+if [ -z "$BOOT_DEV" ]; then
+    # Try to find by known labels
+    for label in ALPINE_BOOT alpine-boot BOOT; do
+        BOOT_DEV=$(findfs LABEL="$label" 2>/dev/null || true)
+        [ -n "$BOOT_DEV" ] && break
+    done
+fi
+
+if [ -z "$BOOT_DEV" ]; then
+    log "ERROR: Cannot find boot partition"
+    log "Available partitions:"
+    cat /proc/partitions
+    exec /bin/sh
+fi
+
+log "Boot device: $BOOT_DEV"
+
+# Mount boot partition
+mkdir -p /mnt/boot
+mount -o ro "$BOOT_DEV" /mnt/boot
+
+# Determine slot directory
+if [ -n "$LIVE_DIR" ]; then
+    SLOT_DIR="/mnt/boot${LIVE_DIR}"
+else
+    SLOT_DIR="/mnt/boot/slots/${BOOT_SLOT}"
+fi
+
+debug "Slot directory: $SLOT_DIR"
+
+# Find squashfs
+SQUASHFS="${SLOT_DIR}/${SQUASHFS_NAME:-system.squashfs}"
+
+if [ ! -f "$SQUASHFS" ]; then
+    log "ERROR: Squashfs not found: $SQUASHFS"
+    ls -la "$SLOT_DIR" 2>/dev/null || true
+    exec /bin/sh
+fi
+
+log "Squashfs: $SQUASHFS"
+
+# Mount squashfs as lower layer
+mkdir -p /mnt/lower
+mount -t squashfs -o loop,ro "$SQUASHFS" /mnt/lower
+
+# Setup overlay
+mkdir -p /mnt/upper /mnt/work /mnt/newroot
+
+if [ -n "$OVERLAY_DEVICE" ]; then
+    # Persistent overlay on device
+    log "Setting up persistent overlay on $OVERLAY_DEVICE..."
+
+    OVERLAY_DEV=$(findfs "$OVERLAY_DEVICE" 2>/dev/null || echo "$OVERLAY_DEVICE")
+
+    mkdir -p /mnt/overlay
+    mount "$OVERLAY_DEV" /mnt/overlay
+
+    mkdir -p /mnt/overlay/upper /mnt/overlay/work
+
+    mount -t overlay overlay \
+        -o lowerdir=/mnt/lower,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work \
+        /mnt/newroot
+else
+    # Ephemeral overlay (tmpfs)
+    log "Setting up ephemeral overlay (tmpfs)..."
+
+    mount -t tmpfs tmpfs /mnt/upper
+    mkdir -p /mnt/upper/upper /mnt/upper/work
+
+    mount -t overlay overlay \
+        -o lowerdir=/mnt/lower,upperdir=/mnt/upper/upper,workdir=/mnt/upper/work \
+        /mnt/newroot
+fi
+
+# Mount boot partition in new root
+mkdir -p /mnt/newroot/boot
+mount --move /mnt/boot /mnt/newroot/boot
+
+# Prepare to switch root
+log "Switching to new root..."
+
+# Mount virtual filesystems
+mount -t proc proc /mnt/newroot/proc
+mount -t sysfs sysfs /mnt/newroot/sys
+mount --move /dev /mnt/newroot/dev
+
+# Clean up
+umount /proc
+umount /sys
+
+# Increment boot counter for rollback detection
+if [ -f "/mnt/newroot/boot/slots/${BOOT_SLOT}/meta.conf" ]; then
+    . "/mnt/newroot/boot/slots/${BOOT_SLOT}/meta.conf"
+    BOOT_COUNT=$((BOOT_COUNT + 1))
+    sed -i "s/^BOOT_COUNT=.*/BOOT_COUNT=${BOOT_COUNT}/" \
+        "/mnt/newroot/boot/slots/${BOOT_SLOT}/meta.conf"
+    debug "Boot count: $BOOT_COUNT"
+fi
+
+# Switch to new root
+log "Starting Alpine Linux..."
+exec switch_root /mnt/newroot /sbin/init
+
+# Fallback shell if switch_root fails
+log "ERROR: switch_root failed"
+exec /bin/sh

@@ -38,6 +38,9 @@ source "${LIB_DIR}/kexec.sh"
 source "${LIB_DIR}/validate.sh"
 source "${LIB_DIR}/remote.sh"
 source "${LIB_DIR}/takeover.sh"
+source "${LIB_DIR}/pivot.sh"
+source "${LIB_DIR}/install.sh"
+source "${LIB_DIR}/upgrade.sh"
 
 # =============================================================================
 # Banner
@@ -55,7 +58,14 @@ print_banner() {
 
 EOF
     fi
-    echo "alpine-anywhere v1.0.0 - Boot any server into Alpine Linux via kexec"
+    local mode_desc="Live mode (RAM-only, revert on reboot)"
+    if [[ "$INSTALL_MODE" == "true" ]]; then
+        mode_desc="Install mode (immutable A/B, persistent)"
+    elif [[ "$UPGRADE_MODE" == "true" ]]; then
+        mode_desc="Upgrade mode (atomic A/B switch)"
+    fi
+    echo "alpine-anywhere v2.0.0 - Immutable Alpine Linux with A/B updates"
+    echo "Mode: $mode_desc"
     echo ""
 }
 
@@ -82,11 +92,28 @@ main() {
         echo ""
     fi
 
-    # Branch based on mode
-    if [[ "$LOCAL_MODE" == "true" ]]; then
-        run_local_installation
+    # Handle different modes
+    if [[ "$UPGRADE_MODE" == "true" ]]; then
+        # Upgrade mode
+        if [[ "$LOCAL_MODE" == "true" ]]; then
+            run_local_upgrade
+        else
+            run_remote_upgrade
+        fi
+    elif [[ "$INSTALL_MODE" == "true" ]]; then
+        # Install mode (A/B immutable)
+        if [[ "$LOCAL_MODE" == "true" ]]; then
+            run_local_ab_install
+        else
+            run_remote_ab_install
+        fi
     else
-        run_remote_installation
+        # Live mode (default)
+        if [[ "$LOCAL_MODE" == "true" ]]; then
+            run_local_installation
+        else
+            run_remote_installation
+        fi
     fi
 }
 
@@ -125,7 +152,123 @@ run_remote_installation() {
 }
 
 # =============================================================================
-# Local Mode: Run installation directly
+# Remote Mode: A/B Install
+# =============================================================================
+
+run_remote_ab_install() {
+    setup_ssh_multiplexing
+
+    log_step "Step 1/4: Local validation"
+    validate_local_commands
+
+    log_step "Step 2/4: SSH connection"
+    test_ssh_connection
+
+    log_step "Step 3/4: Root access verification"
+    check_root_access
+
+    log_step "Step 4/4: Deploying to remote"
+    deploy_scripts_to_remote
+
+    log_info "Scripts deployed. Running A/B installation on remote..."
+    echo ""
+
+    # Pass --install flag to remote
+    run_on_remote "--install"
+
+    show_install_completion_message
+}
+
+# =============================================================================
+# Remote Mode: Upgrade
+# =============================================================================
+
+run_remote_upgrade() {
+    setup_ssh_multiplexing
+
+    log_step "Step 1/3: SSH connection"
+    test_ssh_connection
+
+    log_step "Step 2/3: Root access verification"
+    check_root_access
+
+    log_step "Step 3/3: Running upgrade on remote"
+    run_on_remote "upgrade"
+
+    show_upgrade_completion_message
+}
+
+# =============================================================================
+# Local Mode: A/B Install
+# =============================================================================
+
+run_local_ab_install() {
+    log_info "Running A/B installation in local mode"
+
+    # Setup directories
+    setup_install_dirs "$HOME"
+    create_install_dirs
+
+    # Step 1: Validations
+    log_step "Step 1/6: System validation"
+    validate_local_commands
+    validate_local_system
+
+    # Step 2: Network detection
+    log_step "Step 2/6: Network detection"
+    detect_local_network
+    print_network_summary
+
+    # Step 3: SSH keys
+    log_step "Step 3/6: SSH key retrieval"
+    local ssh_keys
+    ssh_keys=$(get_local_authorized_keys)
+
+    # Step 4: Generate config
+    log_step "Step 4/6: Configuration generation"
+    find_working_mirror_local
+    local apkovl_file
+    apkovl_file=$(generate_apkovl "$ssh_keys")
+
+    # Step 5: Download files
+    log_step "Step 5/6: Downloading Alpine files"
+    download_minirootfs
+
+    # Step 6: Pivot and install
+    log_step "Step 6/6: Pivot and A/B installation"
+
+    # First, pivot to Alpine in RAM
+    setup_pivot_environment
+    execute_pivot
+
+    # Then run A/B installation from the pivoted environment
+    # This will format the disk and install the A/B structure
+    run_ab_install
+
+    show_install_completion_message
+}
+
+# =============================================================================
+# Local Mode: Upgrade
+# =============================================================================
+
+run_local_upgrade() {
+    log_info "Running upgrade in local mode"
+
+    # Setup directories
+    setup_install_dirs "$HOME"
+
+    # Check we're running on an A/B installed system
+    if [[ ! -f "/boot/current_slot" ]]; then
+        die "This system does not appear to have an A/B installation"
+    fi
+
+    # Run upgrade
+    run_upgrade "$ALPINE_VERSION"
+}
+
+# =============================================================================
+# Local Mode: Live installation (existing)
 # =============================================================================
 
 run_local_installation() {
@@ -719,6 +862,51 @@ show_completion_message() {
     echo "  ssh -p 2222 root@${TARGET_HOST}"
     echo "  ~/.local/share/alpine-anywhere/alpine-anywhere --local"
     echo "  ~/.local/share/alpine-anywhere/alpine-anywhere user@other-server"
+    echo ""
+}
+
+# Show install mode completion message
+show_install_completion_message() {
+    echo ""
+    echo "=========================================="
+    echo "    A/B INSTALLATION COMPLETE!"
+    echo "=========================================="
+    echo ""
+    echo "Alpine Linux installed with A/B update scheme"
+    echo ""
+    echo "Disk layout:"
+    echo "  - Slot A: Active (current)"
+    echo "  - Slot B: Ready for updates"
+    echo "  - Data:   $([ -n "$OVERLAY_DEVICE" ] && echo "Persistent overlay" || echo "None (pure RAM)")"
+    echo ""
+    echo "To activate:"
+    echo "  sudo reboot"
+    echo ""
+    echo "After reboot, verify with:"
+    echo "  alpine-anywhere status"
+    echo ""
+    echo "To upgrade in the future:"
+    echo "  alpine-anywhere upgrade root@${TARGET_HOST}"
+    echo ""
+}
+
+# Show upgrade completion message
+show_upgrade_completion_message() {
+    echo ""
+    echo "=========================================="
+    echo "       UPGRADE COMPLETE!"
+    echo "=========================================="
+    echo ""
+    echo "New version installed to inactive slot"
+    echo ""
+    echo "To activate:"
+    echo "  sudo reboot"
+    echo ""
+    echo "Automatic rollback will occur if boot fails"
+    echo "${MAX_BOOT_ATTEMPTS:-3} times."
+    echo ""
+    echo "After successful boot, confirm with:"
+    echo "  alpine-anywhere verify"
     echo ""
 }
 

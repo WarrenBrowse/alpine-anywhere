@@ -21,6 +21,11 @@ TARGET_HOST="${TARGET_HOST:-}"
 TARGET_USER="${TARGET_USER:-}"
 INSTALL_METHOD="${INSTALL_METHOD:-auto}"  # auto, kexec, takeover
 LOCAL_MODE="${LOCAL_MODE:-false}"         # Run locally (no SSH)
+INSTALL_MODE="${INSTALL_MODE:-false}"     # Install mode (vs live mode)
+UPGRADE_MODE="${UPGRADE_MODE:-false}"     # Upgrade mode (A/B switch)
+KEEP_EXISTING="${KEEP_EXISTING:-false}"   # Keep existing system (dual-boot)
+OVERLAY_DEVICE="${OVERLAY_DEVICE:-}"      # Device for persistent overlay
+BOOT_SLOT="${BOOT_SLOT:-A}"               # Current boot slot (A/B)
 
 # Working directories (set by setup_install_dirs in exec.sh)
 WORK_DIR=""
@@ -216,11 +221,17 @@ parse_target() {
 show_usage() {
     cat <<EOF
 Usage: alpine-anywhere [OPTIONS] [user@host]
+       alpine-anywhere upgrade [OPTIONS] [user@host]
 
-Boot any Linux server into Alpine Linux RAM-only mode.
+Boot any Linux server into Alpine Linux (immutable, RAM-only, A/B updates).
 
 Arguments:
   user@host                      Target server (omit for --local mode)
+
+Modes:
+  (default)                      Live mode - boot Alpine in RAM, revert on reboot
+  --install                      Install mode - install Alpine permanently (A/B scheme)
+  upgrade                        Upgrade to new version (atomic A/B switch)
 
 Options:
   -V, --alpine-version VERSION   Alpine version (default: 3.20)
@@ -232,24 +243,28 @@ Options:
   -v, --verbose                  Verbose output
   -f, --force                    Skip confirmation prompts
   --local                        Run locally (no SSH, for running on target server)
-  --method METHOD                Installation method: auto, kexec, takeover (default: auto)
-                                   - kexec: Use kexec to boot new kernel (requires CONFIG_KEXEC)
-                                   - takeover: Pivot root to Alpine in RAM (no kexec needed)
-                                   - auto: Try kexec, fallback to takeover if unavailable
+  --method METHOD                Live mode method: auto, kexec, takeover (default: auto)
   --extra-packages PKGS          Additional packages (comma-separated)
-  --reboot-delay SECONDS         Delay before kexec (default: 5)
   -h, --help                     Show this help message
 
+Install options:
+  --keep                         Keep existing system (dual-boot)
+  --overlay DEVICE               Device/partition for persistent data overlay
+
 Examples:
-  # Remote installation (copies scripts to target, then runs locally there)
+  # Live mode - temporary Alpine boot (reverts on reboot)
   alpine-anywhere root@192.168.1.100
   alpine-anywhere --method=takeover q@raspberry-pi
 
-  # Local installation (run directly on target server)
-  alpine-anywhere --local
+  # Install mode - permanent immutable Alpine with A/B updates
+  alpine-anywhere --install root@192.168.1.100
+  alpine-anywhere --install --overlay /dev/sda3 root@server
 
-  # Chain installation (from server A to server B)
-  ssh root@server-a "~/.local/share/alpine-anywhere/alpine-anywhere root@server-b"
+  # Upgrade existing installation (atomic A/B switch)
+  alpine-anywhere upgrade root@192.168.1.100
+
+  # Local installation (run directly on target server)
+  alpine-anywhere --local --install
 
 EOF
 }
@@ -322,6 +337,26 @@ parse_arguments() {
             --reboot-delay)
                 REBOOT_DELAY="$2"
                 shift 2
+                ;;
+            --install)
+                INSTALL_MODE=true
+                shift
+                ;;
+            --keep)
+                KEEP_EXISTING=true
+                shift
+                ;;
+            --overlay)
+                OVERLAY_DEVICE="$2"
+                shift 2
+                ;;
+            --overlay=*)
+                OVERLAY_DEVICE="${1#*=}"
+                shift
+                ;;
+            upgrade)
+                UPGRADE_MODE=true
+                shift
                 ;;
             -h|--help)
                 show_usage
