@@ -1,0 +1,154 @@
+#!/bin/bash
+#
+# alpine-anywhere - Boot any Linux server into Alpine Linux RAM-only mode
+#
+# Similar to nixos-anywhere, this tool uses kexec to boot a remote server
+# into Alpine Linux running entirely in RAM, without touching the disk.
+#
+# Usage: alpine-anywhere [OPTIONS] <user@host>
+#
+# Copyright (c) 2024
+# License: MIT
+#
+
+set -euo pipefail
+
+# =============================================================================
+# Script Initialization
+# =============================================================================
+
+# Get the directory where the script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source all library files
+source "${SCRIPT_DIR}/lib/common.sh"
+source "${SCRIPT_DIR}/lib/ssh.sh"
+source "${SCRIPT_DIR}/lib/network.sh"
+source "${SCRIPT_DIR}/lib/download.sh"
+source "${SCRIPT_DIR}/lib/apkovl.sh"
+source "${SCRIPT_DIR}/lib/kexec.sh"
+source "${SCRIPT_DIR}/lib/validate.sh"
+
+# =============================================================================
+# Banner
+# =============================================================================
+
+print_banner() {
+    if [[ "$VERBOSE" == "true" ]]; then
+        cat <<'EOF'
+       _       _                                    _
+  __ _| |_ __ (_)_ __   ___        __ _ _ __  _   _| |__   ___ _ __ ___
+ / _` | | '_ \| | '_ \ / _ \_____ / _` | '_ \| | | | '_ \ / _ \ '__/ _ \
+| (_| | | |_) | | | | |  __/_____| (_| | | | | |_| | | | |  __/ | |  __/
+ \__,_|_| .__/|_|_| |_|\___|      \__,_|_| |_|\__, |_| |_|\___|_|  \___|
+        |_|                                   |___/
+
+EOF
+    fi
+    echo "alpine-anywhere v1.0.0 - Boot any server into Alpine Linux via kexec"
+    echo ""
+}
+
+# =============================================================================
+# Main Flow
+# =============================================================================
+
+main() {
+    # Parse command line arguments
+    parse_arguments "$@"
+
+    # Print banner
+    print_banner
+
+    # Setup cleanup trap
+    setup_cleanup_trap
+
+    # Create working directory
+    create_work_dir
+
+    # Show dry-run notice
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_warn "DRY-RUN MODE - No changes will be made"
+        echo ""
+    fi
+
+    # Step 1: Local validations
+    log_step "Step 1/11: Local validation"
+    validate_local_commands
+
+    # Step 2: Test SSH connection
+    log_step "Step 2/11: SSH connection"
+    test_ssh_connection
+
+    # Step 3: Check root access
+    log_step "Step 3/11: Root access verification"
+    check_root_access
+
+    # Step 4: Remote validations
+    log_step "Step 4/11: Remote validation"
+    run_remote_validations
+
+    # Step 5: Detect architecture
+    log_step "Step 5/11: Architecture detection"
+    detect_architecture
+
+    # Step 6: Detect network configuration
+    log_step "Step 6/11: Network detection"
+    detect_all_network_config
+    print_network_summary
+
+    # Step 7: Retrieve SSH keys
+    log_step "Step 7/11: SSH key retrieval"
+    local ssh_keys
+    ssh_keys=$(get_remote_authorized_keys)
+
+    # Step 8: Find working mirror and download Alpine files
+    log_step "Step 8/11: Alpine download"
+    find_working_mirror
+    download_alpine_files
+    verify_downloads
+
+    # Step 9: Generate apkovl
+    log_step "Step 9/11: apkovl generation"
+    local apkovl_file
+    apkovl_file=$(generate_apkovl "$ssh_keys")
+
+    if [[ "$VERBOSE" == "true" ]]; then
+        show_apkovl_summary
+    fi
+
+    # Step 10: Transfer and execute kexec
+    log_step "Step 10/11: kexec execution"
+
+    if [[ "$VERBOSE" == "true" ]]; then
+        show_kexec_diagnostics
+    fi
+
+    run_kexec "$apkovl_file"
+
+    # Step 11: Complete
+    log_step "Step 11/11: Complete"
+
+    echo ""
+    echo "=========================================="
+    echo "         SUCCESS!"
+    echo "=========================================="
+    echo ""
+    echo "Alpine Linux is now running on ${TARGET_HOST}"
+    echo ""
+    echo "Connect with:"
+    echo "  ssh root@${TARGET_HOST}"
+    echo ""
+    echo "The system is running entirely in RAM."
+    echo "No changes have been made to the disk."
+    echo ""
+    echo "To return to the original OS, simply reboot:"
+    echo "  ssh root@${TARGET_HOST} reboot"
+    echo ""
+}
+
+# =============================================================================
+# Entry Point
+# =============================================================================
+
+main "$@"
