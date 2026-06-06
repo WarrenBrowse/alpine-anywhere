@@ -292,7 +292,7 @@ run_install_continue() {
     fi
 
     # Setup directories
-    INSTALL_BASE_DIR="/root/.alpine-anywhere"
+    INSTALL_BASE_DIR="/root/.local/share/alpine-anywhere"
     INSTALL_CACHE_DIR="${INSTALL_BASE_DIR}/cache"
     mkdir -p "$INSTALL_CACHE_DIR"
 

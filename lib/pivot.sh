@@ -194,21 +194,23 @@ OVERLAY_DEVICE="${OVERLAY_DEVICE}"
 EXTRA_PACKAGES="${EXTRA_PACKAGES}"
 FORCE="${FORCE}"
 VERBOSE="${VERBOSE}"
-INSTALL_CACHE_DIR="/root/.alpine-anywhere/cache"
+INSTALL_CACHE_DIR="/root/.local/share/alpine-anywhere/cache"
 EOF
 
-    # Copy install scripts and cache only for install mode (objective 2/3)
-    if [ "$INSTALL_MODE" = "true" ]; then
-        run_privileged mkdir -p "${PIVOT_DIR}/root/.alpine-anywhere/cache"
-        run_privileged cp "${INSTALL_CACHE_DIR}/minirootfs.tar.gz" "${PIVOT_DIR}/root/.alpine-anywhere/cache/" 2>/dev/null || true
-        run_privileged cp "${INSTALL_CACHE_DIR}/"*.apkovl.tar.gz "${PIVOT_DIR}/root/.alpine-anywhere/cache/" 2>/dev/null || true
+    # Always copy alpine-anywhere scripts to the pivoted system
+    local aa_dest="${PIVOT_DIR}/root/.local/share/alpine-anywhere"
+    run_privileged mkdir -p "${aa_dest}/lib"
+    run_privileged cp "${SCRIPT_DIR}/alpine-anywhere" "${aa_dest}/" 2>/dev/null || \
+        run_privileged cp "${INSTALL_BASE_DIR}/alpine-anywhere" "${aa_dest}/" 2>/dev/null || true
+    run_privileged cp "${SCRIPT_DIR}"/lib/*.sh "${aa_dest}/lib/" 2>/dev/null || \
+        run_privileged cp "${INSTALL_BASE_DIR}"/lib/*.sh "${aa_dest}/lib/" 2>/dev/null || true
+    run_privileged chmod +x "${aa_dest}/alpine-anywhere" 2>/dev/null || true
 
-        run_privileged mkdir -p "${PIVOT_DIR}/root/.alpine-anywhere/lib"
-        run_privileged cp "${SCRIPT_DIR}/alpine-anywhere" "${PIVOT_DIR}/root/.alpine-anywhere/" 2>/dev/null || \
-            run_privileged cp "${INSTALL_BASE_DIR}/alpine-anywhere" "${PIVOT_DIR}/root/.alpine-anywhere/" 2>/dev/null || true
-        run_privileged cp "${SCRIPT_DIR}"/lib/*.sh "${PIVOT_DIR}/root/.alpine-anywhere/lib/" 2>/dev/null || \
-            run_privileged cp "${INSTALL_BASE_DIR}"/lib/*.sh "${PIVOT_DIR}/root/.alpine-anywhere/lib/" 2>/dev/null || true
-        run_privileged chmod +x "${PIVOT_DIR}/root/.alpine-anywhere/alpine-anywhere" 2>/dev/null || true
+    # Copy cache files for install mode (objective 2/3)
+    if [ "$INSTALL_MODE" = "true" ]; then
+        run_privileged mkdir -p "${aa_dest}/cache"
+        run_privileged cp "${INSTALL_CACHE_DIR}/minirootfs.tar.gz" "${aa_dest}/cache/" 2>/dev/null || true
+        run_privileged cp "${INSTALL_CACHE_DIR}/"*.apkovl.tar.gz "${aa_dest}/cache/" 2>/dev/null || true
     fi
 
     # === FAKEINIT (marcan approach) ===
@@ -348,11 +350,11 @@ echo "[fakeinit] SSH available on port 22"
 echo "[fakeinit] ==================================="
 
 # Start A/B installation if scripts are present
-if [ -f /root/.alpine-anywhere/alpine-anywhere ]; then
+if [ -f /root/.local/share/alpine-anywhere/alpine-anywhere ]; then
     echo "[fakeinit] Starting A/B installation in background..."
     . /etc/alpine-anywhere/config.env
 
-    INSTALL_CMD="/usr/bin/bash /root/.alpine-anywhere/alpine-anywhere --local --install-continue"
+    INSTALL_CMD="/usr/bin/bash /root/.local/share/alpine-anywhere/alpine-anywhere --local --install-continue"
     [ "$VERBOSE" = "true" ] && INSTALL_CMD="$INSTALL_CMD -v"
     [ "$FORCE" = "true" ] && INSTALL_CMD="$INSTALL_CMD -f"
     [ -n "$ALPINE_VERSION" ] && INSTALL_CMD="$INSTALL_CMD -V $ALPINE_VERSION"
