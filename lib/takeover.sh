@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # takeover.sh - Takeover method for alpine-anywhere
 # Based on the technique from https://github.com/marcan/takeover.sh
 #
@@ -45,7 +45,7 @@ check_takeover_support() {
 
     # We need at least 256MB for Alpine minimal + some headroom
     local min_ram_mb=300
-    if ((mem_available_mb < min_ram_mb)); then
+    if [ "$mem_available_mb" -lt "$min_ram_mb" ]; then
         die "Insufficient available RAM for takeover: ${mem_available_mb}MB (need ${min_ram_mb}MB)"
     fi
 
@@ -82,7 +82,7 @@ setup_takeover_environment() {
 
     # Generate network config for the script
     local network_interfaces
-    if [[ "$NETWORK_IS_DHCP" == "true" ]]; then
+    if [ "$NETWORK_IS_DHCP" = "true" ]; then
         network_interfaces="auto lo
 iface lo inet loopback
 
@@ -102,7 +102,7 @@ iface ${DETECTED_INTERFACE} inet static
     # Create the setup script that will run with sudo
     log_info "Generating setup script..."
     ssh_exec "cat > ${REMOTE_WORK_DIR}/setup_takeover.sh << 'SETUPSCRIPT'
-#!/bin/bash
+#!/bin/sh
 set -e
 
 TAKEOVER_DIR=\"${TAKEOVER_DIR}\"
@@ -160,7 +160,7 @@ tar -xzf \${WORK_DIR}/*.apkovl.tar.gz -C \${TAKEOVER_DIR} ./root/.ssh/authorized
 chown 0:0 \${TAKEOVER_DIR}/root/.ssh/authorized_keys 2>/dev/null || true
 
 # Fallback: copy from current user and root
-if [[ ! -f \${TAKEOVER_DIR}/root/.ssh/authorized_keys ]]; then
+if [ ! -f \${TAKEOVER_DIR}/root/.ssh/authorized_keys ]; then
     cat ~/.ssh/authorized_keys >> \${TAKEOVER_DIR}/root/.ssh/authorized_keys 2>/dev/null || true
     cat /root/.ssh/authorized_keys >> \${TAKEOVER_DIR}/root/.ssh/authorized_keys 2>/dev/null || true
 fi
@@ -223,7 +223,7 @@ generate_takeover_script() {
 
     # Generate network setup commands
     local network_setup
-    if [[ "$NETWORK_IS_DHCP" == "true" ]]; then
+    if [ "$NETWORK_IS_DHCP" = "true" ]; then
         network_setup="/sbin/udhcpc -i ${DETECTED_INTERFACE} -b 2>/dev/null || true"
     else
         network_setup="/sbin/ifconfig ${DETECTED_INTERFACE} ${DETECTED_IP_ADDRESS} netmask ${DETECTED_NETMASK} up 2>/dev/null || true
@@ -289,7 +289,7 @@ TAKEOVERSCRIPT"
 execute_takeover() {
     log_step "Executing takeover..."
 
-    if [[ "$DRY_RUN" == "true" ]]; then
+    if [ "$DRY_RUN" = "true" ]; then
         log_info "[DRY-RUN] Would execute takeover"
         log_info "[DRY-RUN] The system would pivot to Alpine in ${TAKEOVER_DIR}"
         return 0
@@ -383,7 +383,7 @@ LOGHEADER"
 run_takeover_execute() {
     execute_takeover
 
-    if [[ "$DRY_RUN" != "true" ]]; then
+    if [ "$DRY_RUN" != "true" ]; then
         # Wait for host to come back
         sleep 10
         wait_for_host 120

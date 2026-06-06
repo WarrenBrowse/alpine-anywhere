@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # hardening.sh - Security hardening for alpine-anywhere
 #
 # Implements security best practices for a hardened Alpine system:
@@ -15,28 +15,11 @@
 
 HARDENED_MODE="${HARDENED_MODE:-false}"
 
-# Packages for hardened mode
-HARDENED_PACKAGES=(
-    "linux-hardened"           # Hardened kernel with KSPP
-    "dropbear"                 # Minimal SSH server
-    "dropbear-openrc"          # OpenRC integration
-    "hardened-malloc"          # Hardened memory allocator
-    "iptables"                 # Firewall
-    "ip6tables"                # IPv6 firewall
-    "nftables"                 # Modern firewall (alternative)
-    "chrony"                   # Secure NTP (instead of openntpd)
-    "ca-certificates"          # TLS certificates
-    "wireguard-tools"          # VPN (if needed)
-)
+# Packages for hardened mode (space-separated string)
+HARDENED_PACKAGES="linux-hardened dropbear dropbear-openrc hardened-malloc iptables ip6tables nftables chrony ca-certificates wireguard-tools"
 
-# Packages to explicitly NOT install in hardened mode
-HARDENED_EXCLUDE_PACKAGES=(
-    "openssh-server"           # Use dropbear instead
-    "openssh-client"           # Minimal client if needed
-    "sudo"                     # Use doas instead
-    "linux-lts"                # Use linux-hardened instead
-    "linux-virt"               # Use linux-hardened instead
-)
+# Packages to explicitly NOT install in hardened mode (space-separated string)
+HARDENED_EXCLUDE_PACKAGES="openssh-server openssh-client sudo linux-lts linux-virt"
 
 # =============================================================================
 # Kernel Hardening (linux-hardened features)
@@ -56,53 +39,53 @@ HARDENED_EXCLUDE_PACKAGES=(
 
 # Additional kernel command line parameters for hardening
 generate_hardened_cmdline() {
-    local cmdline=""
+    cmdline=""
 
     # Kernel lockdown mode (integrity or confidentiality)
-    cmdline+="lockdown=integrity "
+    cmdline="${cmdline}lockdown=integrity "
 
     # Disable kernel module loading after boot (optional, strict)
-    # cmdline+="modules.sig_enforce=1 "
+    # cmdline="${cmdline}modules.sig_enforce=1 "
 
     # IOMMU for DMA protection
-    cmdline+="iommu=force "
-    cmdline+="intel_iommu=on "
-    cmdline+="amd_iommu=on "
+    cmdline="${cmdline}iommu=force "
+    cmdline="${cmdline}intel_iommu=on "
+    cmdline="${cmdline}amd_iommu=on "
 
     # Disable USB (if not needed)
-    # cmdline+="nousb "
+    # cmdline="${cmdline}nousb "
 
     # Restrict kernel pointers in logs
-    cmdline+="kptr_restrict=2 "
+    cmdline="${cmdline}kptr_restrict=2 "
 
     # Disable legacy vsyscall
-    cmdline+="vsyscall=none "
+    cmdline="${cmdline}vsyscall=none "
 
     # Panic on oops
-    cmdline+="oops=panic "
+    cmdline="${cmdline}oops=panic "
 
     # SLUB hardening
-    cmdline+="slub_debug=FZP "
-    cmdline+="init_on_alloc=1 "
-    cmdline+="init_on_free=1 "
+    cmdline="${cmdline}slub_debug=FZP "
+    cmdline="${cmdline}init_on_alloc=1 "
+    cmdline="${cmdline}init_on_free=1 "
 
     # Page allocation randomization
-    cmdline+="page_alloc.shuffle=1 "
+    cmdline="${cmdline}page_alloc.shuffle=1 "
 
     # Disable slab merging
-    cmdline+="slab_nomerge "
+    cmdline="${cmdline}slab_nomerge "
 
     # Randomize kernel page tables
-    cmdline+="randomize_kstack_offset=on "
+    cmdline="${cmdline}randomize_kstack_offset=on "
 
     # Mitigate speculative execution attacks
-    cmdline+="spectre_v2=on "
-    cmdline+="spec_store_bypass_disable=on "
-    cmdline+="l1tf=full,force "
-    cmdline+="mds=full,nosmt "
+    cmdline="${cmdline}spectre_v2=on "
+    cmdline="${cmdline}spec_store_bypass_disable=on "
+    cmdline="${cmdline}l1tf=full,force "
+    cmdline="${cmdline}mds=full,nosmt "
 
     # Disable dangerous kernel features
-    cmdline+="debugfs=off "
+    cmdline="${cmdline}debugfs=off "
 
     echo "$cmdline"
 }
@@ -307,8 +290,8 @@ EOF
 # =============================================================================
 
 generate_nftables_config() {
-    local ssh_port="${1:-22}"
-    local vpn_port="${2:-51820}"  # WireGuard default
+    ssh_port="${1:-22}"
+    vpn_port="${2:-51820}"  # WireGuard default
 
     cat << EOF
 #!/usr/sbin/nft -f
@@ -408,7 +391,7 @@ EOF
 # =============================================================================
 
 apply_hardening_to_image() {
-    local root="$1"
+    root="$1"
 
     log_info "Applying security hardening..."
 
@@ -464,13 +447,7 @@ apply_hardening_to_image() {
 # =============================================================================
 
 get_hardened_packages() {
-    local packages=""
-
-    for pkg in "${HARDENED_PACKAGES[@]}"; do
-        packages+="$pkg "
-    done
-
-    echo "$packages"
+    echo "$HARDENED_PACKAGES"
 }
 
 get_hardened_kernel() {
@@ -482,8 +459,8 @@ get_hardened_kernel() {
 # =============================================================================
 
 configure_vpn_server() {
-    local root="$1"
-    local interface="${2:-wg0}"
+    root="$1"
+    interface="${2:-wg0}"
 
     log_info "Configuring VPN server hardening..."
 

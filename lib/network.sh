@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # network.sh - Network configuration detection for alpine-anywhere
 
 # =============================================================================
@@ -12,7 +12,7 @@ detect_interface() {
     local interface
     interface=$(ssh_exec_capture "ip route show default 2>/dev/null | head -1 | awk '{print \$5}'")
 
-    if [[ -z "$interface" ]]; then
+    if [ -z "$interface" ]; then
         die "Could not detect default network interface"
     fi
 
@@ -27,14 +27,14 @@ detect_ip_address() {
     local ip_info
     ip_info=$(ssh_exec_capture "ip -4 addr show dev '$DETECTED_INTERFACE' 2>/dev/null | grep 'inet ' | head -1 | awk '{print \$2}'")
 
-    if [[ -z "$ip_info" ]]; then
+    if [ -z "$ip_info" ]; then
         die "Could not detect IP address on $DETECTED_INTERFACE"
     fi
 
     # Parse IP and CIDR
-    if [[ "$ip_info" =~ ^([0-9.]+)/([0-9]+)$ ]]; then
-        DETECTED_IP_ADDRESS="${BASH_REMATCH[1]}"
-        DETECTED_CIDR="${BASH_REMATCH[2]}"
+    if echo "$ip_info" | grep -qE '^[0-9.]+/[0-9]+$'; then
+        DETECTED_IP_ADDRESS="${ip_info%/*}"
+        DETECTED_CIDR="${ip_info#*/}"
         DETECTED_NETMASK=$(cidr_to_netmask "$DETECTED_CIDR")
     else
         die "Could not parse IP address: $ip_info"
@@ -50,7 +50,7 @@ detect_gateway() {
     local gateway
     gateway=$(ssh_exec_capture "ip route show default 2>/dev/null | head -1 | awk '{print \$3}'")
 
-    if [[ -z "$gateway" ]]; then
+    if [ -z "$gateway" ]; then
         die "Could not detect default gateway"
     fi
 
@@ -68,19 +68,19 @@ detect_dns() {
     dns=$(ssh_exec_capture "resolvectl dns 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -3 | tr '\n' ' '" || true)
 
     # Try nmcli
-    if [[ -z "$dns" ]]; then
+    if [ -z "$dns" ]; then
         dns=$(ssh_exec_capture "nmcli dev show 2>/dev/null | grep 'DNS' | awk '{print \$2}' | head -3 | tr '\n' ' '" || true)
     fi
 
     # Fall back to resolv.conf
-    if [[ -z "$dns" ]]; then
+    if [ -z "$dns" ]; then
         dns=$(ssh_exec_capture "grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print \$2}' | head -3 | tr '\n' ' '" || true)
     fi
 
     # Clean up whitespace
     dns=$(echo "$dns" | xargs)
 
-    if [[ -z "$dns" ]]; then
+    if [ -z "$dns" ]; then
         log_warn "Could not detect DNS servers, using default 8.8.8.8"
         dns="8.8.8.8"
     fi
@@ -96,7 +96,7 @@ detect_hostname() {
     local hostname
     hostname=$(ssh_exec_capture "hostname -s 2>/dev/null || hostname")
 
-    if [[ -z "$hostname" ]]; then
+    if [ -z "$hostname" ]; then
         hostname="alpine"
     fi
 
@@ -126,10 +126,10 @@ detect_dhcp_status() {
     # Check NetworkManager connection type
     local nm_method
     nm_method=$(ssh_exec_capture "nmcli -t -f GENERAL.CONNECTION dev show '$DETECTED_INTERFACE' 2>/dev/null | cut -d: -f2" || true)
-    if [[ -n "$nm_method" ]]; then
+    if [ -n "$nm_method" ]; then
         local conn_method
         conn_method=$(ssh_exec_capture "nmcli -t -f ipv4.method con show '$nm_method' 2>/dev/null | cut -d: -f2" || true)
-        if [[ "$conn_method" == "auto" ]]; then
+        if [ "$conn_method" = "auto" ]; then
             is_dhcp=true
         fi
     fi
@@ -138,13 +138,13 @@ detect_dhcp_status() {
     if ssh_exec_capture "systemctl is-active systemd-networkd >/dev/null 2>&1"; then
         local networkd_dhcp
         networkd_dhcp=$(ssh_exec_capture "grep -l 'DHCP=yes' /etc/systemd/network/*.network 2>/dev/null" || true)
-        if [[ -n "$networkd_dhcp" ]]; then
+        if [ -n "$networkd_dhcp" ]; then
             is_dhcp=true
         fi
     fi
 
     NETWORK_IS_DHCP="$is_dhcp"
-    if [[ "$NETWORK_IS_DHCP" == "true" ]]; then
+    if [ "$NETWORK_IS_DHCP" = "true" ]; then
         log_info "Network type: DHCP"
     else
         log_info "Network type: Static"
@@ -184,7 +184,7 @@ detect_architecture() {
     esac
 
     log_info "Detected architecture: $DETECTED_ARCH"
-    if [[ "$DETECTED_PLATFORM" == "rpi" ]]; then
+    if [ "$DETECTED_PLATFORM" = "rpi" ]; then
         log_info "Detected platform: Raspberry Pi ${DETECTED_RPI_VERSION}"
     fi
 }
@@ -199,28 +199,36 @@ detect_raspberry_pi() {
     model=$(ssh_exec_capture "cat /proc/device-tree/model 2>/dev/null | tr -d '\0'" || true)
 
     # Fallback to cpuinfo
-    if [[ -z "$model" ]]; then
+    if [ -z "$model" ]; then
         model=$(ssh_exec_capture "grep -i 'model' /proc/cpuinfo 2>/dev/null | head -1" || true)
     fi
 
-    if [[ "$model" == *"Raspberry Pi"* ]]; then
-        DETECTED_PLATFORM="rpi"
+    case "$model" in
+        *"Raspberry Pi"*)
+            DETECTED_PLATFORM="rpi"
 
-        # Detect RPi version for kernel selection
-        if [[ "$model" == *"Pi 5"* ]]; then
-            DETECTED_RPI_VERSION="5"
-        elif [[ "$model" == *"Pi 4"* ]] || [[ "$model" == *"Pi 400"* ]]; then
-            DETECTED_RPI_VERSION="4"
-        elif [[ "$model" == *"Pi 3"* ]]; then
-            DETECTED_RPI_VERSION="3"
-        elif [[ "$model" == *"Pi 2"* ]]; then
-            DETECTED_RPI_VERSION="2"
-        else
-            DETECTED_RPI_VERSION="generic"
-        fi
+            # Detect RPi version for kernel selection
+            case "$model" in
+                *"Pi 5"*)
+                    DETECTED_RPI_VERSION="5"
+                    ;;
+                *"Pi 4"*|*"Pi 400"*)
+                    DETECTED_RPI_VERSION="4"
+                    ;;
+                *"Pi 3"*)
+                    DETECTED_RPI_VERSION="3"
+                    ;;
+                *"Pi 2"*)
+                    DETECTED_RPI_VERSION="2"
+                    ;;
+                *)
+                    DETECTED_RPI_VERSION="generic"
+                    ;;
+            esac
 
-        log_debug "Raspberry Pi detected: $model (version: $DETECTED_RPI_VERSION)"
-    fi
+            log_debug "Raspberry Pi detected: $model (version: $DETECTED_RPI_VERSION)"
+            ;;
+    esac
 }
 
 # =============================================================================
@@ -252,7 +260,7 @@ iface lo inet loopback
 auto $DETECTED_INTERFACE
 EOF
 
-    if [[ "$NETWORK_IS_DHCP" == "true" ]]; then
+    if [ "$NETWORK_IS_DHCP" = "true" ]; then
         cat <<EOF
 iface $DETECTED_INTERFACE inet dhcp
 EOF
@@ -275,7 +283,7 @@ generate_resolv_conf() {
 
 # Generate kernel IP parameter
 generate_kernel_ip_param() {
-    if [[ "$NETWORK_IS_DHCP" == "true" ]]; then
+    if [ "$NETWORK_IS_DHCP" = "true" ]; then
         echo "ip=dhcp"
     else
         # Format: ip=<client-ip>:<server-ip>:<gateway>:<netmask>:<hostname>:<device>:<autoconf>
@@ -299,7 +307,7 @@ print_network_summary() {
     echo "Hostname:     $DETECTED_HOSTNAME"
     echo "DHCP:         $NETWORK_IS_DHCP"
     echo "Architecture: $DETECTED_ARCH"
-    if [[ "$DETECTED_PLATFORM" == "rpi" ]]; then
+    if [ "$DETECTED_PLATFORM" = "rpi" ]; then
         echo "Platform:     Raspberry Pi ${DETECTED_RPI_VERSION}"
     fi
     echo ""

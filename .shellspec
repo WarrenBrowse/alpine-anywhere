@@ -1,4 +1,4 @@
---shell bash
+--shell sh
 --require spec_helper
 --pattern "spec/**/*_spec.sh"
 --format documentation

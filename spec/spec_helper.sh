@@ -1,12 +1,12 @@
-#!/bin/bash
+#!/bin/sh
 # spec_helper.sh - ShellSpec test configuration and helpers
 
-# Get the project root directory
-SPEC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SPEC_DIR")"
+# Get the project root directory (use shellspec vars if available)
+SPEC_DIR="${SHELLSPEC_SPECDIR:-$(cd "$(dirname "$0")" && pwd)}"
+PROJECT_ROOT="${SHELLSPEC_PROJECT_ROOT:-$(dirname "$SPEC_DIR")}"
 
 # Source mock functions
-. "$SPEC_DIR/support/mocks.sh"
+. "${SPEC_DIR}/support/mocks.sh"
 
 # Set default test environment variables
 setup_test_env() {
@@ -69,7 +69,7 @@ create_test_work_dir() {
 
 # Helper to cleanup test work directory
 cleanup_test_work_dir() {
-    if [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]]; then
+    if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then
         rm -rf "$WORK_DIR"
     fi
 }

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # upgrade.sh - A/B upgrade management for alpine-anywhere
 #
 # Handles atomic upgrades with automatic rollback support
@@ -16,7 +16,7 @@ MAX_BOOT_ATTEMPTS=3
 
 # Get current boot slot
 get_current_slot() {
-    if [[ -f "${BOOT_MOUNT}/current_slot" ]]; then
+    if [ -f "${BOOT_MOUNT}/current_slot" ]; then
         cat "${BOOT_MOUNT}/current_slot"
     else
         echo "A"
@@ -25,9 +25,8 @@ get_current_slot() {
 
 # Get inactive slot
 get_inactive_slot() {
-    local current
     current=$(get_current_slot)
-    if [[ "$current" == "A" ]]; then
+    if [ "$current" = "A" ]; then
         echo "B"
     else
         echo "A"
@@ -36,28 +35,26 @@ get_inactive_slot() {
 
 # Get slot directory
 get_slot_dir() {
-    local slot="$1"
+    slot="$1"
     echo "${BOOT_MOUNT}/slots/${slot}"
 }
 
 # Read slot metadata
 get_slot_meta() {
-    local slot="$1"
-    local key="$2"
-    local meta_file
+    slot="$1"
+    key="$2"
     meta_file="$(get_slot_dir "$slot")/meta.conf"
 
-    if [[ -f "$meta_file" ]]; then
+    if [ -f "$meta_file" ]; then
         grep "^${key}=" "$meta_file" | cut -d= -f2
     fi
 }
 
 # Update slot metadata
 set_slot_meta() {
-    local slot="$1"
-    local key="$2"
-    local value="$3"
-    local meta_file
+    slot="$1"
+    key="$2"
+    value="$3"
     meta_file="$(get_slot_dir "$slot")/meta.conf"
 
     if grep -q "^${key}=" "$meta_file" 2>/dev/null; then
@@ -73,16 +70,15 @@ set_slot_meta() {
 
 # Download new system image
 download_new_version() {
-    local target_slot="$1"
-    local version="${2:-$ALPINE_VERSION}"
+    target_slot="$1"
+    version="${2:-$ALPINE_VERSION}"
 
     log_step "Downloading Alpine $version..."
 
-    local slot_dir
     slot_dir=$(get_slot_dir "$target_slot")
 
     # Download minirootfs
-    local minirootfs_url="${ALPINE_MIRROR}/v${version}/releases/${DETECTED_ARCH}/alpine-minirootfs-${version}.0-${DETECTED_ARCH}.tar.gz"
+    minirootfs_url="${ALPINE_MIRROR}/v${version}/releases/${DETECTED_ARCH}/alpine-minirootfs-${version}.0-${DETECTED_ARCH}.tar.gz"
 
     log_info "Downloading minirootfs..."
     curl -fSL --progress-bar -o "${INSTALL_CACHE_DIR}/minirootfs-${version}.tar.gz" "$minirootfs_url"
@@ -94,12 +90,11 @@ download_new_version() {
 
 # Install new version to inactive slot
 install_to_slot() {
-    local target_slot="$1"
-    local version="${2:-$ALPINE_VERSION}"
+    target_slot="$1"
+    version="${2:-$ALPINE_VERSION}"
 
     log_step "Installing to slot $target_slot..."
 
-    local slot_dir
     slot_dir=$(get_slot_dir "$target_slot")
 
     # Clear old files
@@ -113,7 +108,7 @@ install_to_slot() {
     mkdir -p "$INSTALL_CACHE_DIR"
 
     # Download if not cached
-    if [[ ! -f "${INSTALL_CACHE_DIR}/minirootfs-${version}.tar.gz" ]]; then
+    if [ ! -f "${INSTALL_CACHE_DIR}/minirootfs-${version}.tar.gz" ]; then
         download_new_version "$target_slot" "$version"
     fi
 
@@ -136,7 +131,7 @@ install_to_slot() {
 
 # Switch to new slot
 switch_slot() {
-    local new_slot="$1"
+    new_slot="$1"
 
     log_step "Switching to slot $new_slot..."
 
@@ -152,20 +147,20 @@ switch_slot() {
 
 # Update bootloader to point to new slot
 update_bootloader_slot() {
-    local slot="$1"
+    slot="$1"
 
     # Update extlinux if present
-    if [[ -f "${BOOT_MOUNT}/extlinux/extlinux.conf" ]]; then
+    if [ -f "${BOOT_MOUNT}/extlinux/extlinux.conf" ]; then
         sed -i "s|/slots/[AB]/|/slots/${slot}/|g" "${BOOT_MOUNT}/extlinux/extlinux.conf"
     fi
 
     # Update cmdline.txt for RPi
-    if [[ -f "${BOOT_MOUNT}/cmdline.txt" ]]; then
+    if [ -f "${BOOT_MOUNT}/cmdline.txt" ]; then
         sed -i "s|/slots/[AB]/|/slots/${slot}/|g" "${BOOT_MOUNT}/cmdline.txt"
     fi
 
     # Update GRUB if present
-    if [[ -f "${BOOT_MOUNT}/bootloader/grub.cfg" ]]; then
+    if [ -f "${BOOT_MOUNT}/bootloader/grub.cfg" ]; then
         echo "set slot=${slot}" > "${BOOT_MOUNT}/current_slot.cfg"
     fi
 }
@@ -176,7 +171,6 @@ update_bootloader_slot() {
 
 # Mark current slot as verified (called after successful boot)
 verify_current_slot() {
-    local current
     current=$(get_current_slot)
 
     set_slot_meta "$current" "VERIFIED" "true"
@@ -185,20 +179,17 @@ verify_current_slot() {
 
 # Increment boot counter (called at boot)
 increment_boot_counter() {
-    local current
     current=$(get_current_slot)
 
-    local count
     count=$(get_slot_meta "$current" "BOOT_COUNT")
     count=$((count + 1))
 
     set_slot_meta "$current" "BOOT_COUNT" "$count"
 
     # Check if we've exceeded max attempts
-    if ((count > MAX_BOOT_ATTEMPTS)); then
-        local verified
+    if [ "$count" -gt "$MAX_BOOT_ATTEMPTS" ]; then
         verified=$(get_slot_meta "$current" "VERIFIED")
-        if [[ "$verified" != "true" ]]; then
+        if [ "$verified" != "true" ]; then
             log_warn "Boot count exceeded, triggering rollback..."
             rollback_slot
         fi
@@ -207,18 +198,15 @@ increment_boot_counter() {
 
 # Rollback to previous slot
 rollback_slot() {
-    local current
     current=$(get_current_slot)
 
-    local previous
     previous=$(get_inactive_slot)
 
     log_warn "Rolling back from $current to $previous..."
 
     # Check if previous slot is valid
-    local prev_version
     prev_version=$(get_slot_meta "$previous" "VERSION")
-    if [[ -z "$prev_version" ]]; then
+    if [ -z "$prev_version" ]; then
         log_error "Cannot rollback: previous slot has no valid version"
         return 1
     fi
@@ -236,27 +224,24 @@ rollback_slot() {
 
 # Run upgrade process
 run_upgrade() {
-    local version="${1:-$ALPINE_VERSION}"
+    version="${1:-$ALPINE_VERSION}"
 
     log_step "Starting upgrade to Alpine $version..."
 
-    local current
     current=$(get_current_slot)
 
-    local target
     target=$(get_inactive_slot)
 
     log_info "Current slot: $current"
     log_info "Target slot: $target"
 
     # Show current version
-    local current_version
     current_version=$(get_slot_meta "$current" "VERSION")
     log_info "Current version: ${current_version:-unknown}"
     log_info "Target version: $version"
 
     # Confirm
-    if [[ "$DRY_RUN" != "true" && "$FORCE" != "true" ]]; then
+    if [ "$DRY_RUN" != "true" ] && [ "$FORCE" != "true" ]; then
         echo ""
         echo "This will:"
         echo "  1. Download Alpine $version"
@@ -268,7 +253,7 @@ run_upgrade() {
         confirm_action "Proceed with upgrade?"
     fi
 
-    if [[ "$DRY_RUN" == "true" ]]; then
+    if [ "$DRY_RUN" = "true" ]; then
         log_info "[DRY-RUN] Would upgrade to $version in slot $target"
         return 0
     fi
@@ -307,17 +292,15 @@ show_status() {
     echo "=========================="
     echo ""
 
-    local current
     current=$(get_current_slot)
     echo "Current slot: $current"
     echo ""
 
     for slot in A B; do
-        local slot_dir
         slot_dir=$(get_slot_dir "$slot")
 
         echo "Slot $slot:"
-        if [[ -f "${slot_dir}/meta.conf" ]]; then
+        if [ -f "${slot_dir}/meta.conf" ]; then
             echo "  Version:    $(get_slot_meta "$slot" "VERSION")"
             echo "  Installed:  $(get_slot_meta "$slot" "INSTALLED")"
             echo "  Boot count: $(get_slot_meta "$slot" "BOOT_COUNT")"
@@ -326,8 +309,7 @@ show_status() {
             echo "  (empty)"
         fi
 
-        if [[ -f "${slot_dir}/system.squashfs" ]]; then
-            local size
+        if [ -f "${slot_dir}/system.squashfs" ]; then
             size=$(du -h "${slot_dir}/system.squashfs" | cut -f1)
             echo "  Image size: $size"
         fi

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Tests for install.sh - A/B installation
 
 Describe 'install.sh'

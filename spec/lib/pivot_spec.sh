@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Tests for pivot.sh - Real pivot_root implementation
 
 Describe 'pivot.sh'

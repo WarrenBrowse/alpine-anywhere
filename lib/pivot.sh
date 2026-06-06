@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # pivot.sh - Real pivot_root implementation for alpine-anywhere
 # Based on techniques from https://github.com/marcan/takeover.sh
 #
@@ -18,7 +18,7 @@ OLD_ROOT="/mnt/oldroot"
 
 # Run command with sudo if not root
 run_privileged() {
-    if [[ $EUID -eq 0 ]]; then
+    if [ "$EUID" -eq 0 ] 2>/dev/null || [ "$(id -u)" -eq 0 ]; then
         "$@"
     else
         sudo "$@"
@@ -39,7 +39,7 @@ detect_init_system() {
             ;;
         init)
             # Could be sysvinit or busybox init
-            if [[ -f /etc/inittab ]]; then
+            if [ -f /etc/inittab ]; then
                 echo "sysvinit"
             else
                 echo "unknown"
@@ -101,7 +101,7 @@ EOF
 
     # SSH package based on mode
     local ssh_pkg="openssh-server"
-    if [[ "$HARDENED_MODE" == "true" ]]; then
+    if [ "$HARDENED_MODE" = "true" ]; then
         ssh_pkg="dropbear dropbear-openrc"
     fi
 
@@ -109,7 +109,7 @@ EOF
     local pivot_pkgs="$ssh_pkg openrc busybox-openrc"
 
     # Add disk tools only for install mode
-    if [[ "$INSTALL_MODE" == "true" ]]; then
+    if [ "$INSTALL_MODE" = "true" ]; then
         pivot_pkgs="$pivot_pkgs bash e2fsprogs dosfstools parted squashfs-tools rsync"
     fi
 
@@ -132,13 +132,13 @@ setup_pivot_ssh() {
     run_privileged chmod 700 "${PIVOT_DIR}/root/.ssh"
 
     # Copy authorized keys
-    if [[ -f "${INSTALL_CACHE_DIR}/${DETECTED_HOSTNAME}.apkovl.tar.gz" ]]; then
+    if [ -f "${INSTALL_CACHE_DIR}/${DETECTED_HOSTNAME}.apkovl.tar.gz" ]; then
         run_privileged tar -xzf "${INSTALL_CACHE_DIR}/${DETECTED_HOSTNAME}.apkovl.tar.gz" \
             -C "${PIVOT_DIR}" ./root/.ssh/authorized_keys 2>/dev/null || true
     fi
 
     # Fallback to current user's keys
-    if [[ ! -s "${PIVOT_DIR}/root/.ssh/authorized_keys" ]]; then
+    if [ ! -s "${PIVOT_DIR}/root/.ssh/authorized_keys" ]; then
         cat ~/.ssh/authorized_keys 2>/dev/null | run_privileged tee -a "${PIVOT_DIR}/root/.ssh/authorized_keys" > /dev/null || true
         run_privileged sh -c "cat /root/.ssh/authorized_keys >> '${PIVOT_DIR}/root/.ssh/authorized_keys' 2>/dev/null" || true
     fi
@@ -147,7 +147,7 @@ setup_pivot_ssh() {
     run_privileged chmod 600 "${PIVOT_DIR}/root/.ssh/authorized_keys" 2>/dev/null || true
 
     # Configure SSH based on mode
-    if [[ "$HARDENED_MODE" == "true" ]]; then
+    if [ "$HARDENED_MODE" = "true" ]; then
         # Dropbear: generate host keys
         run_privileged mkdir -p "${PIVOT_DIR}/etc/dropbear"
         run_privileged chroot "${PIVOT_DIR}" /usr/bin/dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key 2>/dev/null || true
@@ -198,7 +198,7 @@ INSTALL_CACHE_DIR="/root/.alpine-anywhere/cache"
 EOF
 
     # Copy install scripts and cache only for install mode (objective 2/3)
-    if [[ "$INSTALL_MODE" == "true" ]]; then
+    if [ "$INSTALL_MODE" = "true" ]; then
         run_privileged mkdir -p "${PIVOT_DIR}/root/.alpine-anywhere/cache"
         run_privileged cp "${INSTALL_CACHE_DIR}/minirootfs.tar.gz" "${PIVOT_DIR}/root/.alpine-anywhere/cache/" 2>/dev/null || true
         run_privileged cp "${INSTALL_CACHE_DIR}/"*.apkovl.tar.gz "${PIVOT_DIR}/root/.alpine-anywhere/cache/" 2>/dev/null || true
@@ -215,11 +215,21 @@ EOF
     # This script replaces the real init/systemd binary via bind mount.
     # When systemd re-execs (telinit u), it loads THIS instead of the real binary.
     # It runs as PID 1, so it can do pivot_root and unmount the old root.
-    # Uses #!/bin/bash from the OLD root (still available at this point).
+    #
+    # NOTE: This shebang MUST remain #!/bin/bash (not #!/bin/sh) because fakeinit
+    # runs on the OLD system before pivot_root occurs. At that point, bash is
+    # available from the old root filesystem, and the fakeinit needs bash features
+    # (or at minimum, the known bash binary path) to function correctly as PID 1
+    # during the transition. After pivot_root completes, the old root is unmounted.
     run_privileged tee "${PIVOT_DIR}/sbin/fakeinit" > /dev/null << 'FAKEINIT'
 #!/bin/bash
 # fakeinit - Runs as PID 1 after systemd re-execs
 # Based on marcan/takeover.sh technique
+#
+# This script intentionally uses #!/bin/bash because it executes on the OLD
+# system (before pivot_root) where bash is the known-available shell from the
+# original root filesystem. It must use bash to function as PID 1 during the
+# transition period.
 
 PIVOT_DIR="/mnt/alpine"
 OLD_ROOT="/mnt/oldroot"
@@ -378,7 +388,7 @@ pivot_systemd() {
     systemd_bin=$(run_privileged readlink -f /proc/1/exe)
     log_info "Real systemd binary: ${systemd_bin}"
 
-    if [[ -z "$systemd_bin" || ! -f "$systemd_bin" ]]; then
+    if [ -z "$systemd_bin" ] || [ ! -f "$systemd_bin" ]; then
         log_error "Cannot find systemd binary, falling back to direct approach"
         pivot_direct
         return
@@ -444,7 +454,7 @@ pivot_direct() {
     run_privileged mount --bind /dev "${PIVOT_DIR}/dev" 2>/dev/null || true
 
     # Start SSH on port 2222 in chroot
-    if [[ "$HARDENED_MODE" == "true" ]]; then
+    if [ "$HARDENED_MODE" = "true" ]; then
         run_privileged chroot "${PIVOT_DIR}" /usr/sbin/dropbear -R -p 2222 2>/dev/null || true
     else
         run_privileged chroot "${PIVOT_DIR}" /bin/mkdir -p /run/sshd 2>/dev/null || true
@@ -496,7 +506,7 @@ run_pivot_install() {
     log_step "Starting pivot installation..."
 
     # Ensure we have minirootfs
-    if [[ ! -f "${INSTALL_CACHE_DIR}/minirootfs.tar.gz" ]]; then
+    if [ ! -f "${INSTALL_CACHE_DIR}/minirootfs.tar.gz" ]; then
         download_minirootfs
     fi
 

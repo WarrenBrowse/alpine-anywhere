@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # download_spec.sh - Tests for lib/download.sh
 
 Describe 'download.sh'
@@ -89,11 +89,12 @@ Describe 'download.sh'
 
     Describe 'FALLBACK_MIRRORS'
         It 'contains the main CDN'
-            The value "${FALLBACK_MIRRORS[0]}" should equal 'https://dl-cdn.alpinelinux.org/alpine'
+            The value "$FALLBACK_MIRRORS" should include 'https://dl-cdn.alpinelinux.org/alpine'
         End
 
         It 'contains at least 4 fallback mirrors'
-            The value "${#FALLBACK_MIRRORS[@]}" should equal 4
+            count() { set -- $FALLBACK_MIRRORS; echo $#; }
+            The result of 'count()' should equal 4
         End
     End
 End

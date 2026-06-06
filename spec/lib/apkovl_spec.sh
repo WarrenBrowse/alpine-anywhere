@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # apkovl_spec.sh - Tests for lib/apkovl.sh
 
 Describe 'apkovl.sh'

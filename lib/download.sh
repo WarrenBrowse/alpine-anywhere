@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # download.sh - Alpine CDN download functions for alpine-anywhere
 
 # =============================================================================
@@ -12,8 +12,7 @@ build_alpine_base_url() {
 
 # Build URL for a specific file
 build_alpine_file_url() {
-    local file_type="$1"
-    local base_url
+    file_type="$1"
     base_url=$(build_alpine_base_url)
 
     case "$file_type" in
@@ -38,14 +37,13 @@ build_alpine_file_url() {
 
 # Download a file with progress indication
 download_file() {
-    local url="$1"
-    local dest="$2"
-    local filename
+    url="$1"
+    dest="$2"
     filename=$(basename "$dest")
 
     log_debug "Downloading: $url -> $dest"
 
-    if [[ "$DRY_RUN" == "true" ]]; then
+    if [ "$DRY_RUN" = "true" ]; then
         echo "[DRY-RUN] curl -fsSL -o '$dest' '$url'"
         return 0
     fi
@@ -61,23 +59,20 @@ download_file() {
 download_alpine_files() {
     log_step "Downloading Alpine Linux files..."
 
-    local download_dir="${WORK_DIR}/alpine"
+    download_dir="${WORK_DIR}/alpine"
     mkdir -p "$download_dir"
 
     # Download vmlinuz
-    local vmlinuz_url
     vmlinuz_url=$(build_alpine_file_url vmlinuz)
     log_info "Downloading vmlinuz-${KERNEL_FLAVOR}..."
     download_file "$vmlinuz_url" "${download_dir}/vmlinuz"
 
     # Download initramfs
-    local initramfs_url
     initramfs_url=$(build_alpine_file_url initramfs)
     log_info "Downloading initramfs-${KERNEL_FLAVOR}..."
     download_file "$initramfs_url" "${download_dir}/initramfs"
 
     # Download modloop
-    local modloop_url
     modloop_url=$(build_alpine_file_url modloop)
     log_info "Downloading modloop-${KERNEL_FLAVOR}..."
     download_file "$modloop_url" "${download_dir}/modloop"
@@ -94,20 +89,19 @@ verify_downloads() {
     log_step "Verifying downloaded files..."
 
     # Skip verification in dry-run mode
-    if [[ "$DRY_RUN" == "true" ]]; then
+    if [ "$DRY_RUN" = "true" ]; then
         log_info "File verification skipped (dry-run mode)"
         return 0
     fi
 
-    local download_dir="${WORK_DIR}/alpine"
-    local files=("vmlinuz" "initramfs" "modloop")
+    download_dir="${WORK_DIR}/alpine"
 
-    for file in "${files[@]}"; do
-        local path="${download_dir}/${file}"
-        if [[ ! -f "$path" ]]; then
+    for file in vmlinuz initramfs modloop; do
+        path="${download_dir}/${file}"
+        if [ ! -f "$path" ]; then
             die "Missing file: $path"
         fi
-        if [[ ! -s "$path" ]]; then
+        if [ ! -s "$path" ]; then
             die "Empty file: $path"
         fi
         log_debug "Verified: $file ($(du -h "$path" | cut -f1))"
@@ -120,18 +114,13 @@ verify_downloads() {
 # Mirror Functions
 # =============================================================================
 
-# List of fallback mirrors
-FALLBACK_MIRRORS=(
-    "https://dl-cdn.alpinelinux.org/alpine"
-    "https://uk.alpinelinux.org/alpine"
-    "https://nl.alpinelinux.org/alpine"
-    "https://ftp.halifax.rwth-aachen.de/alpine"
-)
+# List of fallback mirrors (space-separated string)
+FALLBACK_MIRRORS="https://dl-cdn.alpinelinux.org/alpine https://uk.alpinelinux.org/alpine https://nl.alpinelinux.org/alpine https://ftp.halifax.rwth-aachen.de/alpine"
 
 # Test if a mirror is accessible
 test_mirror() {
-    local mirror="$1"
-    local test_url="${mirror}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/"
+    mirror="$1"
+    test_url="${mirror}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/"
 
     log_debug "Testing mirror: $mirror"
 
@@ -153,7 +142,7 @@ find_working_mirror() {
 
     log_warn "Configured mirror not available, trying fallbacks..."
 
-    for mirror in "${FALLBACK_MIRRORS[@]}"; do
+    for mirror in $FALLBACK_MIRRORS; do
         if test_mirror "$mirror"; then
             ALPINE_MIRROR="$mirror"
             log_info "Using fallback mirror: $ALPINE_MIRROR"

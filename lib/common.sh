@@ -1,7 +1,7 @@
-#!/bin/bash
+#!/bin/sh
 # common.sh - Utilities, logging, and argument parsing for alpine-anywhere
 
-set -euo pipefail
+set -eu
 
 # =============================================================================
 # Global Variables with Defaults
@@ -53,7 +53,7 @@ NETWORK_IS_DHCP=false
 # Color Definitions
 # =============================================================================
 
-if [[ -t 1 ]]; then
+if [ -t 1 ]; then
     RED='\033[0;31m'
     GREEN='\033[0;32m'
     YELLOW='\033[0;33m'
@@ -74,25 +74,25 @@ fi
 # =============================================================================
 
 log_info() {
-    echo -e "${GREEN}[INFO]${NC} $*" >&2
+    printf '%b[INFO]%b %s\n' "$GREEN" "$NC" "$*" >&2
 }
 
 log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $*" >&2
+    printf '%b[WARN]%b %s\n' "$YELLOW" "$NC" "$*" >&2
 }
 
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $*" >&2
+    printf '%b[ERROR]%b %s\n' "$RED" "$NC" "$*" >&2
 }
 
 log_debug() {
-    if [[ "$VERBOSE" == "true" ]]; then
-        echo -e "${BLUE}[DEBUG]${NC} $*" >&2
+    if [ "$VERBOSE" = "true" ]; then
+        printf '%b[DEBUG]%b %s\n' "$BLUE" "$NC" "$*" >&2
     fi
 }
 
 log_step() {
-    echo -e "${BOLD}==>${NC} $*" >&2
+    printf '%b==>%b %s\n' "$BOLD" "$NC" "$*" >&2
 }
 
 die() {
@@ -120,11 +120,11 @@ cleanup() {
     local exit_code=$?
 
     # Close SSH multiplexing if function exists
-    if type close_ssh_multiplexing &>/dev/null; then
+    if type close_ssh_multiplexing >/dev/null 2>&1; then
         close_ssh_multiplexing
     fi
 
-    if [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]]; then
+    if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then
         log_debug "Cleaning up work directory: $WORK_DIR"
         rm -rf "$WORK_DIR"
     fi
@@ -142,18 +142,20 @@ cidr_to_netmask() {
     local mask=""
     local full_octets=$((cidr / 8))
     local partial_octet=$((cidr % 8))
+    local i=0
 
-    for ((i = 0; i < 4; i++)); do
-        if ((i < full_octets)); then
-            mask+="255"
-        elif ((i == full_octets)); then
-            mask+="$((256 - (1 << (8 - partial_octet))))"
+    while [ "$i" -lt 4 ]; do
+        if [ "$i" -lt "$full_octets" ]; then
+            mask="${mask}255"
+        elif [ "$i" -eq "$full_octets" ]; then
+            mask="${mask}$((256 - (1 << (8 - partial_octet))))"
         else
-            mask+="0"
+            mask="${mask}0"
         fi
-        if ((i < 3)); then
-            mask+="."
+        if [ "$i" -lt 3 ]; then
+            mask="${mask}."
         fi
+        i=$((i + 1))
     done
 
     echo "$mask"
@@ -186,17 +188,30 @@ netmask_to_cidr() {
 # Validate IP address format
 is_valid_ip() {
     local ip=$1
-    local IFS='.'
-    local -a octets
+    local oIFS="$IFS"
+    local count=0
+    local octet
 
-    read -ra octets <<< "$ip"
-
-    [[ ${#octets[@]} -eq 4 ]] || return 1
-
-    for octet in "${octets[@]}"; do
-        [[ "$octet" =~ ^[0-9]+$ ]] || return 1
-        ((octet >= 0 && octet <= 255)) || return 1
+    IFS='.'
+    for octet in $ip; do
+        count=$((count + 1))
     done
+    IFS="$oIFS"
+
+    [ "$count" -eq 4 ] || return 1
+
+    IFS='.'
+    for octet in $ip; do
+        # Check that octet is numeric
+        case "$octet" in
+            ''|*[!0-9]*) IFS="$oIFS"; return 1 ;;
+        esac
+        if [ "$octet" -lt 0 ] || [ "$octet" -gt 255 ]; then
+            IFS="$oIFS"
+            return 1
+        fi
+    done
+    IFS="$oIFS"
 
     return 0
 }
@@ -205,13 +220,16 @@ is_valid_ip() {
 parse_target() {
     local target=$1
 
-    if [[ "$target" =~ ^([^@]+)@(.+)$ ]]; then
-        TARGET_USER="${BASH_REMATCH[1]}"
-        TARGET_HOST="${BASH_REMATCH[2]}"
-    else
-        TARGET_USER="root"
-        TARGET_HOST="$target"
-    fi
+    case "$target" in
+        *@*)
+            TARGET_USER="${target%%@*}"
+            TARGET_HOST="${target#*@}"
+            ;;
+        *)
+            TARGET_USER="root"
+            TARGET_HOST="$target"
+            ;;
+    esac
 
     log_debug "Target user: $TARGET_USER, host: $TARGET_HOST"
 }
@@ -281,9 +299,11 @@ EOF
 }
 
 parse_arguments() {
-    local positional=()
+    local pos_count=0
+    local pos_0=""
+    local pos_1=""
 
-    while [[ $# -gt 0 ]]; do
+    while [ $# -gt 0 ]; do
         case $1 in
             -V|--alpine-version)
                 ALPINE_VERSION="$2"
@@ -295,7 +315,7 @@ parse_arguments() {
                 ;;
             -k|--kernel)
                 KERNEL_FLAVOR="$2"
-                if [[ "$KERNEL_FLAVOR" != "lts" && "$KERNEL_FLAVOR" != "virt" ]]; then
+                if [ "$KERNEL_FLAVOR" != "lts" ] && [ "$KERNEL_FLAVOR" != "virt" ]; then
                     die "Invalid kernel flavor: $KERNEL_FLAVOR (must be 'lts' or 'virt')"
                 fi
                 shift 2
@@ -306,7 +326,7 @@ parse_arguments() {
                 ;;
             -i|--identity)
                 SSH_IDENTITY="$2"
-                if [[ ! -f "$SSH_IDENTITY" ]]; then
+                if [ ! -f "$SSH_IDENTITY" ]; then
                     die "SSH identity file not found: $SSH_IDENTITY"
                 fi
                 shift 2
@@ -333,14 +353,14 @@ parse_arguments() {
                 ;;
             --method)
                 INSTALL_METHOD="$2"
-                if [[ "$INSTALL_METHOD" != "auto" && "$INSTALL_METHOD" != "kexec" && "$INSTALL_METHOD" != "takeover" ]]; then
+                if [ "$INSTALL_METHOD" != "auto" ] && [ "$INSTALL_METHOD" != "kexec" ] && [ "$INSTALL_METHOD" != "takeover" ]; then
                     die "Invalid method: $INSTALL_METHOD (must be 'auto', 'kexec', or 'takeover')"
                 fi
                 shift 2
                 ;;
             --method=*)
                 INSTALL_METHOD="${1#*=}"
-                if [[ "$INSTALL_METHOD" != "auto" && "$INSTALL_METHOD" != "kexec" && "$INSTALL_METHOD" != "takeover" ]]; then
+                if [ "$INSTALL_METHOD" != "auto" ] && [ "$INSTALL_METHOD" != "kexec" ] && [ "$INSTALL_METHOD" != "takeover" ]; then
                     die "Invalid method: $INSTALL_METHOD (must be 'auto', 'kexec', or 'takeover')"
                 fi
                 shift
@@ -387,22 +407,27 @@ parse_arguments() {
                 die "Unknown option: $1"
                 ;;
             *)
-                positional+=("$1")
+                if [ "$pos_count" -eq 0 ]; then
+                    pos_0="$1"
+                elif [ "$pos_count" -eq 1 ]; then
+                    pos_1="$1"
+                fi
+                pos_count=$((pos_count + 1))
                 shift
                 ;;
         esac
     done
 
-    if [[ ${#positional[@]} -eq 0 ]]; then
-        if [[ "$LOCAL_MODE" != "true" ]]; then
+    if [ "$pos_count" -eq 0 ]; then
+        if [ "$LOCAL_MODE" != "true" ]; then
             show_usage
             die "Missing target host (use --local for local installation)"
         fi
         # Local mode - target is localhost
         TARGET_USER="root"
         TARGET_HOST="localhost"
-    elif [[ ${#positional[@]} -eq 1 ]]; then
-        parse_target "${positional[0]}"
+    elif [ "$pos_count" -eq 1 ]; then
+        parse_target "$pos_0"
     else
         die "Too many arguments"
     fi
@@ -415,16 +440,16 @@ parse_arguments() {
 confirm_action() {
     local message=$1
 
-    if [[ "$FORCE" == "true" ]]; then
+    if [ "$FORCE" = "true" ]; then
         return 0
     fi
 
-    if [[ "$DRY_RUN" == "true" ]]; then
+    if [ "$DRY_RUN" = "true" ]; then
         return 0
     fi
 
-    echo -e "${YELLOW}WARNING:${NC} $message" >&2
-    echo -n "Continue? [y/N] " >&2
+    printf '%bWARNING:%b %s\n' "$YELLOW" "$NC" "$message" >&2
+    printf 'Continue? [y/N] ' >&2
     read -r response
 
     case "$response" in

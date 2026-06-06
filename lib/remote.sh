@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # remote.sh - Remote script generation for alpine-anywhere
 
 # Remote paths (detected)
@@ -26,17 +26,17 @@ download_alpine_netboot_files() {
     ssh_exec "echo '' >> ${REMOTE_WORK_DIR}/install.log"
 
     # Download with logging
-    ssh_exec "echo '[$(date -Iseconds)] Downloading vmlinuz-${KERNEL_FLAVOR}...' >> ${REMOTE_WORK_DIR}/install.log"
+    ssh_exec "echo '['\"$(date -Iseconds)\"'] Downloading vmlinuz-${KERNEL_FLAVOR}...' >> ${REMOTE_WORK_DIR}/install.log"
     ssh_exec "cd ${REMOTE_WORK_DIR} && curl -fSL --progress-bar -o vmlinuz '${base_url}/vmlinuz-${KERNEL_FLAVOR}' 2>&1 | tee -a install.log"
-    ssh_exec "echo '[$(date -Iseconds)] vmlinuz download complete' >> ${REMOTE_WORK_DIR}/install.log"
+    ssh_exec "echo '['\"$(date -Iseconds)\"'] vmlinuz download complete' >> ${REMOTE_WORK_DIR}/install.log"
 
-    ssh_exec "echo '[$(date -Iseconds)] Downloading initramfs-${KERNEL_FLAVOR}...' >> ${REMOTE_WORK_DIR}/install.log"
+    ssh_exec "echo '['\"$(date -Iseconds)\"'] Downloading initramfs-${KERNEL_FLAVOR}...' >> ${REMOTE_WORK_DIR}/install.log"
     ssh_exec "cd ${REMOTE_WORK_DIR} && curl -fSL --progress-bar -o initramfs '${base_url}/initramfs-${KERNEL_FLAVOR}' 2>&1 | tee -a install.log"
-    ssh_exec "echo '[$(date -Iseconds)] initramfs download complete' >> ${REMOTE_WORK_DIR}/install.log"
+    ssh_exec "echo '['\"$(date -Iseconds)\"'] initramfs download complete' >> ${REMOTE_WORK_DIR}/install.log"
 
-    ssh_exec "echo '[$(date -Iseconds)] Downloading modloop-${KERNEL_FLAVOR}...' >> ${REMOTE_WORK_DIR}/install.log"
+    ssh_exec "echo '['\"$(date -Iseconds)\"'] Downloading modloop-${KERNEL_FLAVOR}...' >> ${REMOTE_WORK_DIR}/install.log"
     ssh_exec "cd ${REMOTE_WORK_DIR} && curl -fSL --progress-bar -o modloop '${base_url}/modloop-${KERNEL_FLAVOR}' 2>&1 | tee -a install.log"
-    ssh_exec "echo '[$(date -Iseconds)] modloop download complete' >> ${REMOTE_WORK_DIR}/install.log"
+    ssh_exec "echo '['\"$(date -Iseconds)\"'] modloop download complete' >> ${REMOTE_WORK_DIR}/install.log"
 }
 
 # Download Raspberry Pi specific files
@@ -45,7 +45,7 @@ download_alpine_rpi_files() {
 
     # Determine kernel suffix based on RPi version
     local kernel_suffix="rpi"
-    if [[ "$DETECTED_RPI_VERSION" == "4" ]] || [[ "$DETECTED_RPI_VERSION" == "5" ]]; then
+    if [ "$DETECTED_RPI_VERSION" = "4" ] || [ "$DETECTED_RPI_VERSION" = "5" ]; then
         kernel_suffix="rpi4"
     fi
 
@@ -61,11 +61,11 @@ download_alpine_rpi_files() {
 
     # Find the tarball name from the releases page
     log_info "Finding latest alpine-rpi tarball..."
-    ssh_exec "echo '[$(date -Iseconds)] Finding latest alpine-rpi tarball...' >> ${REMOTE_WORK_DIR}/install.log"
+    ssh_exec "echo '['\"$(date -Iseconds)\"'] Finding latest alpine-rpi tarball...' >> ${REMOTE_WORK_DIR}/install.log"
 
     tarball_name=$(ssh_exec_capture "curl -fsSL '${releases_url}/' 2>/dev/null | grep -oE 'alpine-rpi-[0-9.]+-aarch64\\.tar\\.gz' | head -1")
 
-    if [[ -z "$tarball_name" ]]; then
+    if [ -z "$tarball_name" ]; then
         # Fallback to constructed name
         tarball_name="alpine-rpi-${ALPINE_VERSION}.0-aarch64.tar.gz"
         log_warn "Could not find tarball, trying: $tarball_name"
@@ -77,13 +77,13 @@ download_alpine_rpi_files() {
     log_info "Downloading $tarball_name..."
 
     # Download tarball
-    ssh_exec "echo '[$(date -Iseconds)] Downloading ${tarball_name}...' >> ${REMOTE_WORK_DIR}/install.log"
+    ssh_exec "echo '['\"$(date -Iseconds)\"'] Downloading ${tarball_name}...' >> ${REMOTE_WORK_DIR}/install.log"
     ssh_exec "cd ${REMOTE_WORK_DIR} && curl -fSL --progress-bar -o alpine-rpi.tar.gz '${tarball_url}' 2>&1 | tee -a install.log"
-    ssh_exec "echo '[$(date -Iseconds)] Tarball download complete' >> ${REMOTE_WORK_DIR}/install.log"
+    ssh_exec "echo '['\"$(date -Iseconds)\"'] Tarball download complete' >> ${REMOTE_WORK_DIR}/install.log"
 
     # Extract required files
     log_info "Extracting kernel files..."
-    ssh_exec "echo '[$(date -Iseconds)] Extracting kernel files...' >> ${REMOTE_WORK_DIR}/install.log"
+    ssh_exec "echo '['\"$(date -Iseconds)\"'] Extracting kernel files...' >> ${REMOTE_WORK_DIR}/install.log"
 
     # List contents to log for debugging
     ssh_exec "echo '--- Tarball contents (boot/) ---' >> ${REMOTE_WORK_DIR}/install.log"
@@ -94,7 +94,7 @@ download_alpine_rpi_files() {
     ssh_exec "cd ${REMOTE_WORK_DIR} && tar -xzf alpine-rpi.tar.gz ./boot/ 2>&1 | tee -a install.log"
 
     # Find and copy the right kernel
-    ssh_exec "echo '[$(date -Iseconds)] Selecting kernel files...' >> ${REMOTE_WORK_DIR}/install.log"
+    ssh_exec "echo '['\"$(date -Iseconds)\"'] Selecting kernel files...' >> ${REMOTE_WORK_DIR}/install.log"
 
     # Try kernel suffix (rpi4 for Pi 4/5, rpi for older)
     local vmlinuz_found=false
@@ -109,7 +109,7 @@ download_alpine_rpi_files() {
     fi
 
     # Fallback to generic rpi if specific not found
-    if [[ "$vmlinuz_found" != "true" ]] && ssh_exec_capture "test -f ${REMOTE_WORK_DIR}/boot/vmlinuz-rpi" >/dev/null 2>&1; then
+    if [ "$vmlinuz_found" != "true" ] && ssh_exec_capture "test -f ${REMOTE_WORK_DIR}/boot/vmlinuz-rpi" >/dev/null 2>&1; then
         ssh_exec "cp ${REMOTE_WORK_DIR}/boot/vmlinuz-rpi ${REMOTE_WORK_DIR}/vmlinuz"
         ssh_exec "cp ${REMOTE_WORK_DIR}/boot/initramfs-rpi ${REMOTE_WORK_DIR}/initramfs"
         ssh_exec "echo 'Using kernel: vmlinuz-rpi (fallback)' >> ${REMOTE_WORK_DIR}/install.log"
@@ -117,7 +117,7 @@ download_alpine_rpi_files() {
         used_suffix="rpi"
     fi
 
-    if [[ "$vmlinuz_found" != "true" ]]; then
+    if [ "$vmlinuz_found" != "true" ]; then
         # List available kernels for debugging
         ssh_exec "echo 'ERROR: No suitable kernel found!' >> ${REMOTE_WORK_DIR}/install.log"
         ssh_exec "echo 'Available files:' >> ${REMOTE_WORK_DIR}/install.log"
@@ -140,7 +140,7 @@ download_alpine_rpi_files() {
 
     # Cleanup extracted files
     ssh_exec "rm -rf ${REMOTE_WORK_DIR}/boot ${REMOTE_WORK_DIR}/alpine-rpi.tar.gz"
-    ssh_exec "echo '[$(date -Iseconds)] Cleanup complete' >> ${REMOTE_WORK_DIR}/install.log"
+    ssh_exec "echo '['\"$(date -Iseconds)\"'] Cleanup complete' >> ${REMOTE_WORK_DIR}/install.log"
 }
 
 # =============================================================================
@@ -193,9 +193,9 @@ LOGHEADER"
 
     # Transfer apkovl (contains custom network/SSH config)
     log_info "Transferring apkovl..."
-    ssh_exec "echo '[$(date -Iseconds)] Transferring apkovl: ${apkovl_name}' >> ${REMOTE_WORK_DIR}/install.log"
+    ssh_exec "echo '['\"$(date -Iseconds)\"'] Transferring apkovl: ${apkovl_name}' >> ${REMOTE_WORK_DIR}/install.log"
     scp_to_remote "$apkovl_file" "${REMOTE_WORK_DIR}/"
-    ssh_exec "echo '[$(date -Iseconds)] apkovl transferred successfully' >> ${REMOTE_WORK_DIR}/install.log"
+    ssh_exec "echo '['\"$(date -Iseconds)\"'] apkovl transferred successfully' >> ${REMOTE_WORK_DIR}/install.log"
 
     # Download Alpine files directly on remote
     log_info "Downloading Alpine files on remote host..."
@@ -204,7 +204,7 @@ LOGHEADER"
     ssh_exec "echo '--- Download ---' >> ${REMOTE_WORK_DIR}/install.log"
     ssh_exec "echo 'Platform: ${DETECTED_PLATFORM}' >> ${REMOTE_WORK_DIR}/install.log"
 
-    if [[ "$DETECTED_PLATFORM" == "rpi" ]]; then
+    if [ "$DETECTED_PLATFORM" = "rpi" ]; then
         download_alpine_rpi_files
     else
         download_alpine_netboot_files
@@ -223,14 +223,14 @@ LOGHEADER"
     # Generate kexec script
     log_info "Generating kexec.sh script..."
     ssh_exec "echo '' >> ${REMOTE_WORK_DIR}/install.log"
-    ssh_exec "echo '[$(date -Iseconds)] Generating kexec.sh script' >> ${REMOTE_WORK_DIR}/install.log"
+    ssh_exec "echo '['\"$(date -Iseconds)\"'] Generating kexec.sh script' >> ${REMOTE_WORK_DIR}/install.log"
     generate_and_install_kexec_script "$apkovl_name"
-    ssh_exec "echo '[$(date -Iseconds)] kexec.sh generated' >> ${REMOTE_WORK_DIR}/install.log"
+    ssh_exec "echo '['\"$(date -Iseconds)\"'] kexec.sh generated' >> ${REMOTE_WORK_DIR}/install.log"
 
     # Final log entry
     ssh_exec "echo '' >> ${REMOTE_WORK_DIR}/install.log"
     ssh_exec "echo '=================================================================================' >> ${REMOTE_WORK_DIR}/install.log"
-    ssh_exec "echo '[$(date -Iseconds)] Installation complete' >> ${REMOTE_WORK_DIR}/install.log"
+    ssh_exec "echo '['\"$(date -Iseconds)\"'] Installation complete' >> ${REMOTE_WORK_DIR}/install.log"
     ssh_exec "echo '=================================================================================' >> ${REMOTE_WORK_DIR}/install.log"
     ssh_exec "echo '' >> ${REMOTE_WORK_DIR}/install.log"
     ssh_exec "echo 'To boot into Alpine Linux:' >> ${REMOTE_WORK_DIR}/install.log"
@@ -253,13 +253,14 @@ generate_and_install_kexec_script() {
 
     # Generate script content
     local platform_info="${DETECTED_ARCH}"
-    if [[ "$DETECTED_PLATFORM" == "rpi" ]]; then
+    if [ "$DETECTED_PLATFORM" = "rpi" ]; then
         platform_info="Raspberry Pi ${DETECTED_RPI_VERSION} (${DETECTED_ARCH})"
     fi
 
-    local script_content
-    read -r -d '' script_content << KEXECSCRIPT || true
-#!/bin/bash
+    # Write kexec script to local temp, then scp to remote
+    local kexec_script="${WORK_DIR}/kexec.sh"
+    cat > "$kexec_script" << KEXECSCRIPT
+#!/bin/sh
 # alpine-anywhere kexec launcher
 # Generated: $(date -Iseconds)
 # Target: ${DETECTED_HOSTNAME}
@@ -268,7 +269,7 @@ generate_and_install_kexec_script() {
 #
 # Usage: sudo ./kexec.sh [--dry-run] [--debug] [--info]
 
-set -euo pipefail
+set -eu
 
 WORK_DIR="${REMOTE_WORK_DIR}"
 LOG_FILE="\${WORK_DIR}/kexec.log"
@@ -308,7 +309,7 @@ log_error() {
 }
 
 debug() {
-    if [[ "\$DEBUG" == "true" ]]; then
+    if [ "\$DEBUG" = "true" ]; then
         echo "[\$(date '+%Y-%m-%d %H:%M:%S')] DEBUG: \$*" | tee -a "\$LOG_FILE"
     fi
 }
@@ -322,11 +323,11 @@ run_cmd() {
     local exit_code=0
     output=\$("\$@" 2>&1) || exit_code=\$?
 
-    if [[ -n "\$output" ]]; then
+    if [ -n "\$output" ]; then
         echo "\$output" | tee -a "\$LOG_FILE"
     fi
 
-    if [[ \$exit_code -ne 0 ]]; then
+    if [ "\$exit_code" -ne 0 ]; then
         log_error "Command failed with exit code \$exit_code: \$cmd"
         return \$exit_code
     fi
@@ -344,7 +345,7 @@ log "Platform: ${platform_info}"
 show_file_info() {
     log "--- File Information ---"
     for f in vmlinuz initramfs modloop ${apkovl_name}; do
-        if [[ -f "\$f" ]]; then
+        if [ -f "\$f" ]; then
             local size=\$(ls -lh "\$f" | awk '{print \$5}')
             local ftype=\$(file -b "\$f" 2>/dev/null || echo "unknown")
             log "  \$f: \$size (\$ftype)"
@@ -359,13 +360,13 @@ show_file_info() {
 log "Verifying files..."
 MISSING_FILES=false
 for f in vmlinuz initramfs modloop ${apkovl_name}; do
-    if [[ ! -f "\$f" ]]; then
+    if [ ! -f "\$f" ]; then
         log_error "Missing file: \$f"
         MISSING_FILES=true
     fi
 done
 
-if [[ "\$MISSING_FILES" == "true" ]]; then
+if [ "\$MISSING_FILES" = "true" ]; then
     log_error "Some required files are missing. Aborting."
     exit 1
 fi
@@ -373,11 +374,11 @@ fi
 log "All files present"
 
 # Always show file info in debug mode or if requested
-if [[ "\$DEBUG" == "true" ]] || [[ "\$INFO_ONLY" == "true" ]]; then
+if [ "\$DEBUG" = "true" ] || [ "\$INFO_ONLY" = "true" ]; then
     show_file_info
 fi
 
-if [[ "\$INFO_ONLY" == "true" ]]; then
+if [ "\$INFO_ONLY" = "true" ]; then
     log "Info mode - exiting without kexec"
     exit 0
 fi
@@ -398,7 +399,7 @@ case "\$KERNEL_TYPE" in
         VALID_KERNEL=true
         log "Kernel format: EFI stub kernel"
         # EFI kernels may need special handling on some systems
-        if [[ -f /sys/firmware/efi ]]; then
+        if [ -f /sys/firmware/efi ]; then
             debug "System booted in EFI mode"
         fi
         ;;
@@ -412,7 +413,7 @@ case "\$KERNEL_TYPE" in
         ;;
 esac
 
-if [[ "\$VALID_KERNEL" != "true" ]]; then
+if [ "\$VALID_KERNEL" != "true" ]; then
     log_error "Kernel validation failed. Check if correct platform (${platform_info})."
     exit 1
 fi
@@ -422,14 +423,14 @@ CMDLINE="${cmdline}"
 log "Kernel command line:"
 log "  \$CMDLINE"
 
-if [[ "\$DRY_RUN" == "true" ]]; then
+if [ "\$DRY_RUN" = "true" ]; then
     log "[DRY-RUN] Would execute:"
     log "[DRY-RUN]   kexec -l \$WORK_DIR/vmlinuz --initrd=\$WORK_DIR/initramfs --command-line=\"\$CMDLINE\""
     log "[DRY-RUN]   kexec -e"
     exit 0
 fi
 
-if [[ \$EUID -ne 0 ]]; then
+if [ "\$(id -u)" -ne 0 ]; then
     log_error "Must run as root (use sudo)"
     exit 1
 fi
@@ -437,14 +438,14 @@ fi
 # Check if kexec is available
 KEXEC_BIN=""
 for kexec_path in /sbin/kexec /usr/sbin/kexec; do
-    if [[ -x "\$kexec_path" ]]; then
+    if [ -x "\$kexec_path" ]; then
         KEXEC_BIN="\$kexec_path"
         break
     fi
 done
 
-if [[ -z "\$KEXEC_BIN" ]]; then
-    if command -v kexec &>/dev/null; then
+if [ -z "\$KEXEC_BIN" ]; then
+    if command -v kexec >/dev/null 2>&1; then
         KEXEC_BIN=\$(command -v kexec)
     else
         log_error "kexec not found. Install kexec-tools."
@@ -456,9 +457,9 @@ log "Using kexec: \$KEXEC_BIN"
 debug "kexec version: \$(\$KEXEC_BIN --version 2>&1 || echo 'unknown')"
 
 # Check if kexec is enabled in kernel
-if [[ -f /proc/sys/kernel/kexec_load_disabled ]]; then
+if [ -f /proc/sys/kernel/kexec_load_disabled ]; then
     KEXEC_DISABLED=\$(cat /proc/sys/kernel/kexec_load_disabled)
-    if [[ "\$KEXEC_DISABLED" == "1" ]]; then
+    if [ "\$KEXEC_DISABLED" = "1" ]; then
         log_error "kexec is disabled in kernel (kexec_load_disabled=1)"
         log_error "This may be due to Secure Boot. Try disabling Secure Boot in BIOS."
         exit 1
@@ -467,17 +468,17 @@ fi
 
 # Check if kernel has kexec support compiled in
 KEXEC_SUPPORTED=true
-if [[ -f /proc/config.gz ]]; then
+if [ -f /proc/config.gz ]; then
     if ! zcat /proc/config.gz 2>/dev/null | grep -q "CONFIG_KEXEC=y"; then
         KEXEC_SUPPORTED=false
     fi
-elif [[ -f /boot/config-\$(uname -r) ]]; then
+elif [ -f /boot/config-\$(uname -r) ]; then
     if ! grep -q "CONFIG_KEXEC=y" /boot/config-\$(uname -r) 2>/dev/null; then
         KEXEC_SUPPORTED=false
     fi
 fi
 
-if [[ "\$KEXEC_SUPPORTED" == "false" ]]; then
+if [ "\$KEXEC_SUPPORTED" = "false" ]; then
     log_error "Kernel does not have kexec support (CONFIG_KEXEC not enabled)"
     log_error ""
     log_error "To fix this on Raspberry Pi:"
@@ -512,12 +513,8 @@ log "=== Executing kexec -e ==="
 sync  # Flush filesystem buffers
 exec "\$KEXEC_BIN" -e
 KEXECSCRIPT
-
-    # Write script to remote using heredoc via ssh
-    ssh_exec "cat > ${REMOTE_WORK_DIR}/kexec.sh << 'ENDSCRIPT'
-${script_content}
-ENDSCRIPT"
-    ssh_exec "chmod +x ${REMOTE_WORK_DIR}/kexec.sh"
+    chmod +x "$kexec_script"
+    scp_to_remote "$kexec_script" "${REMOTE_WORK_DIR}/kexec.sh"
 }
 
 # Build kernel cmdline for remote execution (absolute paths)
@@ -525,34 +522,34 @@ build_kernel_cmdline_for_remote() {
     local cmdline=""
 
     # Console settings - different for Raspberry Pi
-    if [[ "$DETECTED_PLATFORM" == "rpi" ]]; then
+    if [ "$DETECTED_PLATFORM" = "rpi" ]; then
         # Raspberry Pi uses ttyAMA0 or ttyS0 depending on model
         # Pi 4/5 use ttyAMA0 for primary UART, Pi 3 uses ttyS0
-        if [[ "$DETECTED_RPI_VERSION" == "4" ]] || [[ "$DETECTED_RPI_VERSION" == "5" ]]; then
-            cmdline+="console=tty1 console=ttyAMA0,115200 "
+        if [ "$DETECTED_RPI_VERSION" = "4" ] || [ "$DETECTED_RPI_VERSION" = "5" ]; then
+            cmdline="console=tty1 console=ttyAMA0,115200 "
         else
-            cmdline+="console=tty1 console=ttyS0,115200 "
+            cmdline="console=tty1 console=ttyS0,115200 "
         fi
         # Raspberry Pi specific modules
-        cmdline+="modules=loop,squashfs,mmc_block,sdhci,sdhci-iproc "
+        cmdline="${cmdline}modules=loop,squashfs,mmc_block,sdhci,sdhci-iproc "
     else
-        cmdline+="console=tty0 console=ttyS0,115200n8 "
-        cmdline+="modules=loop,squashfs,sd-mod,usb-storage "
+        cmdline="console=tty0 console=ttyS0,115200n8 "
+        cmdline="${cmdline}modules=loop,squashfs,sd-mod,usb-storage "
     fi
 
     # Alpine repository
-    cmdline+="alpine_repo=${ALPINE_MIRROR}/v${ALPINE_VERSION}/main "
+    cmdline="${cmdline}alpine_repo=${ALPINE_MIRROR}/v${ALPINE_VERSION}/main "
 
     # Modloop path (absolute)
-    cmdline+="modloop=${REMOTE_WORK_DIR}/modloop "
+    cmdline="${cmdline}modloop=${REMOTE_WORK_DIR}/modloop "
 
     # Network configuration
     local ip_param
     ip_param=$(generate_kernel_ip_param)
-    cmdline+="$ip_param "
+    cmdline="${cmdline}$ip_param "
 
     # apkovl location (absolute)
-    cmdline+="apkovl=${REMOTE_WORK_DIR}/${DETECTED_HOSTNAME}.apkovl.tar.gz "
+    cmdline="${cmdline}apkovl=${REMOTE_WORK_DIR}/${DETECTED_HOSTNAME}.apkovl.tar.gz "
 
     echo "$cmdline"
 }
@@ -561,7 +558,7 @@ build_kernel_cmdline_for_remote() {
 run_remote_kexec() {
     log_step "Executing kexec on remote host..."
 
-    if [[ "$DRY_RUN" == "true" ]]; then
+    if [ "$DRY_RUN" = "true" ]; then
         log_info "[DRY-RUN] Would run: sudo ${REMOTE_WORK_DIR}/kexec.sh"
         ssh_exec "${REMOTE_WORK_DIR}/kexec.sh --dry-run"
         return 0

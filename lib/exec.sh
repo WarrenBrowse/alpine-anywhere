@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # exec.sh - Unified execution layer for local and remote modes
 #
 # All variables are declared in common.sh
@@ -62,9 +62,9 @@ deploy_scripts_to_remote() {
 run_cmd() {
     local cmd="$1"
 
-    if [[ "$LOCAL_MODE" == "true" ]]; then
+    if [ "$LOCAL_MODE" = "true" ]; then
         log_debug "Local exec: $cmd"
-        if [[ "$DRY_RUN" == "true" ]]; then
+        if [ "$DRY_RUN" = "true" ]; then
             echo "[DRY-RUN] $cmd"
             return 0
         fi
@@ -78,13 +78,13 @@ run_cmd() {
 run_cmd_sudo() {
     local cmd="$1"
 
-    if [[ "$LOCAL_MODE" == "true" ]]; then
+    if [ "$LOCAL_MODE" = "true" ]; then
         log_debug "Local sudo: $cmd"
-        if [[ "$DRY_RUN" == "true" ]]; then
+        if [ "$DRY_RUN" = "true" ]; then
             echo "[DRY-RUN] sudo $cmd"
             return 0
         fi
-        if [[ $EUID -eq 0 ]]; then
+        if [ "$EUID" -eq 0 ]; then
             eval "$cmd"
         else
             sudo sh -c "$cmd"
@@ -98,7 +98,7 @@ run_cmd_sudo() {
 run_cmd_capture() {
     local cmd="$1"
 
-    if [[ "$LOCAL_MODE" == "true" ]]; then
+    if [ "$LOCAL_MODE" = "true" ]; then
         log_debug "Local capture: $cmd"
         eval "$cmd"
     else
@@ -111,9 +111,9 @@ copy_to_target() {
     local local_path="$1"
     local remote_path="$2"
 
-    if [[ "$LOCAL_MODE" == "true" ]]; then
+    if [ "$LOCAL_MODE" = "true" ]; then
         log_debug "Local copy: $local_path -> $remote_path"
-        if [[ "$DRY_RUN" == "true" ]]; then
+        if [ "$DRY_RUN" = "true" ]; then
             echo "[DRY-RUN] cp '$local_path' '$remote_path'"
             return 0
         fi
@@ -137,18 +137,18 @@ run_on_remote() {
     local remote_cmd="${INSTALL_BASE_DIR}/alpine-anywhere --local"
 
     # Pass through relevant options
-    [[ "$VERBOSE" == "true" ]] && remote_cmd+=" -v"
-    [[ "$DRY_RUN" == "true" ]] && remote_cmd+=" -n"
-    [[ "$FORCE" == "true" ]] && remote_cmd+=" -f"
-    [[ -n "$ALPINE_VERSION" ]] && remote_cmd+=" -V '$ALPINE_VERSION'"
-    [[ -n "$ALPINE_MIRROR" ]] && remote_cmd+=" -m '$ALPINE_MIRROR'"
-    [[ -n "$KERNEL_FLAVOR" ]] && remote_cmd+=" -k '$KERNEL_FLAVOR'"
-    [[ "$INSTALL_METHOD" != "auto" ]] && remote_cmd+=" --method='$INSTALL_METHOD'"
-    [[ -n "$EXTRA_PACKAGES" ]] && remote_cmd+=" --extra-packages='$EXTRA_PACKAGES'"
-    [[ "$HARDENED_MODE" == "true" ]] && remote_cmd+=" --hardened"
-    [[ -n "$OVERLAY_DEVICE" ]] && remote_cmd+=" --overlay='$OVERLAY_DEVICE'"
-    [[ "$KEEP_EXISTING" == "true" ]] && remote_cmd+=" --keep"
-    [[ -n "$extra_args" ]] && remote_cmd+=" $extra_args"
+    [ "$VERBOSE" = "true" ] && remote_cmd="$remote_cmd -v"
+    [ "$DRY_RUN" = "true" ] && remote_cmd="$remote_cmd -n"
+    [ "$FORCE" = "true" ] && remote_cmd="$remote_cmd -f"
+    [ -n "$ALPINE_VERSION" ] && remote_cmd="$remote_cmd -V '$ALPINE_VERSION'"
+    [ -n "$ALPINE_MIRROR" ] && remote_cmd="$remote_cmd -m '$ALPINE_MIRROR'"
+    [ -n "$KERNEL_FLAVOR" ] && remote_cmd="$remote_cmd -k '$KERNEL_FLAVOR'"
+    [ "$INSTALL_METHOD" != "auto" ] && remote_cmd="$remote_cmd --method='$INSTALL_METHOD'"
+    [ -n "$EXTRA_PACKAGES" ] && remote_cmd="$remote_cmd --extra-packages='$EXTRA_PACKAGES'"
+    [ "$HARDENED_MODE" = "true" ] && remote_cmd="$remote_cmd --hardened"
+    [ -n "$OVERLAY_DEVICE" ] && remote_cmd="$remote_cmd --overlay='$OVERLAY_DEVICE'"
+    [ "$KEEP_EXISTING" = "true" ] && remote_cmd="$remote_cmd --keep"
+    [ -n "$extra_args" ] && remote_cmd="$remote_cmd $extra_args"
 
     log_debug "Remote command: $remote_cmd"
 
@@ -166,7 +166,7 @@ detect_local_network() {
 
     # Interface
     DETECTED_INTERFACE=$(ip route show default 2>/dev/null | head -1 | awk '{print $5}')
-    if [[ -z "$DETECTED_INTERFACE" ]]; then
+    if [ -z "$DETECTED_INTERFACE" ]; then
         die "Could not detect default network interface"
     fi
     log_info "Detected interface: $DETECTED_INTERFACE"
@@ -174,9 +174,9 @@ detect_local_network() {
     # IP address
     local ip_info
     ip_info=$(ip -4 addr show dev "$DETECTED_INTERFACE" 2>/dev/null | grep 'inet ' | head -1 | awk '{print $2}')
-    if [[ "$ip_info" =~ ^([0-9.]+)/([0-9]+)$ ]]; then
-        DETECTED_IP_ADDRESS="${BASH_REMATCH[1]}"
-        DETECTED_CIDR="${BASH_REMATCH[2]}"
+    if echo "$ip_info" | grep -qE '^[0-9.]+/[0-9]+$'; then
+        DETECTED_IP_ADDRESS="${ip_info%/*}"
+        DETECTED_CIDR="${ip_info#*/}"
         DETECTED_NETMASK=$(cidr_to_netmask "$DETECTED_CIDR")
     else
         die "Could not parse IP address: $ip_info"
@@ -189,7 +189,7 @@ detect_local_network() {
 
     # DNS
     DETECTED_DNS=$(grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' | head -3 | tr '\n' ' ' | xargs)
-    if [[ -z "$DETECTED_DNS" ]]; then
+    if [ -z "$DETECTED_DNS" ]; then
         DETECTED_DNS="8.8.8.8"
     fi
     log_info "Detected DNS: $DETECTED_DNS"
@@ -222,19 +222,26 @@ detect_local_network() {
     DETECTED_RPI_VERSION=""
     local model=""
     model=$(cat /proc/device-tree/model 2>/dev/null | tr -d '\0' || true)
-    if [[ "$model" == *"Raspberry Pi"* ]]; then
-        DETECTED_PLATFORM="rpi"
-        if [[ "$model" == *"Pi 5"* ]]; then
-            DETECTED_RPI_VERSION="5"
-        elif [[ "$model" == *"Pi 4"* ]] || [[ "$model" == *"Pi 400"* ]]; then
-            DETECTED_RPI_VERSION="4"
-        elif [[ "$model" == *"Pi 3"* ]]; then
-            DETECTED_RPI_VERSION="3"
-        else
-            DETECTED_RPI_VERSION="generic"
-        fi
-        log_info "Detected platform: Raspberry Pi ${DETECTED_RPI_VERSION}"
-    fi
+    case "$model" in
+        *"Raspberry Pi"*)
+            DETECTED_PLATFORM="rpi"
+            case "$model" in
+                *"Pi 5"*)
+                    DETECTED_RPI_VERSION="5"
+                    ;;
+                *"Pi 4"*|*"Pi 400"*)
+                    DETECTED_RPI_VERSION="4"
+                    ;;
+                *"Pi 3"*)
+                    DETECTED_RPI_VERSION="3"
+                    ;;
+                *)
+                    DETECTED_RPI_VERSION="generic"
+                    ;;
+            esac
+            log_info "Detected platform: Raspberry Pi ${DETECTED_RPI_VERSION}"
+            ;;
+    esac
 }
 
 # =============================================================================
@@ -244,7 +251,7 @@ detect_local_network() {
 # Check if a file exists in cache
 cache_exists() {
     local filename="$1"
-    [[ -f "${INSTALL_CACHE_DIR}/${filename}" ]]
+    [ -f "${INSTALL_CACHE_DIR}/${filename}" ]
 }
 
 # Get path to cached file
@@ -259,13 +266,13 @@ cache_download() {
     local filename="$2"
     local cache_file="${INSTALL_CACHE_DIR}/${filename}"
 
-    if [[ -f "$cache_file" ]]; then
+    if [ -f "$cache_file" ]; then
         log_info "Using cached: $filename"
         return 0
     fi
 
     log_info "Downloading: $filename"
-    if [[ "$LOCAL_MODE" == "true" ]]; then
+    if [ "$LOCAL_MODE" = "true" ]; then
         curl -fSL --progress-bar -o "$cache_file" "$url"
     else
         run_cmd "curl -fSL --progress-bar -o '$cache_file' '$url'"

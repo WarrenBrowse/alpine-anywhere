@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # validate.sh - Pre-flight validations for alpine-anywhere
 
 # =============================================================================
@@ -9,17 +9,21 @@
 validate_local_commands() {
     log_step "Validating local commands..."
 
-    local required_commands=("ssh" "scp" "curl" "tar" "gzip")
-    local missing=()
+    local required_commands="ssh scp curl tar gzip"
+    local missing=""
 
-    for cmd in "${required_commands[@]}"; do
+    for cmd in $required_commands; do
         if ! command_exists "$cmd"; then
-            missing+=("$cmd")
+            if [ -z "$missing" ]; then
+                missing="$cmd"
+            else
+                missing="$missing $cmd"
+            fi
         fi
     done
 
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        die "Missing required commands: ${missing[*]}"
+    if [ -n "$missing" ]; then
+        die "Missing required commands: $missing"
     fi
 
     log_info "All required local commands are available"
@@ -36,7 +40,7 @@ validate_remote_memory() {
     local mem_kb
     mem_kb=$(ssh_exec_capture "grep MemTotal /proc/meminfo | awk '{print \$2}'")
 
-    if [[ -z "$mem_kb" ]]; then
+    if [ -z "$mem_kb" ]; then
         die "Could not determine remote system memory"
     fi
 
@@ -45,7 +49,7 @@ validate_remote_memory() {
 
     log_debug "Remote memory: ${mem_mb}MB"
 
-    if ((mem_mb < min_mb)); then
+    if [ "$mem_mb" -lt "$min_mb" ]; then
         die "Insufficient memory: ${mem_mb}MB (minimum: ${min_mb}MB)"
     fi
 
@@ -63,14 +67,14 @@ validate_kexec_enabled() {
     kexec_config=$(ssh_exec_capture "zcat /proc/config.gz 2>/dev/null | grep '^CONFIG_KEXEC=' || true")
 
     # Fallback to /boot/config-*
-    if [[ -z "$kexec_config" ]]; then
+    if [ -z "$kexec_config" ]; then
         local kernel_version
         kernel_version=$(ssh_exec_capture "uname -r")
         kexec_config=$(ssh_exec_capture "grep '^CONFIG_KEXEC=' /boot/config-${kernel_version} 2>/dev/null || true")
     fi
 
-    if [[ -n "$kexec_config" ]]; then
-        if [[ "$kexec_config" != "CONFIG_KEXEC=y" ]]; then
+    if [ -n "$kexec_config" ]; then
+        if [ "$kexec_config" != "CONFIG_KEXEC=y" ]; then
             log_error "Kernel does not have kexec support compiled in"
             log_error "Found: $kexec_config"
             log_error ""
@@ -93,7 +97,7 @@ validate_kexec_enabled() {
     local kexec_disabled
     kexec_disabled=$(ssh_exec_capture "cat /proc/sys/kernel/kexec_load_disabled 2>/dev/null || echo 0")
 
-    if [[ "$kexec_disabled" == "1" ]]; then
+    if [ "$kexec_disabled" = "1" ]; then
         die "kexec is disabled on the remote system. Check /proc/sys/kernel/kexec_load_disabled"
     fi
 
@@ -101,9 +105,9 @@ validate_kexec_enabled() {
     local secureboot
     secureboot=$(ssh_exec_capture "cat /sys/firmware/efi/efivars/SecureBoot-* 2>/dev/null | od -An -tu1 | tail -c 2 | tr -d ' '" || echo "0")
 
-    if [[ "$secureboot" == "1" ]]; then
+    if [ "$secureboot" = "1" ]; then
         log_warn "Secure Boot appears to be enabled. kexec may not work."
-        if [[ "$FORCE" != "true" ]]; then
+        if [ "$FORCE" != "true" ]; then
             die "Secure Boot is enabled and may prevent kexec. Use --force to try anyway."
         fi
     fi
@@ -118,7 +122,7 @@ validate_remote_disk_space() {
     local space_kb
     space_kb=$(ssh_exec_capture "df /tmp 2>/dev/null | tail -1 | awk '{print \$4}'")
 
-    if [[ -z "$space_kb" ]]; then
+    if [ -z "$space_kb" ]; then
         log_warn "Could not determine /tmp disk space"
         return 0
     fi
@@ -128,7 +132,7 @@ validate_remote_disk_space() {
 
     log_debug "Remote /tmp space: ${space_mb}MB"
 
-    if ((space_mb < min_mb)); then
+    if [ "$space_mb" -lt "$min_mb" ]; then
         die "Insufficient disk space in /tmp: ${space_mb}MB (minimum: ${min_mb}MB)"
     fi
 
@@ -171,7 +175,7 @@ detect_current_os() {
     local os_info
     os_info=$(ssh_exec_capture "cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d= -f2 | tr -d '\"'" || true)
 
-    if [[ -z "$os_info" ]]; then
+    if [ -z "$os_info" ]; then
         os_info=$(ssh_exec_capture "uname -a")
     fi
 
@@ -228,18 +232,18 @@ is_kexec_available() {
     kexec_config=$(ssh_exec_capture "zcat /proc/config.gz 2>/dev/null | grep '^CONFIG_KEXEC=' || true")
 
     # Fallback to /boot/config-*
-    if [[ -z "$kexec_config" ]]; then
+    if [ -z "$kexec_config" ]; then
         local kernel_version
         kernel_version=$(ssh_exec_capture "uname -r")
         kexec_config=$(ssh_exec_capture "grep '^CONFIG_KEXEC=' /boot/config-${kernel_version} 2>/dev/null || true")
     fi
 
-    if [[ "$kexec_config" == "CONFIG_KEXEC=y" ]]; then
+    if [ "$kexec_config" = "CONFIG_KEXEC=y" ]; then
         return 0
     fi
 
     # If we can't determine, assume not available (safer)
-    if [[ -z "$kexec_config" ]]; then
+    if [ -z "$kexec_config" ]; then
         # Try to check if kexec_load syscall works
         # This is a more reliable test but requires attempting to call it
         return 1
@@ -252,7 +256,7 @@ is_kexec_available() {
 determine_install_method() {
     log_step "Determining installation method..."
 
-    if [[ "$INSTALL_METHOD" == "auto" ]]; then
+    if [ "$INSTALL_METHOD" = "auto" ]; then
         log_info "Auto-detecting best installation method..."
 
         if is_kexec_available; then

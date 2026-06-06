@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # network_spec.sh - Tests for lib/network.sh
 
 Describe 'network.sh'

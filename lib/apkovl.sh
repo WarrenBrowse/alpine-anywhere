@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # apkovl.sh - Alpine overlay (apkovl) generation for alpine-anywhere
 
 # =============================================================================
@@ -7,12 +7,12 @@
 
 # Create apkovl directory structure
 create_apkovl_structure() {
-    local apkovl_dir="$1"
+    apkovl_dir="$1"
 
     mkdir -p "$apkovl_dir"/{etc/{network,apk,runlevels/{boot,default,sysinit},local.d},root/.ssh}
 
     # SSH directory based on mode
-    if [[ "$HARDENED_MODE" == "true" ]]; then
+    if [ "$HARDENED_MODE" = "true" ]; then
         mkdir -p "$apkovl_dir"/etc/dropbear
     else
         mkdir -p "$apkovl_dir"/etc/ssh
@@ -66,10 +66,10 @@ EOF
 
 # Generate /etc/apk/world
 generate_apk_world() {
-    local packages="alpine-base"
+    packages="alpine-base"
 
     # SSH package based on mode
-    if [[ "$HARDENED_MODE" == "true" ]]; then
+    if [ "$HARDENED_MODE" = "true" ]; then
         packages="$packages dropbear"
     else
         packages="$packages openssh-server"
@@ -79,8 +79,7 @@ generate_apk_world() {
     packages="$packages kexec-tools"
 
     # Add extra packages if specified
-    if [[ -n "$EXTRA_PACKAGES" ]]; then
-        local extra
+    if [ -n "$EXTRA_PACKAGES" ]; then
         extra=$(echo "$EXTRA_PACKAGES" | tr ',' ' ')
         packages="$packages $extra"
     fi
@@ -124,7 +123,7 @@ EOF
 # Generate /etc/local.d/alpine-anywhere.start
 # This script generates SSH host keys on first boot
 generate_local_start() {
-    if [[ "$HARDENED_MODE" == "true" ]]; then
+    if [ "$HARDENED_MODE" = "true" ]; then
         cat <<'EOF'
 #!/bin/sh
 # Generate dropbear host keys if they don't exist
@@ -165,9 +164,9 @@ EOF
 
 # Generate complete apkovl
 generate_apkovl() {
-    local ssh_keys="$1"
-    local apkovl_dir="${WORK_DIR}/apkovl"
-    local apkovl_file="${WORK_DIR}/${DETECTED_HOSTNAME}.apkovl.tar.gz"
+    ssh_keys="$1"
+    apkovl_dir="${WORK_DIR}/apkovl"
+    apkovl_file="${WORK_DIR}/${DETECTED_HOSTNAME}.apkovl.tar.gz"
 
     log_step "Generating apkovl overlay..."
 
@@ -198,7 +197,7 @@ generate_apkovl() {
 
     # Generate SSH configuration
     log_debug "Generating SSH configuration..."
-    if [[ "$HARDENED_MODE" == "true" ]]; then
+    if [ "$HARDENED_MODE" = "true" ]; then
         # Dropbear uses command-line options, no config file needed
         log_debug "Using dropbear (no config file)"
     else
@@ -206,7 +205,7 @@ generate_apkovl() {
     fi
 
     # Install SSH authorized keys
-    if [[ -n "$ssh_keys" ]]; then
+    if [ -n "$ssh_keys" ]; then
         echo "$ssh_keys" > "$apkovl_dir/root/.ssh/authorized_keys"
         chmod 600 "$apkovl_dir/root/.ssh/authorized_keys"
     fi
@@ -223,7 +222,7 @@ generate_apkovl() {
     ln -sf /etc/init.d/hostname "$apkovl_dir/etc/runlevels/boot/hostname"
 
     # Default runlevel - SSH service based on mode
-    if [[ "$HARDENED_MODE" == "true" ]]; then
+    if [ "$HARDENED_MODE" = "true" ]; then
         ln -sf /etc/init.d/dropbear "$apkovl_dir/etc/runlevels/default/dropbear"
     else
         ln -sf /etc/init.d/sshd "$apkovl_dir/etc/runlevels/default/sshd"
@@ -237,7 +236,7 @@ generate_apkovl() {
     log_debug "Creating apkovl tarball..."
     (cd "$apkovl_dir" && tar -czf "$apkovl_file" .)
 
-    if [[ ! -f "$apkovl_file" ]]; then
+    if [ ! -f "$apkovl_file" ]; then
         die "Failed to create apkovl tarball"
     fi
 
@@ -251,9 +250,9 @@ generate_apkovl() {
 
 # List contents of apkovl
 inspect_apkovl() {
-    local apkovl_file="$1"
+    apkovl_file="$1"
 
-    if [[ ! -f "$apkovl_file" ]]; then
+    if [ ! -f "$apkovl_file" ]; then
         die "apkovl file not found: $apkovl_file"
     fi
 
@@ -263,7 +262,7 @@ inspect_apkovl() {
 
 # Show apkovl summary
 show_apkovl_summary() {
-    local apkovl_dir="${WORK_DIR}/apkovl"
+    apkovl_dir="${WORK_DIR}/apkovl"
 
     echo ""
     echo "apkovl Configuration Summary:"

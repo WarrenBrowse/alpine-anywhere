@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # full_flow_spec.sh - Integration tests for alpine-anywhere
 
 Describe 'alpine-anywhere integration'

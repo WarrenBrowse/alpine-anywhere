@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 #
 # alpine-anywhere - Boot any Linux server into Alpine Linux RAM-only mode
 #
@@ -11,44 +11,44 @@
 # License: MIT
 #
 
-set -euo pipefail
+set -eu
 
 # =============================================================================
 # Script Initialization
 # =============================================================================
 
 # Get the directory where the script is located
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Determine library directory
 LIB_DIR="${SCRIPT_DIR}/lib"
-if [[ ! -d "$LIB_DIR" ]]; then
+if [ ! -d "$LIB_DIR" ]; then
     echo "ERROR: Cannot find library directory: $LIB_DIR" >&2
     exit 1
 fi
 
 # Source all library files
-source "${LIB_DIR}/common.sh"
-source "${LIB_DIR}/ssh.sh"
-source "${LIB_DIR}/exec.sh"
-source "${LIB_DIR}/network.sh"
-source "${LIB_DIR}/download.sh"
-source "${LIB_DIR}/apkovl.sh"
-source "${LIB_DIR}/kexec.sh"
-source "${LIB_DIR}/validate.sh"
-source "${LIB_DIR}/remote.sh"
-source "${LIB_DIR}/takeover.sh"
-source "${LIB_DIR}/pivot.sh"
-source "${LIB_DIR}/install.sh"
-source "${LIB_DIR}/upgrade.sh"
-source "${LIB_DIR}/hardening.sh"
+. "${LIB_DIR}/common.sh"
+. "${LIB_DIR}/ssh.sh"
+. "${LIB_DIR}/exec.sh"
+. "${LIB_DIR}/network.sh"
+. "${LIB_DIR}/download.sh"
+. "${LIB_DIR}/apkovl.sh"
+. "${LIB_DIR}/kexec.sh"
+. "${LIB_DIR}/validate.sh"
+. "${LIB_DIR}/remote.sh"
+. "${LIB_DIR}/takeover.sh"
+. "${LIB_DIR}/pivot.sh"
+. "${LIB_DIR}/install.sh"
+. "${LIB_DIR}/upgrade.sh"
+. "${LIB_DIR}/hardening.sh"
 
 # =============================================================================
 # Banner
 # =============================================================================
 
 print_banner() {
-    if [[ "$VERBOSE" == "true" ]]; then
+    if [ "$VERBOSE" = "true" ]; then
         cat <<'EOF'
        _       _                                    _
   __ _| |_ __ (_)_ __   ___        __ _ _ __  _   _| |__   ___ _ __ ___
@@ -60,9 +60,9 @@ print_banner() {
 EOF
     fi
     local mode_desc="Live mode (RAM-only, revert on reboot)"
-    if [[ "$INSTALL_MODE" == "true" ]]; then
+    if [ "$INSTALL_MODE" = "true" ]; then
         mode_desc="Install mode (immutable A/B, persistent)"
-    elif [[ "$UPGRADE_MODE" == "true" ]]; then
+    elif [ "$UPGRADE_MODE" = "true" ]; then
         mode_desc="Upgrade mode (atomic A/B switch)"
     fi
     echo "alpine-anywhere v2.0.0 - Immutable Alpine Linux with A/B updates"
@@ -88,32 +88,32 @@ main() {
     create_work_dir
 
     # Show dry-run notice
-    if [[ "$DRY_RUN" == "true" ]]; then
+    if [ "$DRY_RUN" = "true" ]; then
         log_warn "DRY-RUN MODE - No changes will be made"
         echo ""
     fi
 
     # Handle different modes
-    if [[ "$UPGRADE_MODE" == "true" ]]; then
+    if [ "$UPGRADE_MODE" = "true" ]; then
         # Upgrade mode
-        if [[ "$LOCAL_MODE" == "true" ]]; then
+        if [ "$LOCAL_MODE" = "true" ]; then
             run_local_upgrade
         else
             run_remote_upgrade
         fi
-    elif [[ "$INSTALL_CONTINUE" == "true" ]]; then
+    elif [ "$INSTALL_CONTINUE" = "true" ]; then
         # Continue A/B installation after pivot (runs in pivoted environment)
         run_install_continue
-    elif [[ "$INSTALL_MODE" == "true" ]]; then
+    elif [ "$INSTALL_MODE" = "true" ]; then
         # Install mode (A/B immutable)
-        if [[ "$LOCAL_MODE" == "true" ]]; then
+        if [ "$LOCAL_MODE" = "true" ]; then
             run_local_ab_install
         else
             run_remote_ab_install
         fi
     else
         # Live mode (default)
-        if [[ "$LOCAL_MODE" == "true" ]]; then
+        if [ "$LOCAL_MODE" = "true" ]; then
             run_local_installation
         else
             run_remote_installation
@@ -214,19 +214,19 @@ run_remote_upgrade() {
 
 run_local_ab_install() {
     # Require root for A/B installation
-    if [[ $EUID -ne 0 ]]; then
+    if [ "$(id -u)" -ne 0 ]; then
         log_info "Escalating to root for A/B installation..."
-        local sudo_args=("--local" "--install")
-        [[ "$VERBOSE" == "true" ]] && sudo_args+=("-v")
-        [[ "$FORCE" == "true" ]] && sudo_args+=("-f")
-        [[ "$DRY_RUN" == "true" ]] && sudo_args+=("-n")
-        [[ -n "$ALPINE_VERSION" ]] && sudo_args+=("-V" "$ALPINE_VERSION")
-        [[ -n "$ALPINE_MIRROR" ]] && sudo_args+=("-m" "$ALPINE_MIRROR")
-        [[ -n "$KERNEL_FLAVOR" ]] && sudo_args+=("-k" "$KERNEL_FLAVOR")
-        [[ "$HARDENED_MODE" == "true" ]] && sudo_args+=("--hardened")
-        [[ -n "$OVERLAY_DEVICE" ]] && sudo_args+=("--overlay=$OVERLAY_DEVICE")
-        [[ -n "$EXTRA_PACKAGES" ]] && sudo_args+=("--extra-packages=$EXTRA_PACKAGES")
-        exec sudo -E bash "$0" "${sudo_args[@]}"
+        sudo_args="--local --install"
+        [ "$VERBOSE" = "true" ] && sudo_args="$sudo_args -v"
+        [ "$FORCE" = "true" ] && sudo_args="$sudo_args -f"
+        [ "$DRY_RUN" = "true" ] && sudo_args="$sudo_args -n"
+        [ -n "$ALPINE_VERSION" ] && sudo_args="$sudo_args -V $ALPINE_VERSION"
+        [ -n "$ALPINE_MIRROR" ] && sudo_args="$sudo_args -m $ALPINE_MIRROR"
+        [ -n "$KERNEL_FLAVOR" ] && sudo_args="$sudo_args -k $KERNEL_FLAVOR"
+        [ "$HARDENED_MODE" = "true" ] && sudo_args="$sudo_args --hardened"
+        [ -n "$OVERLAY_DEVICE" ] && sudo_args="$sudo_args --overlay=$OVERLAY_DEVICE"
+        [ -n "$EXTRA_PACKAGES" ] && sudo_args="$sudo_args --extra-packages=$EXTRA_PACKAGES"
+        exec sudo -E sh "$0" $sudo_args
     fi
 
     log_info "Running A/B installation in local mode"
@@ -286,8 +286,8 @@ run_install_continue() {
     # The old root should be unmounted, so we can partition the disk
 
     # Load config from pivot
-    if [[ -f /etc/alpine-anywhere/config.env ]]; then
-        source /etc/alpine-anywhere/config.env
+    if [ -f /etc/alpine-anywhere/config.env ]; then
+        . /etc/alpine-anywhere/config.env
         log_info "Config loaded from pivot environment"
     fi
 
@@ -327,7 +327,7 @@ run_local_upgrade() {
     setup_install_dirs "$HOME"
 
     # Check we're running on an A/B installed system
-    if [[ ! -f "/boot/current_slot" ]]; then
+    if [ ! -f "/boot/current_slot" ]; then
         die "This system does not appear to have an A/B installation"
     fi
 
@@ -341,15 +341,15 @@ run_local_upgrade() {
 
 run_local_installation() {
     # Require root for pivot_root
-    if [[ $EUID -ne 0 ]]; then
+    if [ "$(id -u)" -ne 0 ]; then
         log_info "Escalating to root..."
-        local sudo_args=("--local")
-        [[ "$VERBOSE" == "true" ]] && sudo_args+=("-v")
-        [[ "$FORCE" == "true" ]] && sudo_args+=("-f")
-        [[ -n "$ALPINE_VERSION" ]] && sudo_args+=("-V" "$ALPINE_VERSION")
-        [[ -n "$ALPINE_MIRROR" ]] && sudo_args+=("-m" "$ALPINE_MIRROR")
-        [[ "$HARDENED_MODE" == "true" ]] && sudo_args+=("--hardened")
-        exec sudo -E bash "$0" "${sudo_args[@]}"
+        sudo_args="--local"
+        [ "$VERBOSE" = "true" ] && sudo_args="$sudo_args -v"
+        [ "$FORCE" = "true" ] && sudo_args="$sudo_args -f"
+        [ -n "$ALPINE_VERSION" ] && sudo_args="$sudo_args -V $ALPINE_VERSION"
+        [ -n "$ALPINE_MIRROR" ] && sudo_args="$sudo_args -m $ALPINE_MIRROR"
+        [ "$HARDENED_MODE" = "true" ] && sudo_args="$sudo_args --hardened"
+        exec sudo -E sh "$0" $sudo_args
     fi
 
     log_info "Running RAM-only live mode (pivot_root)"
@@ -401,13 +401,13 @@ validate_local_system() {
     local mem_kb
     mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
     local mem_mb=$((mem_kb / 1024))
-    if ((mem_mb < 512)); then
+    if [ "$mem_mb" -lt 512 ]; then
         die "Insufficient memory: ${mem_mb}MB (minimum: 512MB)"
     fi
     log_info "Memory: ${mem_mb}MB"
 
     # Check if running as root or can sudo
-    if [[ $EUID -ne 0 ]]; then
+    if [ "$(id -u)" -ne 0 ]; then
         if ! sudo -n true 2>/dev/null; then
             log_info "Will need sudo password for privileged operations"
         fi
@@ -416,18 +416,18 @@ validate_local_system() {
 
 # Determine installation method locally
 determine_install_method_local() {
-    if [[ "$INSTALL_METHOD" == "auto" ]]; then
+    if [ "$INSTALL_METHOD" = "auto" ]; then
         log_info "Auto-detecting installation method..."
 
         # Check for kexec support
         local kexec_config=""
-        if [[ -f /proc/config.gz ]]; then
+        if [ -f /proc/config.gz ]; then
             kexec_config=$(zcat /proc/config.gz 2>/dev/null | grep '^CONFIG_KEXEC=' || true)
-        elif [[ -f /boot/config-$(uname -r) ]]; then
-            kexec_config=$(grep '^CONFIG_KEXEC=' /boot/config-$(uname -r) 2>/dev/null || true)
+        elif [ -f "/boot/config-$(uname -r)" ]; then
+            kexec_config=$(grep '^CONFIG_KEXEC=' "/boot/config-$(uname -r)" 2>/dev/null || true)
         fi
 
-        if [[ "$kexec_config" == "CONFIG_KEXEC=y" ]]; then
+        if [ "$kexec_config" = "CONFIG_KEXEC=y" ]; then
             INSTALL_METHOD="kexec"
             log_info "kexec available - using kexec method"
         else
@@ -444,17 +444,18 @@ get_local_authorized_keys() {
     local keys=""
 
     # Try current user
-    if [[ -f ~/.ssh/authorized_keys ]]; then
+    if [ -f ~/.ssh/authorized_keys ]; then
         keys=$(cat ~/.ssh/authorized_keys)
     fi
 
     # Try root
-    if [[ -f /root/.ssh/authorized_keys ]]; then
+    if [ -f /root/.ssh/authorized_keys ]; then
         local root_keys
         root_keys=$(cat /root/.ssh/authorized_keys 2>/dev/null || sudo cat /root/.ssh/authorized_keys 2>/dev/null || true)
-        if [[ -n "$root_keys" ]]; then
-            if [[ -n "$keys" ]]; then
-                keys="$keys"$'\n'"$root_keys"
+        if [ -n "$root_keys" ]; then
+            if [ -n "$keys" ]; then
+                keys="${keys}
+${root_keys}"
             else
                 keys="$root_keys"
             fi
@@ -464,9 +465,9 @@ get_local_authorized_keys() {
     # Remove duplicates
     keys=$(echo "$keys" | sort -u | grep -v '^$' || true)
 
-    if [[ -z "$keys" ]]; then
+    if [ -z "$keys" ]; then
         log_warn "No SSH authorized keys found!"
-        if [[ "$FORCE" != "true" ]]; then
+        if [ "$FORCE" != "true" ]; then
             die "No SSH keys found. You may lose access after reboot. Use --force to continue."
         fi
     else
@@ -488,7 +489,7 @@ find_working_mirror_local() {
         log_info "Mirror OK: ${ALPINE_MIRROR}"
     else
         log_warn "Primary mirror failed, trying fallbacks..."
-        for mirror in "${FALLBACK_MIRRORS[@]}"; do
+        for mirror in $FALLBACK_MIRRORS; do
             test_url="${mirror}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/"
             if curl -fsSL --connect-timeout 5 "$test_url" >/dev/null 2>&1; then
                 ALPINE_MIRROR="$mirror"
@@ -504,7 +505,7 @@ find_working_mirror_local() {
 download_alpine_files_local() {
     log_info "Downloading Alpine files..."
 
-    if [[ "$DETECTED_PLATFORM" == "rpi" ]]; then
+    if [ "$DETECTED_PLATFORM" = "rpi" ]; then
         download_alpine_rpi_files_local
     else
         download_alpine_netboot_files_local
@@ -532,7 +533,7 @@ download_alpine_rpi_files_local() {
 
     # Find tarball name
     tarball_name=$(curl -fsSL "${releases_url}/" 2>/dev/null | grep -oE 'alpine-rpi-[0-9.]+-aarch64\.tar\.gz' | head -1)
-    if [[ -z "$tarball_name" ]]; then
+    if [ -z "$tarball_name" ]; then
         tarball_name="alpine-rpi-${ALPINE_VERSION}.0-aarch64.tar.gz"
     fi
 
@@ -541,13 +542,13 @@ download_alpine_rpi_files_local() {
 
     # Extract kernel files
     local kernel_suffix="rpi"
-    [[ "$DETECTED_RPI_VERSION" == "4" || "$DETECTED_RPI_VERSION" == "5" ]] && kernel_suffix="rpi4"
+    { [ "$DETECTED_RPI_VERSION" = "4" ] || [ "$DETECTED_RPI_VERSION" = "5" ]; } && kernel_suffix="rpi4"
 
     log_info "Extracting kernel files..."
     tar -xzf "${INSTALL_CACHE_DIR}/${tarball_name}" -C "${INSTALL_CACHE_DIR}" ./boot/
 
     # Copy kernel files
-    if [[ -f "${INSTALL_CACHE_DIR}/boot/vmlinuz-${kernel_suffix}" ]]; then
+    if [ -f "${INSTALL_CACHE_DIR}/boot/vmlinuz-${kernel_suffix}" ]; then
         cp "${INSTALL_CACHE_DIR}/boot/vmlinuz-${kernel_suffix}" "${INSTALL_CACHE_DIR}/vmlinuz"
         cp "${INSTALL_CACHE_DIR}/boot/initramfs-${kernel_suffix}" "${INSTALL_CACHE_DIR}/initramfs"
         cp "${INSTALL_CACHE_DIR}/boot/modloop-${kernel_suffix}" "${INSTALL_CACHE_DIR}/modloop"
@@ -588,7 +589,7 @@ generate_takeover_setup_script() {
     apkovl_name=$(basename "$apkovl_file")
 
     local network_interfaces
-    if [[ "$NETWORK_IS_DHCP" == "true" ]]; then
+    if [ "$NETWORK_IS_DHCP" = "true" ]; then
         network_interfaces="auto lo
 iface lo inet loopback
 
@@ -607,7 +608,7 @@ iface ${DETECTED_INTERFACE} inet static
 
     # SSH package and configuration based on mode
     local ssh_package ssh_keygen ssh_config ssh_service
-    if [[ "$HARDENED_MODE" == "true" ]]; then
+    if [ "$HARDENED_MODE" = "true" ]; then
         ssh_package="dropbear dropbear-openrc"
         ssh_keygen='mkdir -p ${TAKEOVER_DIR}/etc/dropbear
 chroot ${TAKEOVER_DIR} /usr/bin/dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key 2>/dev/null || true'
@@ -626,10 +627,10 @@ SSHDCONFIG'
     fi
 
     cat > "${INSTALL_BASE_DIR}/takeover-setup.sh" << SETUPSCRIPT
-#!/bin/bash
+#!/bin/sh
 # Alpine Anywhere Takeover Setup Script
 # Generated: $(date -Iseconds)
-# Mode: $([ "$HARDENED_MODE" == "true" ] && echo "hardened (dropbear)" || echo "standard (openssh)")
+# Mode: $([ "$HARDENED_MODE" = "true" ] && echo "hardened (dropbear)" || echo "standard (openssh)")
 # Run this with sudo to setup the takeover environment
 
 set -e
@@ -717,7 +718,7 @@ SETUPSCRIPT
 # Generate takeover execute script
 generate_takeover_execute_script() {
     local network_setup
-    if [[ "$NETWORK_IS_DHCP" == "true" ]]; then
+    if [ "$NETWORK_IS_DHCP" = "true" ]; then
         network_setup="/sbin/udhcpc -i ${DETECTED_INTERFACE} -b 2>/dev/null || true"
     else
         network_setup="/sbin/ifconfig ${DETECTED_INTERFACE} ${DETECTED_IP_ADDRESS} netmask ${DETECTED_NETMASK} up 2>/dev/null || true
@@ -726,7 +727,7 @@ generate_takeover_execute_script() {
 
     # SSH startup command based on mode
     local ssh_startup ssh_name
-    if [[ "$HARDENED_MODE" == "true" ]]; then
+    if [ "$HARDENED_MODE" = "true" ]; then
         # dropbear: -s disable password auth, -g disable root password login, -p port
         ssh_startup='chroot ${TAKEOVER_DIR} /usr/sbin/dropbear -p 2222 -s -g'
         ssh_name="dropbear"
@@ -740,7 +741,7 @@ chroot ${TAKEOVER_DIR} /usr/sbin/sshd -p 2222'
 #!/bin/sh
 # Alpine Anywhere Takeover Execute Script
 # Generated: $(date -Iseconds)
-# Mode: $([ "$HARDENED_MODE" == "true" ] && echo "hardened (dropbear)" || echo "standard (openssh)")
+# Mode: $([ "$HARDENED_MODE" = "true" ] && echo "hardened (dropbear)" || echo "standard (openssh)")
 # Run this with sudo to start Alpine in chroot
 
 set -e
@@ -809,20 +810,20 @@ generate_kexec_script_local() {
     apkovl_name=$(basename "$apkovl_file")
 
     local cmdline="console=tty0 console=ttyS0,115200n8 "
-    cmdline+="alpine_repo=${ALPINE_MIRROR}/v${ALPINE_VERSION}/main "
-    cmdline+="modloop=${INSTALL_CACHE_DIR}/modloop "
-    cmdline+="modules=loop,squashfs,sd-mod,usb-storage "
+    cmdline="${cmdline}alpine_repo=${ALPINE_MIRROR}/v${ALPINE_VERSION}/main "
+    cmdline="${cmdline}modloop=${INSTALL_CACHE_DIR}/modloop "
+    cmdline="${cmdline}modules=loop,squashfs,sd-mod,usb-storage "
 
-    if [[ "$NETWORK_IS_DHCP" == "true" ]]; then
-        cmdline+="ip=dhcp "
+    if [ "$NETWORK_IS_DHCP" = "true" ]; then
+        cmdline="${cmdline}ip=dhcp "
     else
-        cmdline+="ip=${DETECTED_IP_ADDRESS}::${DETECTED_GATEWAY}:${DETECTED_NETMASK}:${DETECTED_HOSTNAME}:${DETECTED_INTERFACE}:off "
+        cmdline="${cmdline}ip=${DETECTED_IP_ADDRESS}::${DETECTED_GATEWAY}:${DETECTED_NETMASK}:${DETECTED_HOSTNAME}:${DETECTED_INTERFACE}:off "
     fi
 
-    cmdline+="apkovl=${INSTALL_CACHE_DIR}/${apkovl_name}"
+    cmdline="${cmdline}apkovl=${INSTALL_CACHE_DIR}/${apkovl_name}"
 
     cat > "${INSTALL_BASE_DIR}/kexec.sh" << KEXECSCRIPT
-#!/bin/bash
+#!/bin/sh
 # Alpine Anywhere Kexec Script
 # Generated: $(date -Iseconds)
 
@@ -839,7 +840,7 @@ log "=== Alpine Anywhere Kexec ==="
 
 # Verify files
 for f in vmlinuz initramfs modloop ${apkovl_name}; do
-    if [[ ! -f "\${CACHE_DIR}/\$f" ]]; then
+    if [ ! -f "\${CACHE_DIR}/\$f" ]; then
         log "ERROR: Missing \$f"
         exit 1
     fi
@@ -847,13 +848,13 @@ done
 
 CMDLINE="${cmdline}"
 
-if [[ "\$1" == "--dry-run" ]]; then
+if [ "\$1" = "--dry-run" ]; then
     log "[DRY-RUN] kexec -l \${CACHE_DIR}/vmlinuz --initrd=\${CACHE_DIR}/initramfs"
     log "[DRY-RUN] cmdline: \$CMDLINE"
     exit 0
 fi
 
-if [[ \$EUID -ne 0 ]]; then
+if [ "\$(id -u)" -ne 0 ]; then
     log "ERROR: Run with sudo"
     exit 1
 fi
@@ -872,7 +873,7 @@ KEXECSCRIPT
 
 # Execute takeover locally
 execute_takeover_local() {
-    if [[ "$DRY_RUN" == "true" ]]; then
+    if [ "$DRY_RUN" = "true" ]; then
         log_info "[DRY-RUN] Would execute takeover"
         log_info "[DRY-RUN] Scripts generated at ${INSTALL_BASE_DIR}/"
         return 0
@@ -904,7 +905,7 @@ execute_takeover_local() {
 
 # Execute kexec locally
 execute_kexec_local() {
-    if [[ "$DRY_RUN" == "true" ]]; then
+    if [ "$DRY_RUN" = "true" ]; then
         log_info "[DRY-RUN] Would execute kexec"
         log_info "[DRY-RUN] Script at ${INSTALL_BASE_DIR}/kexec.sh"
         return 0
@@ -934,7 +935,7 @@ show_completion_message() {
     echo ""
     echo "Alpine Linux is now running on ${TARGET_HOST}"
     echo ""
-    if [[ "$INSTALL_METHOD" == "takeover" ]]; then
+    if [ "$INSTALL_METHOD" = "takeover" ]; then
         echo "Connect to Alpine (port 2222):"
         echo "  ssh -p 2222 root@${TARGET_HOST}"
         echo ""

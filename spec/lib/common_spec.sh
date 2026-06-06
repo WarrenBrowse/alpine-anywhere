@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # common_spec.sh - Tests for lib/common.sh
 
 Describe 'common.sh'

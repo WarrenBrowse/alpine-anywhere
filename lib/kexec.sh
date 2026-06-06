@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # kexec.sh - kexec preparation and execution for alpine-anywhere
 
 # =============================================================================
@@ -10,31 +10,31 @@ build_kernel_cmdline() {
     local cmdline=""
 
     # Console settings (both serial and VGA)
-    cmdline+="console=tty0 console=ttyS0,115200n8 "
+    cmdline="${cmdline}console=tty0 console=ttyS0,115200n8 "
 
     # Alpine repository
-    cmdline+="alpine_repo=${ALPINE_MIRROR}/v${ALPINE_VERSION}/main "
+    cmdline="${cmdline}alpine_repo=${ALPINE_MIRROR}/v${ALPINE_VERSION}/main "
 
     # Modloop path (will be at this path after transfer)
-    cmdline+="modloop=${REMOTE_WORK_DIR}/modloop "
+    cmdline="${cmdline}modloop=${REMOTE_WORK_DIR}/modloop "
 
     # Required modules
-    cmdline+="modules=loop,squashfs,sd-mod,usb-storage "
+    cmdline="${cmdline}modules=loop,squashfs,sd-mod,usb-storage "
 
     # Network configuration
     local ip_param
     ip_param=$(generate_kernel_ip_param)
-    cmdline+="$ip_param "
+    cmdline="${cmdline}$ip_param "
 
     # apkovl location
-    cmdline+="apkovl=${REMOTE_WORK_DIR}/${DETECTED_HOSTNAME}.apkovl.tar.gz "
+    cmdline="${cmdline}apkovl=${REMOTE_WORK_DIR}/${DETECTED_HOSTNAME}.apkovl.tar.gz "
 
     # SSH authorized keys path (optional, as backup)
-    cmdline+="ssh_key=${REMOTE_WORK_DIR}/${DETECTED_HOSTNAME}.apkovl.tar.gz "
+    cmdline="${cmdline}ssh_key=${REMOTE_WORK_DIR}/${DETECTED_HOSTNAME}.apkovl.tar.gz "
 
     # Quiet boot (remove for debug)
-    if [[ "$VERBOSE" != "true" ]]; then
-        cmdline+="quiet "
+    if [ "$VERBOSE" != "true" ]; then
+        cmdline="${cmdline}quiet "
     fi
 
     echo "$cmdline"
@@ -93,7 +93,7 @@ ensure_kexec_installed() {
     fi
 
     # In dry-run mode, just show what would be installed
-    if [[ "$DRY_RUN" == "true" ]]; then
+    if [ "$DRY_RUN" = "true" ]; then
         local distro
         distro=$(ssh_exec_capture "cat /etc/os-release 2>/dev/null | grep '^ID=' | cut -d= -f2 | tr -d '\"'" || true)
         log_info "[DRY-RUN] Would install kexec-tools on $distro"
@@ -152,7 +152,7 @@ load_and_execute_kexec() {
 
     log_debug "Kernel command line: $cmdline"
 
-    if [[ "$DRY_RUN" == "true" ]]; then
+    if [ "$DRY_RUN" = "true" ]; then
         echo "[DRY-RUN] kexec -l ${REMOTE_WORK_DIR}/vmlinuz --initrd=${REMOTE_WORK_DIR}/initramfs --command-line=\"$cmdline\""
         echo "[DRY-RUN] sleep ${REBOOT_DELAY} && kexec -e"
         log_info "[DRY-RUN] Skipping actual kexec execution"
@@ -205,7 +205,7 @@ run_kexec() {
     # Load kernel and execute kexec (single sudo prompt)
     load_and_execute_kexec
 
-    if [[ "$DRY_RUN" != "true" ]]; then
+    if [ "$DRY_RUN" != "true" ]; then
         # Wait for host to come back
         sleep "$REBOOT_DELAY"
         sleep 5  # Extra time for boot

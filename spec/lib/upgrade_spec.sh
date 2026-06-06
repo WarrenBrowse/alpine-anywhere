@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Tests for upgrade.sh - A/B upgrade management
 
 Describe 'upgrade.sh'

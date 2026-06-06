@@ -1,13 +1,13 @@
-#!/bin/bash
+#!/bin/sh
 # mocks.sh - Mock functions for testing alpine-anywhere
 
 # =============================================================================
 # Mock State Variables
 # =============================================================================
 
-MOCK_SSH_RESPONSES=()
+MOCK_SSH_RESPONSES=""
 MOCK_SSH_CALL_COUNT=0
-MOCK_CURL_RESPONSES=()
+MOCK_CURL_RESPONSES=""
 MOCK_CURL_CALL_COUNT=0
 
 # =============================================================================
@@ -15,9 +15,9 @@ MOCK_CURL_CALL_COUNT=0
 # =============================================================================
 
 reset_mocks() {
-    MOCK_SSH_RESPONSES=()
+    MOCK_SSH_RESPONSES=""
     MOCK_SSH_CALL_COUNT=0
-    MOCK_CURL_RESPONSES=()
+    MOCK_CURL_RESPONSES=""
     MOCK_CURL_CALL_COUNT=0
 }
 
@@ -28,17 +28,22 @@ reset_mocks() {
 # Set up mock response for ssh_exec_capture
 mock_ssh_response() {
     local response="$1"
-    MOCK_SSH_RESPONSES+=("$response")
+    if [ -n "$MOCK_SSH_RESPONSES" ]; then
+        MOCK_SSH_RESPONSES="${MOCK_SSH_RESPONSES}
+${response}"
+    else
+        MOCK_SSH_RESPONSES="$response"
+    fi
 }
 
 # Mock ssh_exec_capture function
 mock_ssh_exec_capture() {
-    local command="$1"
     local response=""
 
-    if [[ ${#MOCK_SSH_RESPONSES[@]} -gt 0 ]]; then
-        response="${MOCK_SSH_RESPONSES[$MOCK_SSH_CALL_COUNT]}"
-        ((MOCK_SSH_CALL_COUNT++)) || true
+    if [ -n "$MOCK_SSH_RESPONSES" ]; then
+        local line_num=$((MOCK_SSH_CALL_COUNT + 1))
+        response=$(echo "$MOCK_SSH_RESPONSES" | sed -n "${line_num}p")
+        MOCK_SSH_CALL_COUNT=$((MOCK_SSH_CALL_COUNT + 1))
     fi
 
     echo "$response"
@@ -85,16 +90,22 @@ mock_scp_dir_to_remote() {
 # Set up mock response for curl
 mock_curl_response() {
     local response="$1"
-    MOCK_CURL_RESPONSES+=("$response")
+    if [ -n "$MOCK_CURL_RESPONSES" ]; then
+        MOCK_CURL_RESPONSES="${MOCK_CURL_RESPONSES}
+${response}"
+    else
+        MOCK_CURL_RESPONSES="$response"
+    fi
 }
 
 # Mock curl function
 mock_curl() {
     local response=""
 
-    if [[ ${#MOCK_CURL_RESPONSES[@]} -gt 0 ]]; then
-        response="${MOCK_CURL_RESPONSES[$MOCK_CURL_CALL_COUNT]}"
-        ((MOCK_CURL_CALL_COUNT++)) || true
+    if [ -n "$MOCK_CURL_RESPONSES" ]; then
+        local line_num=$((MOCK_CURL_CALL_COUNT + 1))
+        response=$(echo "$MOCK_CURL_RESPONSES" | sed -n "${line_num}p")
+        MOCK_CURL_CALL_COUNT=$((MOCK_CURL_CALL_COUNT + 1))
     fi
 
     echo "$response"
@@ -182,19 +193,20 @@ assert_contains() {
     local haystack="$1"
     local needle="$2"
 
-    if [[ "$haystack" == *"$needle"* ]]; then
-        return 0
-    else
-        echo "Expected '$haystack' to contain '$needle'" >&2
-        return 1
-    fi
+    case "$haystack" in
+        *"$needle"*) return 0 ;;
+        *)
+            echo "Expected '$haystack' to contain '$needle'" >&2
+            return 1
+            ;;
+    esac
 }
 
 # Check if a file exists
 assert_file_exists() {
     local file="$1"
 
-    if [[ -f "$file" ]]; then
+    if [ -f "$file" ]; then
         return 0
     else
         echo "Expected file '$file' to exist" >&2
@@ -206,7 +218,7 @@ assert_file_exists() {
 assert_dir_exists() {
     local dir="$1"
 
-    if [[ -d "$dir" ]]; then
+    if [ -d "$dir" ]; then
         return 0
     else
         echo "Expected directory '$dir' to exist" >&2

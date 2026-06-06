@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # ssh.sh - SSH connection and remote execution for alpine-anywhere
 
 # =============================================================================
@@ -17,8 +17,7 @@ setup_ssh_multiplexing() {
 
 # Close SSH multiplexing connection
 close_ssh_multiplexing() {
-    if [[ -n "$SSH_CONTROL_PATH" ]]; then
-        local ssh_opts
+    if [ -n "$SSH_CONTROL_PATH" ]; then
         ssh_opts=$(_ssh_opts_no_batch)
         # shellcheck disable=SC2086
         ssh $ssh_opts -O exit "${TARGET_USER}@${TARGET_HOST}" 2>/dev/null || true
@@ -27,7 +26,7 @@ close_ssh_multiplexing() {
 
 # Build SSH options as a string (bash 3 compatible) - batch mode
 _ssh_opts() {
-    local opts="-o BatchMode=yes"
+    opts="-o BatchMode=yes"
     opts="$opts -o StrictHostKeyChecking=accept-new"
     opts="$opts -o ConnectTimeout=10"
     opts="$opts -o ServerAliveInterval=30"
@@ -35,13 +34,13 @@ _ssh_opts() {
     opts="$opts -p $SSH_PORT"
 
     # Add multiplexing if enabled
-    if [[ -n "$SSH_CONTROL_PATH" ]]; then
+    if [ -n "$SSH_CONTROL_PATH" ]; then
         opts="$opts -o ControlPath=$SSH_CONTROL_PATH"
         opts="$opts -o ControlMaster=auto"
         opts="$opts -o ControlPersist=300"
     fi
 
-    if [[ -n "$SSH_IDENTITY" ]]; then
+    if [ -n "$SSH_IDENTITY" ]; then
         opts="$opts -i $SSH_IDENTITY"
     fi
 
@@ -50,20 +49,20 @@ _ssh_opts() {
 
 # Build SSH options without batch mode (for interactive password prompts)
 _ssh_opts_no_batch() {
-    local opts="-o StrictHostKeyChecking=accept-new"
+    opts="-o StrictHostKeyChecking=accept-new"
     opts="$opts -o ConnectTimeout=10"
     opts="$opts -o ServerAliveInterval=30"
     opts="$opts -o ServerAliveCountMax=3"
     opts="$opts -p $SSH_PORT"
 
     # Add multiplexing if enabled
-    if [[ -n "$SSH_CONTROL_PATH" ]]; then
+    if [ -n "$SSH_CONTROL_PATH" ]; then
         opts="$opts -o ControlPath=$SSH_CONTROL_PATH"
         opts="$opts -o ControlMaster=auto"
         opts="$opts -o ControlPersist=300"
     fi
 
-    if [[ -n "$SSH_IDENTITY" ]]; then
+    if [ -n "$SSH_IDENTITY" ]; then
         opts="$opts -i $SSH_IDENTITY"
     fi
 
@@ -72,19 +71,19 @@ _ssh_opts_no_batch() {
 
 # Build SCP options (uses -P for port instead of -p)
 _scp_opts() {
-    local opts="-o BatchMode=yes"
+    opts="-o BatchMode=yes"
     opts="$opts -o StrictHostKeyChecking=accept-new"
     opts="$opts -o ConnectTimeout=10"
     opts="$opts -P $SSH_PORT"
 
     # Add multiplexing if enabled
-    if [[ -n "$SSH_CONTROL_PATH" ]]; then
+    if [ -n "$SSH_CONTROL_PATH" ]; then
         opts="$opts -o ControlPath=$SSH_CONTROL_PATH"
         opts="$opts -o ControlMaster=auto"
         opts="$opts -o ControlPersist=300"
     fi
 
-    if [[ -n "$SSH_IDENTITY" ]]; then
+    if [ -n "$SSH_IDENTITY" ]; then
         opts="$opts -i $SSH_IDENTITY"
     fi
 
@@ -97,13 +96,12 @@ _scp_opts() {
 
 # Execute command on remote host
 ssh_exec() {
-    local command="$1"
-    local ssh_opts
+    command="$1"
     ssh_opts=$(_ssh_opts)
 
     log_debug "SSH exec: $command"
 
-    if [[ "$DRY_RUN" == "true" ]]; then
+    if [ "$DRY_RUN" = "true" ]; then
         echo "[DRY-RUN] ssh $ssh_opts ${TARGET_USER}@${TARGET_HOST} '$command'"
         return 0
     fi
@@ -114,9 +112,9 @@ ssh_exec() {
 
 # Execute command on remote host with sudo if needed
 ssh_exec_sudo() {
-    local command="$1"
+    command="$1"
 
-    if [[ "$TARGET_USER" == "root" ]]; then
+    if [ "$TARGET_USER" = "root" ]; then
         ssh_exec "$command"
     else
         # Use interactive mode with TTY for sudo password prompt if needed
@@ -126,8 +124,7 @@ ssh_exec_sudo() {
 
 # Execute command and capture output (for dry-run, still runs to get real data)
 ssh_exec_capture() {
-    local command="$1"
-    local ssh_opts
+    command="$1"
     ssh_opts=$(_ssh_opts)
 
     log_debug "SSH capture: $command"
@@ -138,8 +135,7 @@ ssh_exec_capture() {
 
 # Execute command interactively (with TTY for password prompts)
 ssh_exec_interactive() {
-    local command="$1"
-    local ssh_opts
+    command="$1"
     ssh_opts=$(_ssh_opts_no_batch)
 
     log_debug "SSH interactive: $command"
@@ -154,14 +150,13 @@ ssh_exec_interactive() {
 
 # Copy file to remote host
 scp_to_remote() {
-    local local_path="$1"
-    local remote_path="$2"
-    local scp_opts
+    local_path="$1"
+    remote_path="$2"
     scp_opts=$(_scp_opts)
 
     log_debug "SCP to remote: $local_path -> $remote_path"
 
-    if [[ "$DRY_RUN" == "true" ]]; then
+    if [ "$DRY_RUN" = "true" ]; then
         echo "[DRY-RUN] scp $scp_opts '$local_path' '${TARGET_USER}@${TARGET_HOST}:$remote_path'"
         return 0
     fi
@@ -172,14 +167,13 @@ scp_to_remote() {
 
 # Copy directory to remote host
 scp_dir_to_remote() {
-    local local_path="$1"
-    local remote_path="$2"
-    local scp_opts
+    local_path="$1"
+    remote_path="$2"
     scp_opts=$(_scp_opts)
 
     log_debug "SCP dir to remote: $local_path -> $remote_path"
 
-    if [[ "$DRY_RUN" == "true" ]]; then
+    if [ "$DRY_RUN" = "true" ]; then
         echo "[DRY-RUN] scp -r $scp_opts '$local_path' '${TARGET_USER}@${TARGET_HOST}:$remote_path'"
         return 0
     fi
@@ -196,7 +190,6 @@ scp_dir_to_remote() {
 test_ssh_connection() {
     log_step "Testing SSH connection to ${TARGET_USER}@${TARGET_HOST}..."
 
-    local ssh_opts
     ssh_opts=$(_ssh_opts_no_batch)
 
     # First connection may prompt for password - use interactive mode
@@ -214,12 +207,12 @@ check_root_access() {
     log_step "Checking root/sudo access..."
 
     # In dry-run mode, skip actual sudo check
-    if [[ "$DRY_RUN" == "true" ]]; then
+    if [ "$DRY_RUN" = "true" ]; then
         log_info "Root access check skipped (dry-run mode)"
         return 0
     fi
 
-    if [[ "$TARGET_USER" == "root" ]]; then
+    if [ "$TARGET_USER" = "root" ]; then
         log_info "Running as root"
         return 0
     fi
@@ -248,18 +241,18 @@ check_root_access() {
 get_remote_authorized_keys() {
     log_step "Retrieving SSH authorized keys..."
 
-    local keys=""
+    keys=""
 
     # Try to get keys from current user
     keys=$(ssh_exec_capture "cat ~/.ssh/authorized_keys 2>/dev/null || true")
 
     # If user is not root, also try root's keys
-    if [[ "$TARGET_USER" != "root" ]]; then
-        local root_keys
+    if [ "$TARGET_USER" != "root" ]; then
         root_keys=$(ssh_exec_capture "sudo -n cat /root/.ssh/authorized_keys 2>/dev/null || true")
-        if [[ -n "$root_keys" ]]; then
-            if [[ -n "$keys" ]]; then
-                keys="$keys"$'\n'"$root_keys"
+        if [ -n "$root_keys" ]; then
+            if [ -n "$keys" ]; then
+                keys="${keys}
+${root_keys}"
             else
                 keys="$root_keys"
             fi
@@ -269,13 +262,12 @@ get_remote_authorized_keys() {
     # Remove duplicates and empty lines
     keys=$(echo "$keys" | sort -u | grep -v '^$' || true)
 
-    if [[ -z "$keys" ]]; then
+    if [ -z "$keys" ]; then
         log_warn "No SSH authorized keys found on remote host!"
-        if [[ "$FORCE" != "true" ]]; then
+        if [ "$FORCE" != "true" ]; then
             die "No SSH keys found. You may lose access after reboot. Use --force to continue anyway."
         fi
     else
-        local key_count
         key_count=$(echo "$keys" | wc -l | tr -d ' ')
         log_info "Found $key_count SSH key(s)"
     fi
@@ -289,13 +281,13 @@ get_remote_authorized_keys() {
 
 # Wait for host to come back online
 wait_for_host() {
-    local timeout="${1:-180}"
-    local interval=5
-    local elapsed=0
+    timeout="${1:-180}"
+    interval=5
+    elapsed=0
 
     log_step "Waiting for host to come back online (timeout: ${timeout}s)..."
 
-    while ((elapsed < timeout)); do
+    while [ "$elapsed" -lt "$timeout" ]; do
         if ssh_exec_capture "echo 'alive'" >/dev/null 2>&1; then
             log_info "Host is back online!"
             return 0
@@ -313,7 +305,6 @@ wait_for_host() {
 verify_alpine_boot() {
     log_step "Verifying Alpine Linux boot..."
 
-    local os_release
     os_release=$(ssh_exec_capture "cat /etc/os-release 2>/dev/null || true")
 
     if echo "$os_release" | grep -qi "alpine"; then

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # install.sh - A/B installation for alpine-anywhere
 #
 # Creates an immutable Alpine Linux installation with:
@@ -29,9 +29,11 @@ detect_root_disk() {
     root_dev=$(findmnt -n -o SOURCE / | sed 's/[0-9]*$//' | sed 's/p$//')
 
     # Handle /dev/mmcblk0p1 -> /dev/mmcblk0
-    if [[ "$root_dev" =~ mmcblk|nvme ]]; then
-        root_dev=$(echo "$root_dev" | sed 's/p$//')
-    fi
+    case "$root_dev" in
+        *mmcblk*|*nvme*)
+            root_dev=$(echo "$root_dev" | sed 's/p$//')
+            ;;
+    esac
 
     echo "$root_dev"
 }
@@ -64,14 +66,17 @@ is_usable_data_partition() {
     label=$(lsblk -npo LABEL "$part" 2>/dev/null)
 
     # Accept ext4 partitions, especially those labeled for data
-    if [[ "$fstype" == "ext4" ]]; then
+    if [ "$fstype" = "ext4" ]; then
         # Prefer partitions with data-related labels
-        if [[ "$label" =~ DATA|data|home|persist ]]; then
-            echo "preferred"
-        else
-            echo "usable"
-        fi
-    elif [[ -z "$fstype" ]]; then
+        case "$label" in
+            *DATA*|*data*|*home*|*persist*)
+                echo "preferred"
+                ;;
+            *)
+                echo "usable"
+                ;;
+        esac
+    elif [ -z "$fstype" ]; then
         # Unformatted partition - can be formatted
         echo "unformatted"
     else
@@ -88,7 +93,7 @@ auto_detect_overlay_device() {
     log_debug "Root disk: $root_disk"
 
     # First, look for existing data partitions on root disk
-    while IFS= read -r line; do
+    get_partition_info "$root_disk" | while IFS= read -r line; do
         local part size fstype label mount
         part=$(echo "$line" | awk '{print $1}')
         fstype=$(echo "$line" | awk '{print $3}')
@@ -96,7 +101,9 @@ auto_detect_overlay_device() {
         mount=$(echo "$line" | awk '{print $5}')
 
         # Skip if mounted as / or /boot
-        [[ "$mount" == "/" || "$mount" == "/boot"* ]] && continue
+        case "$mount" in
+            /|/boot*) continue ;;
+        esac
 
         local status
         status=$(is_usable_data_partition "$part")
@@ -107,22 +114,22 @@ auto_detect_overlay_device() {
                 log_debug "Found preferred data partition: $part (label: $label)"
                 ;;
             usable)
-                [[ -z "$usable_part" ]] && usable_part="$part"
+                [ -z "$usable_part" ] && usable_part="$part"
                 log_debug "Found usable partition: $part"
                 ;;
             unformatted)
-                [[ -z "$unformatted_part" ]] && unformatted_part="$part"
+                [ -z "$unformatted_part" ] && unformatted_part="$part"
                 log_debug "Found unformatted partition: $part"
                 ;;
         esac
-    done < <(get_partition_info "$root_disk")
+    done
 
     # Return best option
-    if [[ -n "$preferred_part" ]]; then
+    if [ -n "$preferred_part" ]; then
         echo "$preferred_part"
-    elif [[ -n "$usable_part" ]]; then
+    elif [ -n "$usable_part" ]; then
         echo "$usable_part"
-    elif [[ -n "$unformatted_part" ]]; then
+    elif [ -n "$unformatted_part" ]; then
         echo "$unformatted_part"
     fi
 }
@@ -142,9 +149,9 @@ detect_disk_layout() {
     done
 
     # Auto-detect overlay if not specified
-    if [[ -z "$OVERLAY_DEVICE" ]]; then
+    if [ -z "$OVERLAY_DEVICE" ]; then
         overlay_device=$(auto_detect_overlay_device)
-        if [[ -n "$overlay_device" ]]; then
+        if [ -n "$overlay_device" ]; then
             log_info "Auto-detected overlay device: $overlay_device"
             OVERLAY_DEVICE="$overlay_device"
         else
@@ -171,7 +178,7 @@ create_partition_layout() {
     # Safety check
     local disk_size
     disk_size=$(get_disk_size_mb "$disk")
-    if ((disk_size < MIN_DISK_SIZE_MB)); then
+    if [ "$disk_size" -lt "$MIN_DISK_SIZE_MB" ]; then
         die "Disk too small: ${disk_size}MB (minimum: ${MIN_DISK_SIZE_MB}MB)"
     fi
 
@@ -189,7 +196,7 @@ create_partition_layout() {
     log_info "Creating boot partition (${PART_BOOT_SIZE})..."
     parted -s "$disk" mkpart boot ext4 "${PART_ESP_SIZE}" "$((256 + 512))MiB"
 
-    if [[ "$with_data" == "true" ]]; then
+    if [ "$with_data" = "true" ]; then
         log_info "Creating data partition (remaining space)..."
         parted -s "$disk" mkpart data ext4 "$((256 + 512))MiB" 100%
     fi
@@ -207,11 +214,14 @@ get_partition_device() {
     local disk="$1"
     local part_num="$2"
 
-    if [[ "$disk" =~ mmcblk|nvme|loop ]]; then
-        echo "${disk}p${part_num}"
-    else
-        echo "${disk}${part_num}"
-    fi
+    case "$disk" in
+        *mmcblk*|*nvme*|*loop*)
+            echo "${disk}p${part_num}"
+            ;;
+        *)
+            echo "${disk}${part_num}"
+            ;;
+    esac
 }
 
 # Format partitions
@@ -231,7 +241,7 @@ format_partitions() {
     log_info "Formatting boot partition ($boot_dev)..."
     mkfs.ext4 -L ALPINE_BOOT -F "$boot_dev"
 
-    if [[ "$with_data" == "true" ]]; then
+    if [ "$with_data" = "true" ]; then
         data_dev=$(get_partition_device "$disk" 3)
         log_info "Formatting data partition ($data_dev)..."
         mkfs.ext4 -L ALPINE_DATA -F "$data_dev"
@@ -309,7 +319,7 @@ EOF
     log_info "Installing system packages..."
     chroot "$build_dir" /sbin/apk update
 
-    if [[ "$HARDENED_MODE" == "true" ]]; then
+    if [ "$HARDENED_MODE" = "true" ]; then
         log_info "Installing hardened packages..."
         chroot "$build_dir" /sbin/apk add --no-cache \
             alpine-base \
@@ -348,7 +358,7 @@ EOF
     fi
 
     # Add extra packages if specified
-    if [[ -n "$EXTRA_PACKAGES" ]]; then
+    if [ -n "$EXTRA_PACKAGES" ]; then
         local pkgs
         pkgs=$(echo "$EXTRA_PACKAGES" | tr ',' ' ')
         chroot "$build_dir" /sbin/apk add --no-cache $pkgs
@@ -358,7 +368,7 @@ EOF
     configure_system_image "$build_dir"
 
     # Apply hardening if enabled
-    if [[ "$HARDENED_MODE" == "true" ]]; then
+    if [ "$HARDENED_MODE" = "true" ]; then
         apply_hardening_to_image "$build_dir"
     fi
 
@@ -403,7 +413,7 @@ configure_system_image() {
 
     # Network
     mkdir -p "${root}/etc/network"
-    if [[ "$NETWORK_IS_DHCP" == "true" ]]; then
+    if [ "$NETWORK_IS_DHCP" = "true" ]; then
         cat > "${root}/etc/network/interfaces" << EOF
 auto lo
 iface lo inet loopback
@@ -455,13 +465,13 @@ setup_system_ssh() {
     chmod 700 "${root}/root/.ssh"
 
     # Copy authorized keys from apkovl
-    if [[ -f "${INSTALL_CACHE_DIR}/${DETECTED_HOSTNAME}.apkovl.tar.gz" ]]; then
+    if [ -f "${INSTALL_CACHE_DIR}/${DETECTED_HOSTNAME}.apkovl.tar.gz" ]; then
         tar -xzf "${INSTALL_CACHE_DIR}/${DETECTED_HOSTNAME}.apkovl.tar.gz" \
             -C "$root" ./root/.ssh/authorized_keys 2>/dev/null || true
     fi
 
     # Fallback
-    if [[ ! -s "${root}/root/.ssh/authorized_keys" ]]; then
+    if [ ! -s "${root}/root/.ssh/authorized_keys" ]; then
         cat ~/.ssh/authorized_keys >> "${root}/root/.ssh/authorized_keys" 2>/dev/null || true
         cat /root/.ssh/authorized_keys >> "${root}/root/.ssh/authorized_keys" 2>/dev/null || true
     fi
@@ -470,7 +480,7 @@ setup_system_ssh() {
     chmod 600 "${root}/root/.ssh/authorized_keys" 2>/dev/null || true
 
     # Configure SSH server
-    if [[ "$HARDENED_MODE" == "true" ]]; then
+    if [ "$HARDENED_MODE" = "true" ]; then
         # Dropbear uses authorized_keys in same location, no config file needed
         # Dropbear configuration is handled by hardening.sh (via /etc/conf.d/dropbear)
         log_info "Using dropbear (key-only authentication)"
@@ -529,7 +539,7 @@ set default=0
 
 # Load current slot
 if [ -f /current_slot ]; then
-    source /current_slot
+    . /current_slot
 else
     set slot=A
 fi
@@ -587,7 +597,7 @@ LABEL alpine-b
 EOF
 
     # For Raspberry Pi, also create config.txt
-    if [[ "$DETECTED_PLATFORM" == "rpi" ]]; then
+    if [ "$DETECTED_PLATFORM" = "rpi" ]; then
         setup_rpi_boot "$boot_mount"
     fi
 }
@@ -599,7 +609,7 @@ setup_rpi_boot() {
     log_info "Configuring Raspberry Pi boot..."
 
     # Copy RPi firmware files
-    if [[ -f "${INSTALL_CACHE_DIR}/alpine-rpi-${ALPINE_VERSION}.0-${DETECTED_ARCH}.tar.gz" ]]; then
+    if [ -f "${INSTALL_CACHE_DIR}/alpine-rpi-${ALPINE_VERSION}.0-${DETECTED_ARCH}.tar.gz" ]; then
         tar -xzf "${INSTALL_CACHE_DIR}/alpine-rpi-${ALPINE_VERSION}.0-${DETECTED_ARCH}.tar.gz" \
             -C "$boot_mount" \
             --strip-components=1 \
@@ -657,7 +667,7 @@ EOF
 
 # Run full A/B installation (must be run as root)
 run_ab_install() {
-    if [[ $EUID -ne 0 ]]; then
+    if [ "$EUID" -ne 0 ] 2>/dev/null || [ "$(id -u)" -ne 0 ]; then
         die "run_ab_install must be run as root"
     fi
 
@@ -668,7 +678,7 @@ run_ab_install() {
     log_info "Target disk: $disk"
 
     # Confirm
-    if [[ "$DRY_RUN" != "true" ]]; then
+    if [ "$DRY_RUN" != "true" ]; then
         echo ""
         echo "WARNING: This will ERASE ALL DATA on $disk"
         echo ""
@@ -676,7 +686,7 @@ run_ab_install() {
     fi
 
     local with_data=false
-    [[ -n "$OVERLAY_DEVICE" ]] && with_data=true
+    [ -n "$OVERLAY_DEVICE" ] && with_data=true
 
     # Create partitions
     create_partition_layout "$disk" "$with_data"
@@ -693,7 +703,7 @@ run_ab_install() {
     mount "$boot_dev" "${mnt_base}/boot"
     mount "$esp_dev" "${mnt_base}/esp"
 
-    if [[ "$with_data" == "true" ]]; then
+    if [ "$with_data" = "true" ]; then
         local data_dev
         data_dev=$(get_partition_device "$disk" 3)
         mkdir -p "${mnt_base}/data"
@@ -716,7 +726,7 @@ run_ab_install() {
     # Cleanup
     umount "${mnt_base}/esp"
     umount "${mnt_base}/boot"
-    [[ "$with_data" == "true" ]] && umount "${mnt_base}/data"
+    [ "$with_data" = "true" ] && umount "${mnt_base}/data"
 
     log_info "A/B installation complete!"
     log_info "Reboot to start Alpine Linux"
@@ -729,7 +739,7 @@ copy_kernel_files() {
     log_info "Copying kernel files..."
 
     # Copy from cache (downloaded earlier)
-    if [[ -f "${INSTALL_CACHE_DIR}/vmlinuz" ]]; then
+    if [ -f "${INSTALL_CACHE_DIR}/vmlinuz" ]; then
         cp "${INSTALL_CACHE_DIR}/vmlinuz" "${slot_dir}/"
         cp "${INSTALL_CACHE_DIR}/initramfs"* "${slot_dir}/initramfs"
     else

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # kexec_spec.sh - Tests for lib/kexec.sh
 
 Describe 'kexec.sh'

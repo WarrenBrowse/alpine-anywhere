@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Tests for hardening.sh - Security hardening module
 
 Describe 'hardening.sh'
