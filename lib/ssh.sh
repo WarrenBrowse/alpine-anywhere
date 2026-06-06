@@ -70,6 +70,27 @@ _ssh_opts_no_batch() {
     echo "$opts"
 }
 
+# Build SCP options (uses -P for port instead of -p)
+_scp_opts() {
+    local opts="-o BatchMode=yes"
+    opts="$opts -o StrictHostKeyChecking=accept-new"
+    opts="$opts -o ConnectTimeout=10"
+    opts="$opts -P $SSH_PORT"
+
+    # Add multiplexing if enabled
+    if [[ -n "$SSH_CONTROL_PATH" ]]; then
+        opts="$opts -o ControlPath=$SSH_CONTROL_PATH"
+        opts="$opts -o ControlMaster=auto"
+        opts="$opts -o ControlPersist=300"
+    fi
+
+    if [[ -n "$SSH_IDENTITY" ]]; then
+        opts="$opts -i $SSH_IDENTITY"
+    fi
+
+    echo "$opts"
+}
+
 # =============================================================================
 # SSH Execution Functions
 # =============================================================================
@@ -135,36 +156,36 @@ ssh_exec_interactive() {
 scp_to_remote() {
     local local_path="$1"
     local remote_path="$2"
-    local ssh_opts
-    ssh_opts=$(_ssh_opts)
+    local scp_opts
+    scp_opts=$(_scp_opts)
 
     log_debug "SCP to remote: $local_path -> $remote_path"
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        echo "[DRY-RUN] scp $ssh_opts '$local_path' '${TARGET_USER}@${TARGET_HOST}:$remote_path'"
+        echo "[DRY-RUN] scp $scp_opts '$local_path' '${TARGET_USER}@${TARGET_HOST}:$remote_path'"
         return 0
     fi
 
     # shellcheck disable=SC2086
-    scp $ssh_opts "$local_path" "${TARGET_USER}@${TARGET_HOST}:$remote_path"
+    scp $scp_opts "$local_path" "${TARGET_USER}@${TARGET_HOST}:$remote_path"
 }
 
 # Copy directory to remote host
 scp_dir_to_remote() {
     local local_path="$1"
     local remote_path="$2"
-    local ssh_opts
-    ssh_opts=$(_ssh_opts)
+    local scp_opts
+    scp_opts=$(_scp_opts)
 
     log_debug "SCP dir to remote: $local_path -> $remote_path"
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        echo "[DRY-RUN] scp -r $ssh_opts '$local_path' '${TARGET_USER}@${TARGET_HOST}:$remote_path'"
+        echo "[DRY-RUN] scp -r $scp_opts '$local_path' '${TARGET_USER}@${TARGET_HOST}:$remote_path'"
         return 0
     fi
 
     # shellcheck disable=SC2086
-    scp -r $ssh_opts "$local_path" "${TARGET_USER}@${TARGET_HOST}:$remote_path"
+    scp -r $scp_opts "$local_path" "${TARGET_USER}@${TARGET_HOST}:$remote_path"
 }
 
 # =============================================================================
