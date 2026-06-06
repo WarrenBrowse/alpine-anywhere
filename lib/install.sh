@@ -11,31 +11,43 @@
 # =============================================================================
 
 # Partition layout (GPT)
-# 1: EFI System Partition (ESP) - 256MB - FAT32
-# 2: Boot partition - 512MB - ext4 (contains A/B slots)
-# 3: Data partition - remaining - ext4 (optional, for overlay)
+# 1: Boot (FAT32, 512M) - firmware + kernel + initramfs + config
+# 2: Slot A (raw, 2G)   - squashfs root image A
+# 3: Slot B (raw, 2G)   - squashfs root image B
+# 4: Data (ext4, rest)  - persistent overlay (optional, phase 3)
 
-PART_ESP_SIZE="256M"
-PART_BOOT_SIZE="512M"
-MIN_DISK_SIZE_MB=1024
+PART_BOOT_SIZE_MB=512
+PART_SLOT_SIZE_MB=2048
+MIN_DISK_SIZE_MB=5120
 
 # =============================================================================
 # Disk Detection
 # =============================================================================
 
-# Detect the root disk
+# Detect the target install disk
+# When running from tmpfs (after pivot), root is not on a real disk,
+# so we find the first available physical disk instead.
 detect_root_disk() {
-    local root_dev
-    root_dev=$(findmnt -n -o SOURCE / | sed 's/[0-9]*$//' | sed 's/p$//')
+    local root_type disk
 
-    # Handle /dev/mmcblk0p1 -> /dev/mmcblk0
-    case "$root_dev" in
-        *mmcblk*|*nvme*)
-            root_dev=$(echo "$root_dev" | sed 's/p$//')
-            ;;
-    esac
+    root_type=$(stat -f -c %T / 2>/dev/null || df -T / 2>/dev/null | awk 'NR==2{print $2}')
 
-    echo "$root_dev"
+    if echo "$root_type" | grep -qi tmpfs; then
+        # Running from RAM - find first physical disk
+        disk=$(lsblk -dnpo NAME,TYPE 2>/dev/null | awk '$2=="disk"{print $1; exit}')
+        if [ -z "$disk" ]; then
+            die "No physical disk found"
+        fi
+        log_debug "Running from tmpfs, using first disk: $disk"
+    else
+        # Running from disk - detect root device
+        disk=$(findmnt -n -o SOURCE / 2>/dev/null | sed 's/[0-9]*$//' | sed 's/p$//')
+        case "$disk" in
+            *mmcblk*|*nvme*) disk=$(echo "$disk" | sed 's/p$//') ;;
+        esac
+    fi
+
+    echo "$disk"
 }
 
 # Get disk size in MB
@@ -175,7 +187,6 @@ create_partition_layout() {
 
     log_step "Creating partition layout on $disk..."
 
-    # Safety check
     local disk_size
     disk_size=$(get_disk_size_mb "$disk")
     if [ "$disk_size" -lt "$MIN_DISK_SIZE_MB" ]; then
@@ -184,26 +195,30 @@ create_partition_layout() {
 
     log_info "Disk size: ${disk_size}MB"
 
-    # Create GPT partition table
+    local slot_end_mb=$((1 + PART_BOOT_SIZE_MB + PART_SLOT_SIZE_MB + PART_SLOT_SIZE_MB))
+
     log_info "Creating GPT partition table..."
     parted -s "$disk" mklabel gpt
 
-    # Create partitions
-    log_info "Creating ESP partition (${PART_ESP_SIZE})..."
-    parted -s "$disk" mkpart ESP fat32 1MiB "${PART_ESP_SIZE}"
-    parted -s "$disk" set 1 esp on
+    log_info "Creating boot partition (${PART_BOOT_SIZE_MB}MB, FAT32)..."
+    parted -s "$disk" mkpart boot fat32 1MiB "${PART_BOOT_SIZE_MB}MiB"
+    parted -s "$disk" set 1 boot on
 
-    log_info "Creating boot partition (${PART_BOOT_SIZE})..."
-    parted -s "$disk" mkpart boot ext4 "${PART_ESP_SIZE}" "$((256 + 512))MiB"
+    log_info "Creating slot A partition (${PART_SLOT_SIZE_MB}MB)..."
+    parted -s "$disk" mkpart slot_a ext4 "${PART_BOOT_SIZE_MB}MiB" "$((PART_BOOT_SIZE_MB + PART_SLOT_SIZE_MB))MiB"
+
+    log_info "Creating slot B partition (${PART_SLOT_SIZE_MB}MB)..."
+    parted -s "$disk" mkpart slot_b ext4 "$((PART_BOOT_SIZE_MB + PART_SLOT_SIZE_MB))MiB" "${slot_end_mb}MiB"
 
     if [ "$with_data" = "true" ]; then
         log_info "Creating data partition (remaining space)..."
-        parted -s "$disk" mkpart data ext4 "$((256 + 512))MiB" 100%
+        parted -s "$disk" mkpart data ext4 "${slot_end_mb}MiB" 100%
     fi
 
-    # Wait for partitions to appear
+    # Try to re-read partition table
     sleep 2
     partprobe "$disk" 2>/dev/null || true
+    blockdev --rereadpt "$disk" 2>/dev/null || true
     sleep 1
 
     log_info "Partition layout created"
@@ -224,6 +239,59 @@ get_partition_device() {
     esac
 }
 
+# Ensure partition devices exist (use loop devices if kernel can't re-read table)
+ensure_partition_devices() {
+    local disk="$1"
+    local part1_dev
+    part1_dev=$(get_partition_device "$disk" 1)
+
+    if [ -b "$part1_dev" ]; then
+        log_debug "Partition devices available directly"
+        return 0
+    fi
+
+    log_info "Kernel can't see new partitions, creating loop devices..."
+
+    # Read partition offsets from GPT via sfdisk
+    local part_info
+    part_info=$(sfdisk -d "$disk" 2>/dev/null | grep "^${disk}")
+
+    local part_num=0
+    echo "$part_info" | while IFS= read -r line; do
+        part_num=$((part_num + 1))
+        local start size
+        start=$(echo "$line" | sed -n 's/.*start= *\([0-9]*\).*/\1/p')
+        size=$(echo "$line" | sed -n 's/.*size= *\([0-9]*\).*/\1/p')
+        if [ -n "$start" ] && [ -n "$size" ]; then
+            local loop="/dev/loop$((part_num - 1))"
+            losetup -d "$loop" 2>/dev/null || true
+            losetup -o $((start * 512)) --sizelimit $((size * 512)) "$loop" "$disk"
+            log_debug "  $loop -> offset=$start size=$size sectors"
+        fi
+    done
+
+    # Export loop device mapping
+    PART_BOOT_DEV="/dev/loop0"
+    PART_SLOTA_DEV="/dev/loop1"
+    PART_SLOTB_DEV="/dev/loop2"
+    PART_DATA_DEV="/dev/loop3"
+}
+
+# Get the actual device for a partition (handles loop device fallback)
+get_part_dev() {
+    local disk="$1"
+    local part_num="$2"
+    local direct_dev
+    direct_dev=$(get_partition_device "$disk" "$part_num")
+
+    if [ -b "$direct_dev" ]; then
+        echo "$direct_dev"
+    else
+        # Use loop device
+        echo "/dev/loop$((part_num - 1))"
+    fi
+}
+
 # Format partitions
 format_partitions() {
     local disk="$1"
@@ -231,20 +299,22 @@ format_partitions() {
 
     log_step "Formatting partitions..."
 
-    local esp_dev boot_dev data_dev
-    esp_dev=$(get_partition_device "$disk" 1)
-    boot_dev=$(get_partition_device "$disk" 2)
+    # Ensure we can access partitions (loop devices if needed)
+    ensure_partition_devices "$disk"
 
-    log_info "Formatting ESP ($esp_dev)..."
-    mkfs.vfat -F 32 -n ESP "$esp_dev"
+    local boot_dev slota_dev data_dev
+    boot_dev=$(get_part_dev "$disk" 1)
 
-    log_info "Formatting boot partition ($boot_dev)..."
-    mkfs.ext4 -L ALPINE_BOOT -F "$boot_dev"
+    log_info "Formatting boot partition ($boot_dev, FAT32)..."
+    mkfs.vfat -F 32 -n ALPINE_BOOT "$boot_dev"
+
+    # Slot A and B are raw (squashfs written directly), no formatting needed
+    log_info "Slot A and B: raw partitions (squashfs will be written directly)"
 
     if [ "$with_data" = "true" ]; then
-        data_dev=$(get_partition_device "$disk" 3)
-        log_info "Formatting data partition ($data_dev)..."
-        mkfs.ext4 -L ALPINE_DATA -F "$data_dev"
+        data_dev=$(get_part_dev "$disk" 4)
+        log_info "Formatting data partition ($data_dev, ext4)..."
+        mkfs.ext4 -L ALPINE_DATA -q -F "$data_dev"
     fi
 
     log_info "Partitions formatted"
@@ -290,116 +360,112 @@ EOF
 # System Image Generation
 # =============================================================================
 
-# Generate Alpine system squashfs
+# Build Alpine rootfs and create squashfs image
+# Output: /tmp/system.squashfs + kernel/initramfs in $BUILD_DIR/boot/
 generate_system_squashfs() {
-    local output_dir="$1"
-    local slot="$2"
+    local squashfs_output="$1"
 
-    log_step "Generating system.squashfs for slot $slot..."
+    log_step "Building Alpine system image..."
 
     local build_dir
     build_dir=$(mktemp -d)
 
-    # Extract minirootfs as base
+    # Extract minirootfs
     log_info "Extracting base system..."
-    tar -xzf "${INSTALL_CACHE_DIR}/minirootfs.tar.gz" -C "$build_dir"
+    if [ -f "${INSTALL_CACHE_DIR}/minirootfs.tar.gz" ]; then
+        tar -xzf "${INSTALL_CACHE_DIR}/minirootfs.tar.gz" -C "$build_dir"
+    else
+        local minirootfs_url="${ALPINE_MIRROR}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/alpine-minirootfs-${ALPINE_VERSION}.0-${DETECTED_ARCH}.tar.gz"
+        curl -fSL "$minirootfs_url" | tar xz -C "$build_dir"
+    fi
 
-    # Mount for chroot operations
-    mount -t proc proc "${build_dir}/proc"
-    mount -t sysfs sysfs "${build_dir}/sys"
-    mount -t devtmpfs devtmpfs "${build_dir}/dev"
+    # DNS must be set BEFORE apk update
+    cp /etc/resolv.conf "${build_dir}/etc/resolv.conf"
 
-    # Configure APK
-    tee "${build_dir}/etc/apk/repositories" > /dev/null << EOF
+    # APK repos
+    cat > "${build_dir}/etc/apk/repositories" << EOF
 ${ALPINE_MIRROR}/v${ALPINE_VERSION}/main
 ${ALPINE_MIRROR}/v${ALPINE_VERSION}/community
 EOF
 
-    # Install packages based on mode
-    log_info "Installing system packages..."
+    # Mount for chroot
+    mount -t proc proc "${build_dir}/proc"
+    mount -t sysfs sysfs "${build_dir}/sys"
+    mount --bind /dev "${build_dir}/dev"
+
+    # Determine kernel package based on platform
+    local kernel_pkg="linux-lts"
+    if [ "$DETECTED_PLATFORM" = "rpi" ]; then
+        kernel_pkg="linux-rpi4"
+    fi
+
+    # Configure mkinitfs to include squashfs BEFORE installing kernel
+    mkdir -p "${build_dir}/etc/mkinitfs"
+    echo 'features="ata base cdrom ext4 keymap kms mmc nvme scsi usb virtio squashfs"' \
+        > "${build_dir}/etc/mkinitfs/mkinitfs.conf"
+
+    # Install packages
+    log_info "Installing packages (kernel: $kernel_pkg)..."
     chroot "$build_dir" /sbin/apk update
 
+    local ssh_pkg="openssh-server openssh-client"
     if [ "$HARDENED_MODE" = "true" ]; then
-        log_info "Installing hardened packages..."
-        chroot "$build_dir" /sbin/apk add --no-cache \
-            alpine-base \
-            linux-hardened \
-            linux-firmware-none \
-            openrc \
-            busybox-openrc \
-            dropbear \
-            dropbear-openrc \
-            hardened-malloc \
-            nftables \
-            iptables \
-            e2fsprogs \
-            dosfstools \
-            parted \
-            rsync \
-            curl \
-            ca-certificates \
-            chrony
-
-    else
-        chroot "$build_dir" /sbin/apk add --no-cache \
-            alpine-base \
-            linux-lts \
-            linux-firmware-none \
-            openrc \
-            busybox-openrc \
-            openssh-server \
-            openssh-client \
-            e2fsprogs \
-            dosfstools \
-            parted \
-            rsync \
-            curl \
-            ca-certificates
+        ssh_pkg="dropbear dropbear-openrc"
     fi
 
-    # Add extra packages if specified
+    chroot "$build_dir" /sbin/apk add --no-cache \
+        alpine-base openrc busybox-openrc \
+        "$kernel_pkg" linux-firmware-none \
+        mkinitfs \
+        $ssh_pkg \
+        e2fsprogs dosfstools \
+        chrony ca-certificates curl
+
+    # RPi: install firmware package
+    if [ "$DETECTED_PLATFORM" = "rpi" ]; then
+        chroot "$build_dir" /sbin/apk add --no-cache raspberrypi-bootloader
+    fi
+
+    # Extra packages
     if [ -n "$EXTRA_PACKAGES" ]; then
-        local pkgs
-        pkgs=$(echo "$EXTRA_PACKAGES" | tr ',' ' ')
-        chroot "$build_dir" /sbin/apk add --no-cache $pkgs
+        chroot "$build_dir" /sbin/apk add --no-cache $(echo "$EXTRA_PACKAGES" | tr ',' ' ')
     fi
 
-    # Configure system
+    # Configure the system
     configure_system_image "$build_dir"
+
+    # Setup SSH
+    setup_system_ssh "$build_dir"
 
     # Apply hardening if enabled
     if [ "$HARDENED_MODE" = "true" ]; then
-        apply_hardening_to_image "$build_dir"
+        apply_hardening_to_image "$build_dir" 2>/dev/null || true
     fi
-
-    # Setup SSH (dropbear or openssh)
-    setup_system_ssh "$build_dir"
 
     # Cleanup chroot mounts
     umount "${build_dir}/dev" 2>/dev/null || true
     umount "${build_dir}/sys" 2>/dev/null || true
     umount "${build_dir}/proc" 2>/dev/null || true
 
+    # Save boot files BEFORE creating squashfs (we'll extract them for boot partition)
+    mkdir -p /tmp/boot-files
+    cp "${build_dir}"/boot/vmlinuz-* /tmp/boot-files/vmlinuz 2>/dev/null || true
+    cp "${build_dir}"/boot/initramfs-* /tmp/boot-files/initramfs 2>/dev/null || true
+    cp "${build_dir}"/boot/*.dtb /tmp/boot-files/ 2>/dev/null || true
+    cp -r "${build_dir}"/boot/overlays /tmp/boot-files/ 2>/dev/null || true
+    # RPi firmware files
+    cp "${build_dir}"/boot/start*.elf /tmp/boot-files/ 2>/dev/null || true
+    cp "${build_dir}"/boot/fixup*.dat /tmp/boot-files/ 2>/dev/null || true
+    cp "${build_dir}"/boot/bootcode.bin /tmp/boot-files/ 2>/dev/null || true
+
     # Create squashfs
     log_info "Creating squashfs image..."
-    mksquashfs "$build_dir" "${output_dir}/system.squashfs" \
-        -comp zstd \
-        -Xcompression-level 19 \
-        -noappend \
-        -no-progress
+    mksquashfs "$build_dir" "$squashfs_output" \
+        -comp zstd -noappend -no-progress
 
-    # Cleanup
     rm -rf "$build_dir"
 
-    # Update metadata
-    cat > "${output_dir}/meta.conf" << EOF
-VERSION=${ALPINE_VERSION}
-INSTALLED=$(date -Iseconds)
-BOOT_COUNT=0
-VERIFIED=false
-EOF
-
-    log_info "System image created: $(du -h "${output_dir}/system.squashfs" | cut -f1)"
+    log_info "System image: $(du -h "$squashfs_output" | cut -f1)"
 }
 
 # Configure the system image
@@ -441,8 +507,13 @@ EOF
 
     # Enable services
     chroot "$root" /sbin/rc-update add networking boot
-    chroot "$root" /sbin/rc-update add sshd default
+    if [ "$HARDENED_MODE" = "true" ]; then
+        chroot "$root" /sbin/rc-update add dropbear default
+    else
+        chroot "$root" /sbin/rc-update add sshd default
+    fi
     chroot "$root" /sbin/rc-update add local default
+    chroot "$root" /sbin/rc-update add chronyd default 2>/dev/null || true
 
     # Create immutable marker
     touch "${root}/etc/alpine-anywhere-immutable"
@@ -675,83 +746,144 @@ run_ab_install() {
 
     local disk
     disk=$(detect_root_disk)
-    log_info "Target disk: $disk"
+    log_info "Target disk: $disk ($(get_disk_size_mb "$disk")MB)"
 
     # Confirm
-    if [ "$DRY_RUN" != "true" ]; then
+    if [ "$FORCE" != "true" ]; then
         echo ""
         echo "WARNING: This will ERASE ALL DATA on $disk"
         echo ""
         confirm_action "Proceed with installation on $disk?"
     fi
 
-    local with_data=false
-    [ -n "$OVERLAY_DEVICE" ] && with_data=true
+    local with_data=true
 
-    # Create partitions
+    # Step 1: Partition disk
     create_partition_layout "$disk" "$with_data"
     format_partitions "$disk" "$with_data"
 
-    # Mount partitions
-    local esp_dev boot_dev
-    esp_dev=$(get_partition_device "$disk" 1)
-    boot_dev=$(get_partition_device "$disk" 2)
+    # Step 2: Build system image
+    local squashfs="/tmp/system.squashfs"
+    generate_system_squashfs "$squashfs"
 
-    local mnt_base="/mnt/alpine-install"
-    mkdir -p "${mnt_base}/esp" "${mnt_base}/boot"
+    # Step 3: Write squashfs to slot A
+    local slota_dev
+    slota_dev=$(get_part_dev "$disk" 2)
+    log_step "Writing squashfs to slot A ($slota_dev)..."
+    dd if="$squashfs" of="$slota_dev" bs=1M 2>/dev/null
+    sync
+    log_info "Slot A written: $(du -h "$squashfs" | cut -f1)"
 
-    mount "$boot_dev" "${mnt_base}/boot"
-    mount "$esp_dev" "${mnt_base}/esp"
+    # Step 4: Install boot files
+    local boot_dev
+    boot_dev=$(get_part_dev "$disk" 1)
+    local boot_mnt="/mnt/boot"
+    mkdir -p "$boot_mnt"
+    mount "$boot_dev" "$boot_mnt"
 
+    log_step "Installing boot files..."
+    # Copy kernel, initramfs, dtbs, firmware from build
+    cp /tmp/boot-files/* "$boot_mnt/" 2>/dev/null || true
+    cp -r /tmp/boot-files/overlays "$boot_mnt/" 2>/dev/null || true
+
+    # Step 5: Configure bootloader
+    install_boot_config "$boot_mnt" "$disk"
+
+    # Copy alpine-anywhere scripts to boot partition for future upgrades
+    mkdir -p "${boot_mnt}/alpine-anywhere/lib"
+    cp "${INSTALL_BASE_DIR}/alpine-anywhere" "${boot_mnt}/alpine-anywhere/" 2>/dev/null || \
+        cp "${SCRIPT_DIR}/alpine-anywhere" "${boot_mnt}/alpine-anywhere/" 2>/dev/null || true
+    cp "${INSTALL_BASE_DIR}"/lib/*.sh "${boot_mnt}/alpine-anywhere/lib/" 2>/dev/null || \
+        cp "${SCRIPT_DIR}"/lib/*.sh "${boot_mnt}/alpine-anywhere/lib/" 2>/dev/null || true
+    chmod +x "${boot_mnt}/alpine-anywhere/alpine-anywhere" 2>/dev/null || true
+
+    # Step 6: Setup data partition (phase 3 prep)
     if [ "$with_data" = "true" ]; then
         local data_dev
-        data_dev=$(get_partition_device "$disk" 3)
-        mkdir -p "${mnt_base}/data"
-        mount "$data_dev" "${mnt_base}/data"
-        setup_data_partition "${mnt_base}/data"
+        data_dev=$(get_part_dev "$disk" 4)
+        mkdir -p /mnt/data
+        mount "$data_dev" /mnt/data
+        setup_data_partition /mnt/data
+        umount /mnt/data
     fi
 
-    # Setup boot structure
-    setup_boot_structure "${mnt_base}/boot"
-
-    # Generate system image for slot A
-    generate_system_squashfs "${mnt_base}/boot/slots/A" "A"
-
-    # Copy kernel and initramfs
-    copy_kernel_files "${mnt_base}/boot/slots/A"
-
-    # Setup bootloader
-    setup_bootloader "${mnt_base}/esp" "${mnt_base}/boot" "$DETECTED_ARCH"
-
     # Cleanup
-    umount "${mnt_base}/esp"
-    umount "${mnt_base}/boot"
-    [ "$with_data" = "true" ] && umount "${mnt_base}/data"
+    umount "$boot_mnt"
+    rm -f "$squashfs"
+    rm -rf /tmp/boot-files
 
+    # Create slot metadata on boot partition
+    mount "$boot_dev" "$boot_mnt"
+    cat > "${boot_mnt}/current_slot" << EOF
+CURRENT_SLOT=A
+SLOT_A_VERSION=${ALPINE_VERSION}
+SLOT_A_DATE=$(date -Iseconds)
+SLOT_B_VERSION=
+SLOT_B_DATE=
+EOF
+    umount "$boot_mnt"
+
+    log_info "==================================="
     log_info "A/B installation complete!"
-    log_info "Reboot to start Alpine Linux"
+    log_info "Slot A: Alpine ${ALPINE_VERSION}"
+    log_info "Slot B: empty (ready for upgrade)"
+    log_info "==================================="
 }
 
-# Copy kernel files to slot
-copy_kernel_files() {
-    local slot_dir="$1"
+# Install boot configuration (config.txt, cmdline.txt for RPi, extlinux for others)
+install_boot_config() {
+    local boot_mnt="$1"
+    local disk="$2"
 
-    log_info "Copying kernel files..."
+    local slota_dev slotb_dev
+    slota_dev=$(get_part_dev "$disk" 2)
+    slotb_dev=$(get_part_dev "$disk" 3)
 
-    # Copy from cache (downloaded earlier)
-    if [ -f "${INSTALL_CACHE_DIR}/vmlinuz" ]; then
-        cp "${INSTALL_CACHE_DIR}/vmlinuz" "${slot_dir}/"
-        cp "${INSTALL_CACHE_DIR}/initramfs"* "${slot_dir}/initramfs"
+    if [ "$DETECTED_PLATFORM" = "rpi" ]; then
+        log_info "Configuring Raspberry Pi boot..."
+
+        cat > "${boot_mnt}/config.txt" << 'EOF'
+# Alpine Anywhere - Raspberry Pi
+disable_overscan=1
+arm_boost=1
+enable_uart=1
+
+[pi4]
+kernel=vmlinuz
+initramfs initramfs followkernel
+max_framebuffers=2
+
+[pi5]
+kernel=vmlinuz
+initramfs initramfs followkernel
+
+[all]
+EOF
+
+        # cmdline.txt points to slot A
+        echo "root=${slota_dev} rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs console=tty1 quiet" \
+            > "${boot_mnt}/cmdline.txt"
+
+        log_info "Boot config: root=${slota_dev} (squashfs + tmpfs overlay)"
     else
-        # Extract from installed kernel in squashfs
-        local squashfs="${slot_dir}/system.squashfs"
-        local mnt=$(mktemp -d)
-        mount -o loop,ro "$squashfs" "$mnt"
+        # x86_64 / generic: use extlinux or GRUB
+        mkdir -p "${boot_mnt}/extlinux"
+        cat > "${boot_mnt}/extlinux/extlinux.conf" << EOF
+DEFAULT alpine-a
+TIMEOUT 30
+PROMPT 1
 
-        cp "$mnt"/boot/vmlinuz* "${slot_dir}/vmlinuz"
-        cp "$mnt"/boot/initramfs* "${slot_dir}/initramfs"
+LABEL alpine-a
+    MENU LABEL Alpine Linux (Slot A)
+    LINUX /vmlinuz
+    INITRD /initramfs
+    APPEND root=${slota_dev} rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs quiet
 
-        umount "$mnt"
-        rmdir "$mnt"
+LABEL alpine-b
+    MENU LABEL Alpine Linux (Slot B)
+    LINUX /vmlinuz
+    INITRD /initramfs
+    APPEND root=${slotb_dev} rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs quiet
+EOF
     fi
 }

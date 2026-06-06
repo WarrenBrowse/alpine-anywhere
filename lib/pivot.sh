@@ -176,9 +176,21 @@ generate_pivot_init() {
     # Create directory for our files
     run_privileged mkdir -p "${PIVOT_DIR}/etc/alpine-anywhere"
 
-    # Save full config for after pivot
+    # Save full config for after pivot (DETECTED_* vars needed by install)
     run_privileged tee "${PIVOT_DIR}/etc/alpine-anywhere/config.env" > /dev/null << EOF
-# Network config
+# Network (DETECTED_* format for install functions)
+DETECTED_INTERFACE="${DETECTED_INTERFACE}"
+DETECTED_IP_ADDRESS="${DETECTED_IP_ADDRESS}"
+DETECTED_NETMASK="${DETECTED_NETMASK}"
+DETECTED_GATEWAY="${DETECTED_GATEWAY}"
+DETECTED_DNS="${DETECTED_DNS}"
+DETECTED_HOSTNAME="${DETECTED_HOSTNAME}"
+DETECTED_ARCH="${DETECTED_ARCH}"
+DETECTED_PLATFORM="${DETECTED_PLATFORM}"
+DETECTED_RPI_VERSION="${DETECTED_RPI_VERSION:-}"
+NETWORK_IS_DHCP="${NETWORK_IS_DHCP}"
+
+# Fakeinit network aliases
 NETWORK_INTERFACE="${DETECTED_INTERFACE}"
 NETWORK_IP="${DETECTED_IP_ADDRESS}"
 NETWORK_NETMASK="${DETECTED_NETMASK}"
@@ -187,6 +199,7 @@ NETWORK_DHCP="${NETWORK_IS_DHCP}"
 
 # Installation config
 HARDENED_MODE="${HARDENED_MODE}"
+INSTALL_MODE="${INSTALL_MODE}"
 ALPINE_VERSION="${ALPINE_VERSION}"
 ALPINE_MIRROR="${ALPINE_MIRROR}"
 KERNEL_FLAVOR="${KERNEL_FLAVOR}"
@@ -354,7 +367,7 @@ if [ -f /root/.local/share/alpine-anywhere/alpine-anywhere ]; then
     echo "[fakeinit] Starting A/B installation in background..."
     . /etc/alpine-anywhere/config.env
 
-    INSTALL_CMD="/usr/bin/bash /root/.local/share/alpine-anywhere/alpine-anywhere --local --install-continue"
+    INSTALL_CMD="sh /root/.local/share/alpine-anywhere/alpine-anywhere --local --install-continue"
     [ "$VERBOSE" = "true" ] && INSTALL_CMD="$INSTALL_CMD -v"
     [ "$FORCE" = "true" ] && INSTALL_CMD="$INSTALL_CMD -f"
     [ -n "$ALPINE_VERSION" ] && INSTALL_CMD="$INSTALL_CMD -V $ALPINE_VERSION"

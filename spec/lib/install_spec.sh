@@ -33,16 +33,16 @@ Describe 'install.sh'
     End
 
     Describe 'Partition constants'
-        It 'defines ESP size'
-            The variable PART_ESP_SIZE should equal "256M"
+        It 'defines boot partition size'
+            The variable PART_BOOT_SIZE_MB should equal 512
         End
 
-        It 'defines boot partition size'
-            The variable PART_BOOT_SIZE should equal "512M"
+        It 'defines slot size'
+            The variable PART_SLOT_SIZE_MB should equal 2048
         End
 
         It 'defines minimum disk size'
-            The variable MIN_DISK_SIZE_MB should equal 1024
+            The variable MIN_DISK_SIZE_MB should equal 5120
         End
     End
 
