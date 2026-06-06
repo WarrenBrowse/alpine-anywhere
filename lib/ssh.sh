@@ -98,8 +98,8 @@ ssh_exec_sudo() {
     if [[ "$TARGET_USER" == "root" ]]; then
         ssh_exec "$command"
     else
-        # Sudo credentials are cached via SSH multiplexing after initial auth
-        ssh_exec "sudo $command"
+        # Use interactive mode with TTY for sudo password prompt if needed
+        ssh_exec_interactive "sudo $command"
     fi
 }
 
