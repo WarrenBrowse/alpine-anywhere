@@ -28,6 +28,7 @@ source "${SCRIPT_DIR}/lib/download.sh"
 source "${SCRIPT_DIR}/lib/apkovl.sh"
 source "${SCRIPT_DIR}/lib/kexec.sh"
 source "${SCRIPT_DIR}/lib/validate.sh"
+source "${SCRIPT_DIR}/lib/remote.sh"
 
 # =============================================================================
 # Banner
@@ -76,43 +77,35 @@ main() {
     fi
 
     # Step 1: Local validations
-    log_step "Step 1/11: Local validation"
+    log_step "Step 1/9: Local validation"
     validate_local_commands
 
     # Step 2: Test SSH connection
-    log_step "Step 2/11: SSH connection"
+    log_step "Step 2/9: SSH connection"
     test_ssh_connection
 
     # Step 3: Check root access
-    log_step "Step 3/11: Root access verification"
+    log_step "Step 3/9: Root access verification"
     check_root_access
 
     # Step 4: Remote validations
-    log_step "Step 4/11: Remote validation"
+    log_step "Step 4/9: Remote validation"
     run_remote_validations
 
-    # Step 5: Detect architecture
-    log_step "Step 5/11: Architecture detection"
+    # Step 5: Detect architecture and network
+    log_step "Step 5/9: System detection"
     detect_architecture
-
-    # Step 6: Detect network configuration
-    log_step "Step 6/11: Network detection"
     detect_all_network_config
     print_network_summary
 
-    # Step 7: Retrieve SSH keys
-    log_step "Step 7/11: SSH key retrieval"
+    # Step 6: Retrieve SSH keys
+    log_step "Step 6/9: SSH key retrieval"
     local ssh_keys
     ssh_keys=$(get_remote_authorized_keys)
 
-    # Step 8: Find working mirror and download Alpine files
-    log_step "Step 8/11: Alpine download"
+    # Step 7: Find working mirror and generate apkovl
+    log_step "Step 7/9: Configuration generation"
     find_working_mirror
-    download_alpine_files
-    verify_downloads
-
-    # Step 9: Generate apkovl
-    log_step "Step 9/11: apkovl generation"
     local apkovl_file
     apkovl_file=$(generate_apkovl "$ssh_keys")
 
@@ -120,17 +113,23 @@ main() {
         show_apkovl_summary
     fi
 
-    # Step 10: Transfer and execute kexec
-    log_step "Step 10/11: kexec execution"
+    # Step 8: Remote installation (download files on remote + generate scripts)
+    log_step "Step 8/9: Remote installation"
+    run_remote_install "$apkovl_file"
 
-    if [[ "$VERBOSE" == "true" ]]; then
-        show_kexec_diagnostics
+    # Step 9: Execute kexec
+    log_step "Step 9/9: Kexec execution"
+    run_remote_kexec
+
+    if [[ "$DRY_RUN" != "true" ]]; then
+        # Wait for host to come back
+        sleep 10
+        wait_for_host 180
+        verify_alpine_boot
     fi
 
-    run_kexec "$apkovl_file"
-
-    # Step 11: Complete
-    log_step "Step 11/11: Complete"
+    # Complete
+    log_step "Complete"
 
     echo ""
     echo "=========================================="
