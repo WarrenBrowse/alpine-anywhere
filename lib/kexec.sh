@@ -107,7 +107,7 @@ ensure_kexec_installed() {
         debian|ubuntu|armbian)
             log_info "Installing kexec-tools via apt..."
             ssh_exec_sudo "apt-get update -qq"
-            ssh_exec_sudo "apt-get install -y kexec-tools"
+            ssh_exec_sudo "sh -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y kexec-tools'"
             ;;
         centos|rhel|fedora|rocky|alma)
             log_info "Installing kexec-tools via dnf/yum..."
