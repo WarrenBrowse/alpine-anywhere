@@ -50,9 +50,8 @@ transfer_files() {
 
     log_step "Transferring files to remote host..."
 
-    # Create remote directory
-    ssh_exec_sudo "mkdir -p ${REMOTE_WORK_DIR}"
-    ssh_exec_sudo "chmod 755 ${REMOTE_WORK_DIR}"
+    # Create remote directory (no sudo needed, /tmp is world-writable)
+    ssh_exec "mkdir -p ${REMOTE_WORK_DIR}"
 
     # Transfer vmlinuz
     log_info "Transferring vmlinuz..."
@@ -72,7 +71,7 @@ transfer_files() {
 
     # Verify transfers
     log_debug "Verifying transferred files..."
-    ssh_exec_sudo "ls -la ${REMOTE_WORK_DIR}/"
+    ssh_exec "ls -la ${REMOTE_WORK_DIR}/"
 
     log_info "All files transferred successfully"
 }
@@ -142,9 +141,9 @@ ensure_kexec_installed() {
 # kexec Execution
 # =============================================================================
 
-# Load kernel with kexec
-load_kernel() {
-    log_step "Loading kernel with kexec..."
+# Load and execute kexec in a single sudo session
+load_and_execute_kexec() {
+    log_step "Loading kernel and executing kexec..."
 
     local cmdline
     cmdline=$(build_kernel_cmdline)
@@ -153,21 +152,7 @@ load_kernel() {
 
     if [[ "$DRY_RUN" == "true" ]]; then
         echo "[DRY-RUN] kexec -l ${REMOTE_WORK_DIR}/vmlinuz --initrd=${REMOTE_WORK_DIR}/initramfs --command-line=\"$cmdline\""
-        return 0
-    fi
-
-    # Load the kernel
-    ssh_exec_sudo "kexec -l ${REMOTE_WORK_DIR}/vmlinuz --initrd=${REMOTE_WORK_DIR}/initramfs --command-line=\"$cmdline\""
-
-    log_info "Kernel loaded successfully"
-}
-
-# Execute kexec (this will reboot into Alpine)
-execute_kexec() {
-    log_step "Executing kexec (rebooting into Alpine)..."
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        echo "[DRY-RUN] Would execute: sleep ${REBOOT_DELAY} && kexec -e"
+        echo "[DRY-RUN] sleep ${REBOOT_DELAY} && kexec -e"
         log_info "[DRY-RUN] Skipping actual kexec execution"
         return 0
     fi
@@ -176,9 +161,9 @@ execute_kexec() {
     log_warn "The SSH connection will be lost."
     echo ""
 
-    # Execute kexec in background so we can disconnect
-    # Using nohup and disown to ensure it runs after we disconnect
-    ssh_exec_sudo "nohup sh -c 'sleep ${REBOOT_DELAY} && kexec -e' >/dev/null 2>&1 &"
+    # Combine kexec -l and kexec -e in a single sudo call
+    # This way we only need one password prompt
+    ssh_exec_sudo "sh -c '/sbin/kexec -l ${REMOTE_WORK_DIR}/vmlinuz --initrd=${REMOTE_WORK_DIR}/initramfs --command-line=\"$cmdline\" && (sleep ${REBOOT_DELAY} && /sbin/kexec -e) &'"
 
     log_info "kexec scheduled, waiting for system to reboot..."
 
@@ -200,9 +185,6 @@ run_kexec() {
     # Transfer all files
     transfer_files "$apkovl_file"
 
-    # Load kernel
-    load_kernel
-
     # Show summary before execution
     echo ""
     echo "==================================================="
@@ -218,8 +200,8 @@ run_kexec() {
     # Confirm execution
     confirm_action "This will reboot ${TARGET_HOST} into Alpine Linux. The current OS will be replaced in memory."
 
-    # Execute kexec
-    execute_kexec
+    # Load kernel and execute kexec (single sudo prompt)
+    load_and_execute_kexec
 
     if [[ "$DRY_RUN" != "true" ]]; then
         # Wait for host to come back
