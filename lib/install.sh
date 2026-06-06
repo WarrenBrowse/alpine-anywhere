@@ -192,23 +192,47 @@ ${ALPINE_MIRROR}/v${ALPINE_VERSION}/main
 ${ALPINE_MIRROR}/v${ALPINE_VERSION}/community
 EOF
 
-    # Install packages
+    # Install packages based on mode
     log_info "Installing system packages..."
     chroot "$build_dir" /sbin/apk update
-    chroot "$build_dir" /sbin/apk add --no-cache \
-        alpine-base \
-        linux-lts \
-        linux-firmware-none \
-        openrc \
-        busybox-openrc \
-        openssh-server \
-        openssh-client \
-        e2fsprogs \
-        dosfstools \
-        parted \
-        rsync \
-        curl \
-        ca-certificates
+
+    if [[ "$HARDENED_MODE" == "true" ]]; then
+        log_info "Installing hardened packages..."
+        chroot "$build_dir" /sbin/apk add --no-cache \
+            alpine-base \
+            linux-hardened \
+            linux-firmware-none \
+            openrc \
+            busybox-openrc \
+            dropbear \
+            dropbear-openrc \
+            hardened-malloc \
+            nftables \
+            iptables \
+            e2fsprogs \
+            dosfstools \
+            parted \
+            rsync \
+            curl \
+            ca-certificates \
+            chrony
+
+    else
+        chroot "$build_dir" /sbin/apk add --no-cache \
+            alpine-base \
+            linux-lts \
+            linux-firmware-none \
+            openrc \
+            busybox-openrc \
+            openssh-server \
+            openssh-client \
+            e2fsprogs \
+            dosfstools \
+            parted \
+            rsync \
+            curl \
+            ca-certificates
+    fi
 
     # Add extra packages if specified
     if [[ -n "$EXTRA_PACKAGES" ]]; then
@@ -220,7 +244,12 @@ EOF
     # Configure system
     configure_system_image "$build_dir"
 
-    # Setup SSH
+    # Apply hardening if enabled
+    if [[ "$HARDENED_MODE" == "true" ]]; then
+        apply_hardening_to_image "$build_dir"
+    fi
+
+    # Setup SSH (dropbear or openssh)
     setup_system_ssh "$build_dir"
 
     # Cleanup chroot mounts
@@ -327,14 +356,22 @@ setup_system_ssh() {
     chown -R 0:0 "${root}/root/.ssh"
     chmod 600 "${root}/root/.ssh/authorized_keys" 2>/dev/null || true
 
-    # Configure sshd
-    cat > "${root}/etc/ssh/sshd_config" << 'EOF'
+    # Configure SSH server
+    if [[ "$HARDENED_MODE" == "true" ]]; then
+        # Dropbear uses authorized_keys in same location, no config file needed
+        # Dropbear configuration is handled by hardening.sh (via /etc/conf.d/dropbear)
+        log_info "Using dropbear (key-only authentication)"
+    else
+        # Configure OpenSSH
+        mkdir -p "${root}/etc/ssh"
+        cat > "${root}/etc/ssh/sshd_config" << 'EOF'
 Port 22
 PermitRootLogin prohibit-password
 PubkeyAuthentication yes
 PasswordAuthentication no
 Subsystem sftp /usr/lib/ssh/sftp-server
 EOF
+    fi
 }
 
 # =============================================================================

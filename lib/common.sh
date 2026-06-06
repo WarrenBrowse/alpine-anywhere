@@ -26,6 +26,7 @@ UPGRADE_MODE="${UPGRADE_MODE:-false}"     # Upgrade mode (A/B switch)
 KEEP_EXISTING="${KEEP_EXISTING:-false}"   # Keep existing system (dual-boot)
 OVERLAY_DEVICE="${OVERLAY_DEVICE:-}"      # Device for persistent overlay
 BOOT_SLOT="${BOOT_SLOT:-A}"               # Current boot slot (A/B)
+HARDENED_MODE="${HARDENED_MODE:-false}"   # Security hardened mode
 
 # Working directories (set by setup_install_dirs in exec.sh)
 WORK_DIR=""
@@ -251,6 +252,15 @@ Install options:
   --keep                         Keep existing system (dual-boot)
   --overlay DEVICE               Device/partition for persistent data overlay
 
+Security options:
+  --hardened                     Security hardened mode:
+                                   - linux-hardened kernel (KSPP)
+                                   - dropbear instead of openssh
+                                   - hardened_malloc
+                                   - Network stack hardening (sysctl)
+                                   - Kernel lockdown mode
+                                   - nftables firewall
+
 Examples:
   # Live mode - temporary Alpine boot (reverts on reboot)
   alpine-anywhere root@192.168.1.100
@@ -356,6 +366,10 @@ parse_arguments() {
                 ;;
             upgrade)
                 UPGRADE_MODE=true
+                shift
+                ;;
+            --hardened)
+                HARDENED_MODE=true
                 shift
                 ;;
             -h|--help)

@@ -41,6 +41,7 @@ source "${LIB_DIR}/takeover.sh"
 source "${LIB_DIR}/pivot.sh"
 source "${LIB_DIR}/install.sh"
 source "${LIB_DIR}/upgrade.sh"
+source "${LIB_DIR}/hardening.sh"
 
 # =============================================================================
 # Banner
@@ -544,10 +545,31 @@ iface ${DETECTED_INTERFACE} inet static
     gateway ${DETECTED_GATEWAY}"
     fi
 
+    # SSH package and configuration based on mode
+    local ssh_package ssh_keygen ssh_config ssh_service
+    if [[ "$HARDENED_MODE" == "true" ]]; then
+        ssh_package="dropbear dropbear-openrc"
+        ssh_keygen='mkdir -p ${TAKEOVER_DIR}/etc/dropbear
+chroot ${TAKEOVER_DIR} /usr/bin/dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key 2>/dev/null || true'
+        ssh_config="# Dropbear configured via command line options"
+        ssh_service="dropbear"
+    else
+        ssh_package="openssh-server"
+        ssh_keygen='chroot ${TAKEOVER_DIR} /usr/bin/ssh-keygen -A'
+        ssh_config='cat > ${TAKEOVER_DIR}/etc/ssh/sshd_config << '\''SSHDCONFIG'\''
+PermitRootLogin prohibit-password
+PubkeyAuthentication yes
+PasswordAuthentication no
+Subsystem sftp /usr/lib/ssh/sftp-server
+SSHDCONFIG'
+        ssh_service="sshd"
+    fi
+
     cat > "${INSTALL_BASE_DIR}/takeover-setup.sh" << SETUPSCRIPT
 #!/bin/bash
 # Alpine Anywhere Takeover Setup Script
 # Generated: $(date -Iseconds)
+# Mode: $([ "$HARDENED_MODE" == "true" ] && echo "hardened (dropbear)" || echo "standard (openssh)")
 # Run this with sudo to setup the takeover environment
 
 set -e
@@ -592,7 +614,7 @@ mount --bind /proc \${TAKEOVER_DIR}/proc 2>/dev/null || mount -t proc proc \${TA
 # Install essential packages
 log "Installing packages..."
 chroot \${TAKEOVER_DIR} /sbin/apk update
-chroot \${TAKEOVER_DIR} /sbin/apk add --no-cache openssh-server openrc busybox-openrc
+chroot \${TAKEOVER_DIR} /sbin/apk add --no-cache ${ssh_package} openrc busybox-openrc
 
 # Setup SSH
 log "Configuring SSH..."
@@ -601,18 +623,13 @@ chmod 700 \${TAKEOVER_DIR}/root/.ssh
 tar -xzf \${CACHE_DIR}/${apkovl_name} -C \${TAKEOVER_DIR} ./root/.ssh/authorized_keys 2>/dev/null || true
 chown 0:0 \${TAKEOVER_DIR}/root/.ssh/authorized_keys 2>/dev/null || true
 chmod 600 \${TAKEOVER_DIR}/root/.ssh/authorized_keys 2>/dev/null || true
-chroot \${TAKEOVER_DIR} /usr/bin/ssh-keygen -A
+${ssh_keygen}
 
 # Unmount chroot filesystems
 umount \${TAKEOVER_DIR}/proc 2>/dev/null || true
 umount \${TAKEOVER_DIR}/dev 2>/dev/null || true
 
-cat > \${TAKEOVER_DIR}/etc/ssh/sshd_config << 'SSHDCONFIG'
-PermitRootLogin prohibit-password
-PubkeyAuthentication yes
-PasswordAuthentication no
-Subsystem sftp /usr/lib/ssh/sftp-server
-SSHDCONFIG
+${ssh_config}
 
 # Setup network
 log "Configuring network..."
@@ -625,7 +642,7 @@ echo '${DETECTED_HOSTNAME}' > \${TAKEOVER_DIR}/etc/hostname
 
 # Enable services
 chroot \${TAKEOVER_DIR} /sbin/rc-update add networking boot 2>/dev/null || true
-chroot \${TAKEOVER_DIR} /sbin/rc-update add sshd default 2>/dev/null || true
+chroot \${TAKEOVER_DIR} /sbin/rc-update add ${ssh_service} default 2>/dev/null || true
 
 log "=== Setup complete ==="
 log "Run: sudo ${INSTALL_BASE_DIR}/takeover-execute.sh"
@@ -647,10 +664,23 @@ generate_takeover_execute_script() {
 /sbin/route add default gw ${DETECTED_GATEWAY} 2>/dev/null || true"
     fi
 
+    # SSH startup command based on mode
+    local ssh_startup ssh_name
+    if [[ "$HARDENED_MODE" == "true" ]]; then
+        # dropbear: -s disable password auth, -g disable root password login, -p port
+        ssh_startup='chroot ${TAKEOVER_DIR} /usr/sbin/dropbear -p 2222 -s -g'
+        ssh_name="dropbear"
+    else
+        ssh_startup='chroot ${TAKEOVER_DIR} /bin/mkdir -p /run/sshd
+chroot ${TAKEOVER_DIR} /usr/sbin/sshd -p 2222'
+        ssh_name="openssh"
+    fi
+
     cat > "${INSTALL_BASE_DIR}/takeover-execute.sh" << EXECSCRIPT
 #!/bin/sh
 # Alpine Anywhere Takeover Execute Script
 # Generated: $(date -Iseconds)
+# Mode: $([ "$HARDENED_MODE" == "true" ] && echo "hardened (dropbear)" || echo "standard (openssh)")
 # Run this with sudo to start Alpine in chroot
 
 set -e
@@ -680,12 +710,11 @@ log "Starting Alpine networking..."
 chroot \${TAKEOVER_DIR} /sbin/ifconfig lo 127.0.0.1 up
 chroot \${TAKEOVER_DIR} /bin/sh -c '${network_setup}'
 
-log "Starting Alpine SSH on port 2222..."
-chroot \${TAKEOVER_DIR} /bin/mkdir -p /run/sshd
-chroot \${TAKEOVER_DIR} /usr/sbin/sshd -p 2222
+log "Starting Alpine SSH (${ssh_name}) on port 2222..."
+${ssh_startup}
 
 log "=== Takeover complete ==="
-log "Alpine Linux SSH running in chroot on port 2222"
+log "Alpine Linux SSH (${ssh_name}) running in chroot on port 2222"
 log "Connect via: ssh -p 2222 root@${DETECTED_IP_ADDRESS}"
 log ""
 log "To fully enter the Alpine environment:"

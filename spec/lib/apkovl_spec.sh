@@ -53,9 +53,10 @@ Describe 'apkovl.sh'
     End
 
     Describe 'generate_apk_world()'
-        Context 'without extra packages'
+        Context 'standard mode (without extra packages)'
             setup() {
                 EXTRA_PACKAGES=""
+                HARDENED_MODE="false"
             }
             Before 'setup'
 
@@ -75,9 +76,34 @@ Describe 'apkovl.sh'
             End
         End
 
+        Context 'hardened mode'
+            setup() {
+                EXTRA_PACKAGES=""
+                HARDENED_MODE="true"
+            }
+            Before 'setup'
+
+            It 'includes alpine-base'
+                When call generate_apk_world
+                The output should include 'alpine-base'
+            End
+
+            It 'includes dropbear instead of openssh'
+                When call generate_apk_world
+                The output should include 'dropbear'
+                The output should not include 'openssh-server'
+            End
+
+            It 'includes kexec-tools'
+                When call generate_apk_world
+                The output should include 'kexec-tools'
+            End
+        End
+
         Context 'with extra packages'
             setup() {
                 EXTRA_PACKAGES="vim,htop,curl"
+                HARDENED_MODE="false"
             }
             Before 'setup'
 
@@ -131,62 +157,113 @@ Describe 'apkovl.sh'
     End
 
     Describe 'generate_local_start()'
-        It 'generates host keys if not present'
-            When call generate_local_start
-            The output should include 'ssh-keygen -A'
+        Context 'standard mode'
+            setup() { HARDENED_MODE="false"; }
+            Before 'setup'
+
+            It 'generates SSH host keys if not present'
+                When call generate_local_start
+                The output should include 'ssh-keygen -A'
+            End
+
+            It 'sets correct permissions on keys'
+                When call generate_local_start
+                The output should include 'chmod 600'
+            End
+
+            It 'is a shell script'
+                When call generate_local_start
+                The line 1 should equal '#!/bin/sh'
+            End
         End
 
-        It 'sets correct permissions on keys'
-            When call generate_local_start
-            The output should include 'chmod 600'
-        End
+        Context 'hardened mode'
+            setup() { HARDENED_MODE="true"; }
+            Before 'setup'
 
-        It 'is a shell script'
-            When call generate_local_start
-            The line 1 should equal '#!/bin/sh'
+            It 'generates dropbear host keys'
+                When call generate_local_start
+                The output should include 'dropbearkey'
+                The output should include 'ed25519'
+            End
+
+            It 'creates dropbear directory'
+                When call generate_local_start
+                The output should include 'mkdir -p /etc/dropbear'
+            End
+
+            It 'logs hardened mode'
+                When call generate_local_start
+                The output should include 'hardened mode'
+            End
         End
     End
 
     Describe 'create_apkovl_structure()'
-        setup() {
-            TEST_DIR=$(mktemp -d)
-        }
-        cleanup() {
-            rm -rf "$TEST_DIR"
-        }
-        Before 'setup'
-        After 'cleanup'
+        Context 'standard mode'
+            setup() {
+                TEST_DIR=$(mktemp -d)
+                HARDENED_MODE="false"
+            }
+            cleanup() {
+                rm -rf "$TEST_DIR"
+            }
+            Before 'setup'
+            After 'cleanup'
 
-        It 'creates etc directory'
-            When call create_apkovl_structure "$TEST_DIR"
-            The path "$TEST_DIR/etc" should be directory
+            It 'creates etc directory'
+                When call create_apkovl_structure "$TEST_DIR"
+                The path "$TEST_DIR/etc" should be directory
+            End
+
+            It 'creates etc/network directory'
+                When call create_apkovl_structure "$TEST_DIR"
+                The path "$TEST_DIR/etc/network" should be directory
+            End
+
+            It 'creates etc/apk directory'
+                When call create_apkovl_structure "$TEST_DIR"
+                The path "$TEST_DIR/etc/apk" should be directory
+            End
+
+            It 'creates etc/ssh directory for openssh'
+                When call create_apkovl_structure "$TEST_DIR"
+                The path "$TEST_DIR/etc/ssh" should be directory
+            End
+
+            It 'creates root/.ssh directory with correct permissions'
+                When call create_apkovl_structure "$TEST_DIR"
+                The path "$TEST_DIR/root/.ssh" should be directory
+            End
+
+            It 'creates runlevels directories'
+                When call create_apkovl_structure "$TEST_DIR"
+                The path "$TEST_DIR/etc/runlevels/boot" should be directory
+                The path "$TEST_DIR/etc/runlevels/default" should be directory
+                The path "$TEST_DIR/etc/runlevels/sysinit" should be directory
+            End
         End
 
-        It 'creates etc/network directory'
-            When call create_apkovl_structure "$TEST_DIR"
-            The path "$TEST_DIR/etc/network" should be directory
-        End
+        Context 'hardened mode'
+            setup() {
+                TEST_DIR=$(mktemp -d)
+                HARDENED_MODE="true"
+            }
+            cleanup() {
+                rm -rf "$TEST_DIR"
+            }
+            Before 'setup'
+            After 'cleanup'
 
-        It 'creates etc/apk directory'
-            When call create_apkovl_structure "$TEST_DIR"
-            The path "$TEST_DIR/etc/apk" should be directory
-        End
+            It 'creates etc/dropbear directory instead of etc/ssh'
+                When call create_apkovl_structure "$TEST_DIR"
+                The path "$TEST_DIR/etc/dropbear" should be directory
+            End
 
-        It 'creates etc/ssh directory'
-            When call create_apkovl_structure "$TEST_DIR"
-            The path "$TEST_DIR/etc/ssh" should be directory
-        End
-
-        It 'creates root/.ssh directory with correct permissions'
-            When call create_apkovl_structure "$TEST_DIR"
-            The path "$TEST_DIR/root/.ssh" should be directory
-        End
-
-        It 'creates runlevels directories'
-            When call create_apkovl_structure "$TEST_DIR"
-            The path "$TEST_DIR/etc/runlevels/boot" should be directory
-            The path "$TEST_DIR/etc/runlevels/default" should be directory
-            The path "$TEST_DIR/etc/runlevels/sysinit" should be directory
+            It 'creates root/.ssh directory for authorized_keys'
+                When call create_apkovl_structure "$TEST_DIR"
+                The path "$TEST_DIR/root/.ssh" should be directory
+            End
         End
     End
 End
