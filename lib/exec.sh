@@ -145,6 +145,9 @@ run_on_remote() {
     [[ -n "$KERNEL_FLAVOR" ]] && remote_cmd+=" -k '$KERNEL_FLAVOR'"
     [[ "$INSTALL_METHOD" != "auto" ]] && remote_cmd+=" --method='$INSTALL_METHOD'"
     [[ -n "$EXTRA_PACKAGES" ]] && remote_cmd+=" --extra-packages='$EXTRA_PACKAGES'"
+    [[ "$HARDENED_MODE" == "true" ]] && remote_cmd+=" --hardened"
+    [[ -n "$OVERLAY_DEVICE" ]] && remote_cmd+=" --overlay='$OVERLAY_DEVICE'"
+    [[ "$KEEP_EXISTING" == "true" ]] && remote_cmd+=" --keep"
     [[ -n "$extra_args" ]] && remote_cmd+=" $extra_args"
 
     log_debug "Remote command: $remote_cmd"

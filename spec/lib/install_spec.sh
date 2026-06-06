@@ -45,4 +45,35 @@ Describe 'install.sh'
             The variable MIN_DISK_SIZE_MB should equal 1024
         End
     End
+
+    Describe 'is_usable_data_partition()'
+        It 'is defined as a function'
+            The value "$(type -t is_usable_data_partition)" should equal "function"
+        End
+
+        It 'returns unformatted when fstype is empty'
+            # Non-existent device returns empty fstype -> unformatted
+            When call is_usable_data_partition "/dev/nonexistent999"
+            The output should equal "unformatted"
+            The status should be success
+        End
+    End
+
+    Describe 'auto_detect_overlay_device()'
+        It 'is defined as a function'
+            The value "$(type -t auto_detect_overlay_device)" should equal "function"
+        End
+    End
+
+    Describe 'list_available_disks()'
+        It 'is defined as a function'
+            The value "$(type -t list_available_disks)" should equal "function"
+        End
+    End
+
+    Describe 'detect_disk_layout()'
+        It 'is defined as a function'
+            The value "$(type -t detect_disk_layout)" should equal "function"
+        End
+    End
 End

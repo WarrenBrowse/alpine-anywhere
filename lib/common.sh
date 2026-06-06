@@ -22,6 +22,7 @@ TARGET_USER="${TARGET_USER:-}"
 INSTALL_METHOD="${INSTALL_METHOD:-auto}"  # auto, kexec, takeover
 LOCAL_MODE="${LOCAL_MODE:-false}"         # Run locally (no SSH)
 INSTALL_MODE="${INSTALL_MODE:-false}"     # Install mode (vs live mode)
+INSTALL_CONTINUE="${INSTALL_CONTINUE:-false}"  # Continue installation after pivot
 UPGRADE_MODE="${UPGRADE_MODE:-false}"     # Upgrade mode (A/B switch)
 KEEP_EXISTING="${KEEP_EXISTING:-false}"   # Keep existing system (dual-boot)
 OVERLAY_DEVICE="${OVERLAY_DEVICE:-}"      # Device for persistent overlay
@@ -350,6 +351,12 @@ parse_arguments() {
                 ;;
             --install)
                 INSTALL_MODE=true
+                shift
+                ;;
+            --install-continue)
+                INSTALL_CONTINUE=true
+                INSTALL_MODE=true
+                LOCAL_MODE=true
                 shift
                 ;;
             --keep)

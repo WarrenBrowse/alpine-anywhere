@@ -44,6 +44,119 @@ get_disk_size_mb() {
     echo $((size_bytes / 1024 / 1024))
 }
 
+# List all available block devices (disks only, no partitions)
+list_available_disks() {
+    lsblk -dnpo NAME,SIZE,TYPE 2>/dev/null | awk '$3 == "disk" {print $1, $2}'
+}
+
+# Get partition info for a disk
+get_partition_info() {
+    local disk="$1"
+    lsblk -npo NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$disk" 2>/dev/null | tail -n +2
+}
+
+# Check if partition exists and is usable for data overlay
+is_usable_data_partition() {
+    local part="$1"
+    local fstype label
+
+    fstype=$(lsblk -npo FSTYPE "$part" 2>/dev/null)
+    label=$(lsblk -npo LABEL "$part" 2>/dev/null)
+
+    # Accept ext4 partitions, especially those labeled for data
+    if [[ "$fstype" == "ext4" ]]; then
+        # Prefer partitions with data-related labels
+        if [[ "$label" =~ DATA|data|home|persist ]]; then
+            echo "preferred"
+        else
+            echo "usable"
+        fi
+    elif [[ -z "$fstype" ]]; then
+        # Unformatted partition - can be formatted
+        echo "unformatted"
+    else
+        echo "unusable"
+    fi
+}
+
+# Auto-detect best overlay device
+# Returns: device path or empty if none found
+auto_detect_overlay_device() {
+    local root_disk preferred_part usable_part unformatted_part
+
+    root_disk=$(detect_root_disk)
+    log_debug "Root disk: $root_disk"
+
+    # First, look for existing data partitions on root disk
+    while IFS= read -r line; do
+        local part size fstype label mount
+        part=$(echo "$line" | awk '{print $1}')
+        fstype=$(echo "$line" | awk '{print $3}')
+        label=$(echo "$line" | awk '{print $4}')
+        mount=$(echo "$line" | awk '{print $5}')
+
+        # Skip if mounted as / or /boot
+        [[ "$mount" == "/" || "$mount" == "/boot"* ]] && continue
+
+        local status
+        status=$(is_usable_data_partition "$part")
+
+        case "$status" in
+            preferred)
+                preferred_part="$part"
+                log_debug "Found preferred data partition: $part (label: $label)"
+                ;;
+            usable)
+                [[ -z "$usable_part" ]] && usable_part="$part"
+                log_debug "Found usable partition: $part"
+                ;;
+            unformatted)
+                [[ -z "$unformatted_part" ]] && unformatted_part="$part"
+                log_debug "Found unformatted partition: $part"
+                ;;
+        esac
+    done < <(get_partition_info "$root_disk")
+
+    # Return best option
+    if [[ -n "$preferred_part" ]]; then
+        echo "$preferred_part"
+    elif [[ -n "$usable_part" ]]; then
+        echo "$usable_part"
+    elif [[ -n "$unformatted_part" ]]; then
+        echo "$unformatted_part"
+    fi
+}
+
+# Detect and display disk information
+detect_disk_layout() {
+    log_step "Detecting disk layout..."
+
+    local root_disk overlay_device
+    root_disk=$(detect_root_disk)
+
+    log_info "Root disk: $root_disk ($(get_disk_size_mb "$root_disk")MB)"
+    log_info "Current partitions:"
+
+    lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINT "$root_disk" 2>/dev/null | while read -r line; do
+        log_info "  $line"
+    done
+
+    # Auto-detect overlay if not specified
+    if [[ -z "$OVERLAY_DEVICE" ]]; then
+        overlay_device=$(auto_detect_overlay_device)
+        if [[ -n "$overlay_device" ]]; then
+            log_info "Auto-detected overlay device: $overlay_device"
+            OVERLAY_DEVICE="$overlay_device"
+        else
+            log_info "No suitable overlay partition found - will create new layout"
+        fi
+    else
+        log_info "Using specified overlay device: $OVERLAY_DEVICE"
+    fi
+
+    echo "$root_disk"
+}
+
 # =============================================================================
 # Partition Management
 # =============================================================================
@@ -187,7 +300,7 @@ generate_system_squashfs() {
     mount -t devtmpfs devtmpfs "${build_dir}/dev"
 
     # Configure APK
-    cat > "${build_dir}/etc/apk/repositories" << EOF
+    tee "${build_dir}/etc/apk/repositories" > /dev/null << EOF
 ${ALPINE_MIRROR}/v${ALPINE_VERSION}/main
 ${ALPINE_MIRROR}/v${ALPINE_VERSION}/community
 EOF
@@ -542,8 +655,12 @@ EOF
 # Main Installation Flow
 # =============================================================================
 
-# Run full A/B installation
+# Run full A/B installation (must be run as root)
 run_ab_install() {
+    if [[ $EUID -ne 0 ]]; then
+        die "run_ab_install must be run as root"
+    fi
+
     log_step "Starting A/B installation..."
 
     local disk

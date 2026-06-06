@@ -101,6 +101,9 @@ main() {
         else
             run_remote_upgrade
         fi
+    elif [[ "$INSTALL_CONTINUE" == "true" ]]; then
+        # Continue A/B installation after pivot (runs in pivoted environment)
+        run_install_continue
     elif [[ "$INSTALL_MODE" == "true" ]]; then
         # Install mode (A/B immutable)
         if [[ "$LOCAL_MODE" == "true" ]]; then
@@ -138,18 +141,24 @@ run_remote_installation() {
     log_step "Step 3/4: Root access verification"
     check_root_access
 
-    # Step 4: Deploy scripts to remote
+    # Step 4: Deploy and pivot
     log_step "Step 4/4: Deploying to remote"
     deploy_scripts_to_remote
 
-    log_info "Scripts deployed. Executing on remote server..."
+    log_info "Scripts deployed. Pivoting to Alpine (RAM-only)..."
     echo ""
 
-    # Execute on remote with --local flag
-    run_on_remote
+    # Execute on remote - connection will be lost during pivot
+    run_on_remote || true
 
-    # Show completion message
-    show_completion_message
+    echo ""
+    echo "============================================"
+    echo "  Alpine Linux is running from RAM!"
+    echo "============================================"
+    echo ""
+    echo "  Connect: ssh root@${TARGET_HOST}"
+    echo "  Reboot:  restores original system"
+    echo ""
 }
 
 # =============================================================================
@@ -204,6 +213,22 @@ run_remote_upgrade() {
 # =============================================================================
 
 run_local_ab_install() {
+    # Require root for A/B installation
+    if [[ $EUID -ne 0 ]]; then
+        log_info "Escalating to root for A/B installation..."
+        local sudo_args=("--local" "--install")
+        [[ "$VERBOSE" == "true" ]] && sudo_args+=("-v")
+        [[ "$FORCE" == "true" ]] && sudo_args+=("-f")
+        [[ "$DRY_RUN" == "true" ]] && sudo_args+=("-n")
+        [[ -n "$ALPINE_VERSION" ]] && sudo_args+=("-V" "$ALPINE_VERSION")
+        [[ -n "$ALPINE_MIRROR" ]] && sudo_args+=("-m" "$ALPINE_MIRROR")
+        [[ -n "$KERNEL_FLAVOR" ]] && sudo_args+=("-k" "$KERNEL_FLAVOR")
+        [[ "$HARDENED_MODE" == "true" ]] && sudo_args+=("--hardened")
+        [[ -n "$OVERLAY_DEVICE" ]] && sudo_args+=("--overlay=$OVERLAY_DEVICE")
+        [[ -n "$EXTRA_PACKAGES" ]] && sudo_args+=("--extra-packages=$EXTRA_PACKAGES")
+        exec sudo -E bash "$0" "${sudo_args[@]}"
+    fi
+
     log_info "Running A/B installation in local mode"
 
     # Setup directories
@@ -235,15 +260,57 @@ run_local_ab_install() {
     log_step "Step 5/6: Downloading Alpine files"
     download_minirootfs
 
-    # Step 6: Pivot and install
-    log_step "Step 6/6: Pivot and A/B installation"
+    # Step 6: Pivot to Alpine
+    log_step "Step 6/6: Pivot to Alpine environment"
 
-    # First, pivot to Alpine in RAM
+    # Setup pivot environment and execute pivot
+    # The pivot script will continue the installation from within Alpine
     setup_pivot_environment
     execute_pivot
 
-    # Then run A/B installation from the pivoted environment
-    # This will format the disk and install the A/B structure
+    # If we get here, the pivot is running in background
+    # The actual installation will continue from do_pivot.sh
+    log_info "Pivot initiated. Installation will continue in the new environment."
+    log_info "The connection will be lost. Reconnect via: ssh root@${DETECTED_IP_ADDRESS}"
+    log_info "Monitor installation: tail -f /var/log/alpine-install.log"
+}
+
+# =============================================================================
+# Install Continue Mode (after pivot)
+# =============================================================================
+
+run_install_continue() {
+    log_info "Continuing A/B installation after pivot..."
+
+    # We're running in the pivoted Alpine environment
+    # The old root should be unmounted, so we can partition the disk
+
+    # Load config from pivot
+    if [[ -f /etc/alpine-anywhere/config.env ]]; then
+        source /etc/alpine-anywhere/config.env
+        log_info "Config loaded from pivot environment"
+    fi
+
+    # Setup directories
+    INSTALL_BASE_DIR="/root/.alpine-anywhere"
+    INSTALL_CACHE_DIR="${INSTALL_BASE_DIR}/cache"
+    mkdir -p "$INSTALL_CACHE_DIR"
+
+    # Detect disk
+    local disk
+    disk=$(detect_root_disk)
+    log_info "Target disk: $disk"
+
+    # Check disk is unmounted
+    if mount | grep -q "^${disk}"; then
+        log_warn "Disk $disk has mounted partitions, attempting to unmount..."
+        for part in $(mount | grep "^${disk}" | awk '{print $3}' | sort -r); do
+            umount -l "$part" 2>/dev/null || true
+        done
+        sleep 2
+    fi
+
+    # Run the actual installation
     run_ab_install
 
     show_install_completion_message
@@ -273,60 +340,53 @@ run_local_upgrade() {
 # =============================================================================
 
 run_local_installation() {
-    log_info "Running in local mode"
+    # Require root for pivot_root
+    if [[ $EUID -ne 0 ]]; then
+        log_info "Escalating to root..."
+        local sudo_args=("--local")
+        [[ "$VERBOSE" == "true" ]] && sudo_args+=("-v")
+        [[ "$FORCE" == "true" ]] && sudo_args+=("-f")
+        [[ -n "$ALPINE_VERSION" ]] && sudo_args+=("-V" "$ALPINE_VERSION")
+        [[ -n "$ALPINE_MIRROR" ]] && sudo_args+=("-m" "$ALPINE_MIRROR")
+        [[ "$HARDENED_MODE" == "true" ]] && sudo_args+=("--hardened")
+        exec sudo -E bash "$0" "${sudo_args[@]}"
+    fi
+
+    log_info "Running RAM-only live mode (pivot_root)"
 
     # Setup directories
     setup_install_dirs "$HOME"
     create_install_dirs
 
-    # Step 1: Local validations
-    log_step "Step 1/8: System validation"
+    # Step 1: Validations
+    log_step "Step 1/5: System validation"
     validate_local_commands
     validate_local_system
 
-    # Step 2: Determine installation method
-    log_step "Step 2/8: Method selection"
-    determine_install_method_local
-
-    # Step 3: Detect network configuration
-    log_step "Step 3/8: Network detection"
+    # Step 2: Network detection
+    log_step "Step 2/5: Network detection"
     detect_local_network
     print_network_summary
 
-    # Step 4: Retrieve SSH keys
-    log_step "Step 4/8: SSH key retrieval"
+    # Step 3: SSH keys
+    log_step "Step 3/5: SSH key retrieval"
     local ssh_keys
     ssh_keys=$(get_local_authorized_keys)
 
-    # Step 5: Find working mirror and generate apkovl
-    log_step "Step 5/8: Configuration generation"
+    # Step 4: Generate config + download
+    log_step "Step 4/5: Configuration & download"
     find_working_mirror_local
-    local apkovl_file
-    apkovl_file=$(generate_apkovl "$ssh_keys")
+    generate_apkovl "$ssh_keys" > /dev/null
+    download_minirootfs
 
-    if [[ "$VERBOSE" == "true" ]]; then
-        show_apkovl_summary
-    fi
+    # Step 5: Pivot to Alpine in RAM
+    log_step "Step 5/5: Pivot to Alpine (RAM-only)"
+    setup_pivot_environment
+    execute_pivot
 
-    # Step 6: Download Alpine files
-    log_step "Step 6/8: Downloading Alpine files"
-    download_alpine_files_local
-
-    # Step 7: Setup installation
-    log_step "Step 7/8: Installation setup (${INSTALL_METHOD} method)"
-    if [[ "$INSTALL_METHOD" == "takeover" ]]; then
-        setup_takeover_local "$apkovl_file"
-    else
-        setup_kexec_local "$apkovl_file"
-    fi
-
-    # Step 8: Execute
-    log_step "Step 8/8: Execution (${INSTALL_METHOD} method)"
-    if [[ "$INSTALL_METHOD" == "takeover" ]]; then
-        execute_takeover_local
-    else
-        execute_kexec_local
-    fi
+    log_info "Pivot complete. Alpine Linux is running from RAM."
+    log_info "Reconnect via: ssh root@${DETECTED_IP_ADDRESS}"
+    log_info "Reboot to restore original system."
 }
 
 # =============================================================================
