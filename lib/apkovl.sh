@@ -9,7 +9,13 @@
 create_apkovl_structure() {
     apkovl_dir="$1"
 
-    mkdir -p "$apkovl_dir"/{etc/{network,apk,runlevels/{boot,default,sysinit},local.d},root/.ssh}
+    mkdir -p "$apkovl_dir/etc/network" \
+             "$apkovl_dir/etc/apk" \
+             "$apkovl_dir/etc/runlevels/boot" \
+             "$apkovl_dir/etc/runlevels/default" \
+             "$apkovl_dir/etc/runlevels/sysinit" \
+             "$apkovl_dir/etc/local.d" \
+             "$apkovl_dir/root/.ssh"
 
     # SSH directory based on mode
     if [ "$HARDENED_MODE" = "true" ]; then

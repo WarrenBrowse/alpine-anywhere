@@ -667,7 +667,7 @@ EOF
 
 # Run full A/B installation (must be run as root)
 run_ab_install() {
-    if [ "$EUID" -ne 0 ] 2>/dev/null || [ "$(id -u)" -ne 0 ]; then
+    if [ "$(id -u)" -ne 0 ]; then
         die "run_ab_install must be run as root"
     fi
 

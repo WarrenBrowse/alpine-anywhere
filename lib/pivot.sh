@@ -18,7 +18,7 @@ OLD_ROOT="/mnt/oldroot"
 
 # Run command with sudo if not root
 run_privileged() {
-    if [ "$EUID" -eq 0 ] 2>/dev/null || [ "$(id -u)" -eq 0 ]; then
+    if [ "$(id -u)" -eq 0 ]; then
         "$@"
     else
         sudo "$@"

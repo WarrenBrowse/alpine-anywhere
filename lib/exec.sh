@@ -84,7 +84,7 @@ run_cmd_sudo() {
             echo "[DRY-RUN] sudo $cmd"
             return 0
         fi
-        if [ "$EUID" -eq 0 ]; then
+        if [ "$(id -u)" -eq 0 ]; then
             eval "$cmd"
         else
             sudo sh -c "$cmd"
