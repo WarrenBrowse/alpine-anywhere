@@ -85,8 +85,8 @@ transfer_files() {
 ensure_kexec_installed() {
     log_step "Ensuring kexec-tools is installed..."
 
-    # Check if kexec exists
-    if ssh_exec_capture "command -v kexec" >/dev/null 2>&1; then
+    # Check if kexec exists (may be in /sbin which is not in user PATH)
+    if ssh_exec_capture "test -x /sbin/kexec || test -x /usr/sbin/kexec || command -v kexec" >/dev/null 2>&1; then
         log_info "kexec is already installed"
         return 0
     fi
@@ -130,8 +130,8 @@ ensure_kexec_installed() {
             ;;
     esac
 
-    # Verify installation
-    if ! ssh_exec_capture "command -v kexec" >/dev/null 2>&1; then
+    # Verify installation (kexec is usually in /sbin which may not be in user PATH)
+    if ! ssh_exec_capture "test -x /sbin/kexec || test -x /usr/sbin/kexec || command -v kexec" >/dev/null 2>&1; then
         die "Failed to install kexec-tools"
     fi
 
