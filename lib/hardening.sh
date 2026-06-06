@@ -16,7 +16,7 @@
 HARDENED_MODE="${HARDENED_MODE:-false}"
 
 # Packages for hardened mode (space-separated string)
-HARDENED_PACKAGES="linux-hardened dropbear dropbear-openrc hardened-malloc iptables ip6tables nftables chrony ca-certificates wireguard-tools"
+HARDENED_PACKAGES="linux-hardened dropbear dropbear-openrc hardened-malloc iptables ip6tables nftables chrony ca-certificates"
 
 # Packages to explicitly NOT install in hardened mode (space-separated string)
 HARDENED_EXCLUDE_PACKAGES="openssh-server openssh-client sudo linux-lts linux-virt"
@@ -102,7 +102,7 @@ generate_sysctl_hardening() {
 
 # --- IP Stack ---
 
-# Disable IP forwarding (enable only if router/VPN)
+# Disable IP forwarding
 net.ipv4.ip_forward = 0
 net.ipv6.conf.all.forwarding = 0
 
@@ -291,7 +291,6 @@ EOF
 
 generate_nftables_config() {
     ssh_port="${1:-22}"
-    vpn_port="${2:-51820}"  # WireGuard default
 
     cat << EOF
 #!/usr/sbin/nft -f
@@ -319,19 +318,12 @@ table inet filter {
         # Allow SSH (rate limited)
         tcp dport ${ssh_port} ct state new limit rate 10/minute accept
 
-        # Allow VPN (WireGuard)
-        udp dport ${vpn_port} accept
-
         # Log dropped packets (rate limited)
         limit rate 5/minute log prefix "nftables-dropped: " level warn
     }
 
     chain forward {
         type filter hook forward priority 0; policy drop;
-
-        # Allow VPN forwarding (if configured as VPN server)
-        # iifname "wg0" accept
-        # oifname "wg0" accept
     }
 
     chain output {
@@ -454,45 +446,3 @@ get_hardened_kernel() {
     echo "linux-hardened"
 }
 
-# =============================================================================
-# VPN Server Specific Hardening
-# =============================================================================
-
-configure_vpn_server() {
-    root="$1"
-    interface="${2:-wg0}"
-
-    log_info "Configuring VPN server hardening..."
-
-    # Enable IP forwarding for VPN
-    cat >> "${root}/etc/sysctl.d/99-hardening.conf" << EOF
-
-# VPN Server - Enable forwarding
-net.ipv4.ip_forward = 1
-net.ipv6.conf.all.forwarding = 1
-EOF
-
-    # WireGuard-specific settings
-    mkdir -p "${root}/etc/wireguard"
-    chmod 700 "${root}/etc/wireguard"
-
-    # No-log configuration
-    cat > "${root}/etc/wireguard/README" << 'EOF'
-# WireGuard VPN - No-Log Configuration
-#
-# This server is configured for privacy:
-# - No connection logging
-# - No IP address logging
-# - Minimal system logs
-#
-# Generate keys with: wg genkey | tee privatekey | wg pubkey > publickey
-EOF
-
-    # Disable most logging for no-log VPN
-    cat > "${root}/etc/conf.d/syslog" << 'EOF'
-# Minimal logging for no-log VPN server
-SYSLOGD_OPTS="-l 3"
-EOF
-
-    log_info "VPN server hardening applied"
-}
