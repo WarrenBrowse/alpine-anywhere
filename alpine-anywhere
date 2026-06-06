@@ -20,15 +20,24 @@ set -euo pipefail
 # Get the directory where the script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Determine library directory
+LIB_DIR="${SCRIPT_DIR}/lib"
+if [[ ! -d "$LIB_DIR" ]]; then
+    echo "ERROR: Cannot find library directory: $LIB_DIR" >&2
+    exit 1
+fi
+
 # Source all library files
-source "${SCRIPT_DIR}/lib/common.sh"
-source "${SCRIPT_DIR}/lib/ssh.sh"
-source "${SCRIPT_DIR}/lib/network.sh"
-source "${SCRIPT_DIR}/lib/download.sh"
-source "${SCRIPT_DIR}/lib/apkovl.sh"
-source "${SCRIPT_DIR}/lib/kexec.sh"
-source "${SCRIPT_DIR}/lib/validate.sh"
-source "${SCRIPT_DIR}/lib/remote.sh"
+source "${LIB_DIR}/common.sh"
+source "${LIB_DIR}/ssh.sh"
+source "${LIB_DIR}/exec.sh"
+source "${LIB_DIR}/network.sh"
+source "${LIB_DIR}/download.sh"
+source "${LIB_DIR}/apkovl.sh"
+source "${LIB_DIR}/kexec.sh"
+source "${LIB_DIR}/validate.sh"
+source "${LIB_DIR}/remote.sh"
+source "${LIB_DIR}/takeover.sh"
 
 # =============================================================================
 # Banner
@@ -67,45 +76,87 @@ main() {
     # Create working directory
     create_work_dir
 
-    # Enable SSH multiplexing for connection reuse
-    setup_ssh_multiplexing
-
     # Show dry-run notice
     if [[ "$DRY_RUN" == "true" ]]; then
         log_warn "DRY-RUN MODE - No changes will be made"
         echo ""
     fi
 
+    # Branch based on mode
+    if [[ "$LOCAL_MODE" == "true" ]]; then
+        run_local_installation
+    else
+        run_remote_installation
+    fi
+}
+
+# =============================================================================
+# Remote Mode: Deploy scripts and execute on remote
+# =============================================================================
+
+run_remote_installation() {
+    # Enable SSH multiplexing for connection reuse
+    setup_ssh_multiplexing
+
     # Step 1: Local validations
-    log_step "Step 1/9: Local validation"
+    log_step "Step 1/4: Local validation"
     validate_local_commands
 
     # Step 2: Test SSH connection
-    log_step "Step 2/9: SSH connection"
+    log_step "Step 2/4: SSH connection"
     test_ssh_connection
 
     # Step 3: Check root access
-    log_step "Step 3/9: Root access verification"
+    log_step "Step 3/4: Root access verification"
     check_root_access
 
-    # Step 4: Remote validations
-    log_step "Step 4/9: Remote validation"
-    run_remote_validations
+    # Step 4: Deploy scripts to remote
+    log_step "Step 4/4: Deploying to remote"
+    deploy_scripts_to_remote
 
-    # Step 5: Detect architecture and network
-    log_step "Step 5/9: System detection"
-    detect_architecture
-    detect_all_network_config
+    log_info "Scripts deployed. Executing on remote server..."
+    echo ""
+
+    # Execute on remote with --local flag
+    run_on_remote
+
+    # Show completion message
+    show_completion_message
+}
+
+# =============================================================================
+# Local Mode: Run installation directly
+# =============================================================================
+
+run_local_installation() {
+    log_info "Running in local mode"
+
+    # Setup directories
+    setup_install_dirs "$HOME"
+    create_install_dirs
+
+    # Step 1: Local validations
+    log_step "Step 1/8: System validation"
+    validate_local_commands
+    validate_local_system
+
+    # Step 2: Determine installation method
+    log_step "Step 2/8: Method selection"
+    determine_install_method_local
+
+    # Step 3: Detect network configuration
+    log_step "Step 3/8: Network detection"
+    detect_local_network
     print_network_summary
 
-    # Step 6: Retrieve SSH keys
-    log_step "Step 6/9: SSH key retrieval"
+    # Step 4: Retrieve SSH keys
+    log_step "Step 4/8: SSH key retrieval"
     local ssh_keys
-    ssh_keys=$(get_remote_authorized_keys)
+    ssh_keys=$(get_local_authorized_keys)
 
-    # Step 7: Find working mirror and generate apkovl
-    log_step "Step 7/9: Configuration generation"
-    find_working_mirror
+    # Step 5: Find working mirror and generate apkovl
+    log_step "Step 5/8: Configuration generation"
+    find_working_mirror_local
     local apkovl_file
     apkovl_file=$(generate_apkovl "$ssh_keys")
 
@@ -113,24 +164,535 @@ main() {
         show_apkovl_summary
     fi
 
-    # Step 8: Remote installation (download files on remote + generate scripts)
-    log_step "Step 8/9: Remote installation"
-    run_remote_install "$apkovl_file"
+    # Step 6: Download Alpine files
+    log_step "Step 6/8: Downloading Alpine files"
+    download_alpine_files_local
 
-    # Step 9: Execute kexec
-    log_step "Step 9/9: Kexec execution"
-    run_remote_kexec
-
-    if [[ "$DRY_RUN" != "true" ]]; then
-        # Wait for host to come back
-        sleep 10
-        wait_for_host 180
-        verify_alpine_boot
+    # Step 7: Setup installation
+    log_step "Step 7/8: Installation setup (${INSTALL_METHOD} method)"
+    if [[ "$INSTALL_METHOD" == "takeover" ]]; then
+        setup_takeover_local "$apkovl_file"
+    else
+        setup_kexec_local "$apkovl_file"
     fi
 
-    # Complete
-    log_step "Complete"
+    # Step 8: Execute
+    log_step "Step 8/8: Execution (${INSTALL_METHOD} method)"
+    if [[ "$INSTALL_METHOD" == "takeover" ]]; then
+        execute_takeover_local
+    else
+        execute_kexec_local
+    fi
+}
 
+# =============================================================================
+# Local Mode Helper Functions
+# =============================================================================
+
+# Validate local system
+validate_local_system() {
+    log_info "Validating local system..."
+
+    # Check memory
+    local mem_kb
+    mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    local mem_mb=$((mem_kb / 1024))
+    if ((mem_mb < 512)); then
+        die "Insufficient memory: ${mem_mb}MB (minimum: 512MB)"
+    fi
+    log_info "Memory: ${mem_mb}MB"
+
+    # Check if running as root or can sudo
+    if [[ $EUID -ne 0 ]]; then
+        if ! sudo -n true 2>/dev/null; then
+            log_info "Will need sudo password for privileged operations"
+        fi
+    fi
+}
+
+# Determine installation method locally
+determine_install_method_local() {
+    if [[ "$INSTALL_METHOD" == "auto" ]]; then
+        log_info "Auto-detecting installation method..."
+
+        # Check for kexec support
+        local kexec_config=""
+        if [[ -f /proc/config.gz ]]; then
+            kexec_config=$(zcat /proc/config.gz 2>/dev/null | grep '^CONFIG_KEXEC=' || true)
+        elif [[ -f /boot/config-$(uname -r) ]]; then
+            kexec_config=$(grep '^CONFIG_KEXEC=' /boot/config-$(uname -r) 2>/dev/null || true)
+        fi
+
+        if [[ "$kexec_config" == "CONFIG_KEXEC=y" ]]; then
+            INSTALL_METHOD="kexec"
+            log_info "kexec available - using kexec method"
+        else
+            INSTALL_METHOD="takeover"
+            log_info "kexec not available - using takeover method"
+        fi
+    fi
+
+    log_info "Installation method: ${INSTALL_METHOD}"
+}
+
+# Get local authorized keys
+get_local_authorized_keys() {
+    local keys=""
+
+    # Try current user
+    if [[ -f ~/.ssh/authorized_keys ]]; then
+        keys=$(cat ~/.ssh/authorized_keys)
+    fi
+
+    # Try root
+    if [[ -f /root/.ssh/authorized_keys ]]; then
+        local root_keys
+        root_keys=$(cat /root/.ssh/authorized_keys 2>/dev/null || sudo cat /root/.ssh/authorized_keys 2>/dev/null || true)
+        if [[ -n "$root_keys" ]]; then
+            if [[ -n "$keys" ]]; then
+                keys="$keys"$'\n'"$root_keys"
+            else
+                keys="$root_keys"
+            fi
+        fi
+    fi
+
+    # Remove duplicates
+    keys=$(echo "$keys" | sort -u | grep -v '^$' || true)
+
+    if [[ -z "$keys" ]]; then
+        log_warn "No SSH authorized keys found!"
+        if [[ "$FORCE" != "true" ]]; then
+            die "No SSH keys found. You may lose access after reboot. Use --force to continue."
+        fi
+    else
+        local key_count
+        key_count=$(echo "$keys" | wc -l | tr -d ' ')
+        log_info "Found $key_count SSH key(s)"
+    fi
+
+    echo "$keys"
+}
+
+# Find working mirror locally
+find_working_mirror_local() {
+    log_info "Testing Alpine mirror..."
+
+    local test_url="${ALPINE_MIRROR}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/"
+
+    if curl -fsSL --connect-timeout 5 "$test_url" >/dev/null 2>&1; then
+        log_info "Mirror OK: ${ALPINE_MIRROR}"
+    else
+        log_warn "Primary mirror failed, trying fallbacks..."
+        for mirror in "${FALLBACK_MIRRORS[@]}"; do
+            test_url="${mirror}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/"
+            if curl -fsSL --connect-timeout 5 "$test_url" >/dev/null 2>&1; then
+                ALPINE_MIRROR="$mirror"
+                log_info "Using fallback mirror: ${ALPINE_MIRROR}"
+                return 0
+            fi
+        done
+        die "No working Alpine mirror found"
+    fi
+}
+
+# Download Alpine files locally
+download_alpine_files_local() {
+    log_info "Downloading Alpine files..."
+
+    if [[ "$DETECTED_PLATFORM" == "rpi" ]]; then
+        download_alpine_rpi_files_local
+    else
+        download_alpine_netboot_files_local
+    fi
+}
+
+# Download netboot files locally
+download_alpine_netboot_files_local() {
+    local base_url="${ALPINE_MIRROR}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/netboot"
+
+    cache_download "${base_url}/vmlinuz-${KERNEL_FLAVOR}" "vmlinuz-${KERNEL_FLAVOR}"
+    cache_download "${base_url}/initramfs-${KERNEL_FLAVOR}" "initramfs-${KERNEL_FLAVOR}"
+    cache_download "${base_url}/modloop-${KERNEL_FLAVOR}" "modloop-${KERNEL_FLAVOR}"
+
+    # Create symlinks
+    ln -sf "vmlinuz-${KERNEL_FLAVOR}" "${INSTALL_CACHE_DIR}/vmlinuz"
+    ln -sf "initramfs-${KERNEL_FLAVOR}" "${INSTALL_CACHE_DIR}/initramfs"
+    ln -sf "modloop-${KERNEL_FLAVOR}" "${INSTALL_CACHE_DIR}/modloop"
+}
+
+# Download RPi files locally
+download_alpine_rpi_files_local() {
+    local releases_url="${ALPINE_MIRROR}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}"
+    local tarball_name
+
+    # Find tarball name
+    tarball_name=$(curl -fsSL "${releases_url}/" 2>/dev/null | grep -oE 'alpine-rpi-[0-9.]+-aarch64\.tar\.gz' | head -1)
+    if [[ -z "$tarball_name" ]]; then
+        tarball_name="alpine-rpi-${ALPINE_VERSION}.0-aarch64.tar.gz"
+    fi
+
+    # Download tarball
+    cache_download "${releases_url}/${tarball_name}" "$tarball_name"
+
+    # Extract kernel files
+    local kernel_suffix="rpi"
+    [[ "$DETECTED_RPI_VERSION" == "4" || "$DETECTED_RPI_VERSION" == "5" ]] && kernel_suffix="rpi4"
+
+    log_info "Extracting kernel files..."
+    tar -xzf "${INSTALL_CACHE_DIR}/${tarball_name}" -C "${INSTALL_CACHE_DIR}" ./boot/
+
+    # Copy kernel files
+    if [[ -f "${INSTALL_CACHE_DIR}/boot/vmlinuz-${kernel_suffix}" ]]; then
+        cp "${INSTALL_CACHE_DIR}/boot/vmlinuz-${kernel_suffix}" "${INSTALL_CACHE_DIR}/vmlinuz"
+        cp "${INSTALL_CACHE_DIR}/boot/initramfs-${kernel_suffix}" "${INSTALL_CACHE_DIR}/initramfs"
+        cp "${INSTALL_CACHE_DIR}/boot/modloop-${kernel_suffix}" "${INSTALL_CACHE_DIR}/modloop"
+    else
+        cp "${INSTALL_CACHE_DIR}/boot/vmlinuz-rpi" "${INSTALL_CACHE_DIR}/vmlinuz"
+        cp "${INSTALL_CACHE_DIR}/boot/initramfs-rpi" "${INSTALL_CACHE_DIR}/initramfs"
+        cp "${INSTALL_CACHE_DIR}/boot/modloop-rpi" "${INSTALL_CACHE_DIR}/modloop"
+    fi
+
+    # Cleanup
+    rm -rf "${INSTALL_CACHE_DIR}/boot"
+}
+
+# Setup takeover locally
+setup_takeover_local() {
+    local apkovl_file="$1"
+
+    log_info "Setting up takeover environment..."
+
+    # Download minirootfs
+    local minirootfs_url="${ALPINE_MIRROR}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/alpine-minirootfs-${ALPINE_VERSION}.0-${DETECTED_ARCH}.tar.gz"
+    cache_download "$minirootfs_url" "minirootfs.tar.gz"
+
+    # Copy apkovl to cache
+    cp "$apkovl_file" "${INSTALL_CACHE_DIR}/"
+
+    # Generate setup script
+    generate_takeover_setup_script "$apkovl_file"
+
+    log_info "Takeover setup complete"
+    log_info "Run: sudo ${INSTALL_BASE_DIR}/takeover-setup.sh"
+}
+
+# Generate takeover setup script
+generate_takeover_setup_script() {
+    local apkovl_file="$1"
+    local apkovl_name
+    apkovl_name=$(basename "$apkovl_file")
+
+    local network_interfaces
+    if [[ "$NETWORK_IS_DHCP" == "true" ]]; then
+        network_interfaces="auto lo
+iface lo inet loopback
+
+auto ${DETECTED_INTERFACE}
+iface ${DETECTED_INTERFACE} inet dhcp"
+    else
+        network_interfaces="auto lo
+iface lo inet loopback
+
+auto ${DETECTED_INTERFACE}
+iface ${DETECTED_INTERFACE} inet static
+    address ${DETECTED_IP_ADDRESS}
+    netmask ${DETECTED_NETMASK}
+    gateway ${DETECTED_GATEWAY}"
+    fi
+
+    cat > "${INSTALL_BASE_DIR}/takeover-setup.sh" << SETUPSCRIPT
+#!/bin/bash
+# Alpine Anywhere Takeover Setup Script
+# Generated: $(date -Iseconds)
+# Run this with sudo to setup the takeover environment
+
+set -e
+
+TAKEOVER_DIR="/takeover"
+CACHE_DIR="${INSTALL_CACHE_DIR}"
+LOG="${INSTALL_LOG_DIR}/takeover-setup.log"
+
+log() {
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] \$*" | tee -a "\$LOG"
+}
+
+log "=== Setting up takeover environment ==="
+
+# Create and mount tmpfs
+log "Creating tmpfs at \${TAKEOVER_DIR}..."
+mkdir -p \${TAKEOVER_DIR}
+mount -t tmpfs -o size=512M tmpfs \${TAKEOVER_DIR}
+
+# Extract minirootfs
+log "Extracting Alpine minirootfs..."
+tar -xzf \${CACHE_DIR}/minirootfs.tar.gz -C \${TAKEOVER_DIR}
+
+# Create old_root mount point
+mkdir -p \${TAKEOVER_DIR}/old_root
+
+# Copy resolv.conf
+cp /etc/resolv.conf \${TAKEOVER_DIR}/etc/resolv.conf
+
+# Setup APK repositories
+log "Configuring APK repositories..."
+cat > \${TAKEOVER_DIR}/etc/apk/repositories << 'APKREPOS'
+${ALPINE_MIRROR}/v${ALPINE_VERSION}/main
+${ALPINE_MIRROR}/v${ALPINE_VERSION}/community
+APKREPOS
+
+# Install essential packages
+log "Installing packages..."
+chroot \${TAKEOVER_DIR} /sbin/apk update
+chroot \${TAKEOVER_DIR} /sbin/apk add --no-cache openssh-server openrc busybox-openrc
+
+# Setup SSH
+log "Configuring SSH..."
+mkdir -p \${TAKEOVER_DIR}/root/.ssh
+chmod 700 \${TAKEOVER_DIR}/root/.ssh
+tar -xzf \${CACHE_DIR}/${apkovl_name} -C \${TAKEOVER_DIR} root/.ssh/authorized_keys 2>/dev/null || true
+chmod 600 \${TAKEOVER_DIR}/root/.ssh/authorized_keys 2>/dev/null || true
+chroot \${TAKEOVER_DIR} /usr/bin/ssh-keygen -A
+
+cat > \${TAKEOVER_DIR}/etc/ssh/sshd_config << 'SSHDCONFIG'
+PermitRootLogin prohibit-password
+PubkeyAuthentication yes
+PasswordAuthentication no
+Subsystem sftp /usr/lib/ssh/sftp-server
+SSHDCONFIG
+
+# Setup network
+log "Configuring network..."
+mkdir -p \${TAKEOVER_DIR}/etc/network
+cat > \${TAKEOVER_DIR}/etc/network/interfaces << 'NETCONFIG'
+${network_interfaces}
+NETCONFIG
+
+echo '${DETECTED_HOSTNAME}' > \${TAKEOVER_DIR}/etc/hostname
+
+# Enable services
+chroot \${TAKEOVER_DIR} /sbin/rc-update add networking boot 2>/dev/null || true
+chroot \${TAKEOVER_DIR} /sbin/rc-update add sshd default 2>/dev/null || true
+
+log "=== Setup complete ==="
+log "Run: sudo ${INSTALL_BASE_DIR}/takeover-execute.sh"
+SETUPSCRIPT
+
+    chmod +x "${INSTALL_BASE_DIR}/takeover-setup.sh"
+
+    # Also generate the execute script
+    generate_takeover_execute_script
+}
+
+# Generate takeover execute script
+generate_takeover_execute_script() {
+    local network_setup
+    if [[ "$NETWORK_IS_DHCP" == "true" ]]; then
+        network_setup="/sbin/udhcpc -i ${DETECTED_INTERFACE} -b 2>/dev/null || true"
+    else
+        network_setup="/sbin/ifconfig ${DETECTED_INTERFACE} ${DETECTED_IP_ADDRESS} netmask ${DETECTED_NETMASK} up
+/sbin/route add default gw ${DETECTED_GATEWAY}"
+    fi
+
+    cat > "${INSTALL_BASE_DIR}/takeover-execute.sh" << EXECSCRIPT
+#!/bin/sh
+# Alpine Anywhere Takeover Execute Script
+# Generated: $(date -Iseconds)
+# Run this with sudo to pivot to Alpine
+
+set -e
+
+TAKEOVER_DIR="/takeover"
+OLD_ROOT="/old_root"
+
+log() {
+    echo "[takeover] \$*"
+}
+
+log "=== Starting takeover ==="
+
+# Sync and prepare
+sync
+sleep 2
+
+# Mount virtual filesystems
+mount -t proc proc \${TAKEOVER_DIR}/proc 2>/dev/null || true
+mount -t sysfs sys \${TAKEOVER_DIR}/sys 2>/dev/null || true
+mount --bind /dev \${TAKEOVER_DIR}/dev 2>/dev/null || true
+mkdir -p \${TAKEOVER_DIR}/dev/pts
+mount -t devpts devpts \${TAKEOVER_DIR}/dev/pts 2>/dev/null || true
+
+# Pivot root
+log "Executing pivot_root..."
+cd \${TAKEOVER_DIR}
+mkdir -p .\${OLD_ROOT}
+pivot_root . .\${OLD_ROOT}
+
+# Now in Alpine
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+# Start networking
+log "Starting network..."
+/sbin/ifconfig lo 127.0.0.1 up
+${network_setup}
+
+# Start SSH
+log "Starting SSH..."
+mkdir -p /run/sshd
+/usr/sbin/sshd
+
+log "=== Takeover complete ==="
+log "Alpine Linux running in RAM"
+log "Original system at \${OLD_ROOT}"
+log "SSH: ssh root@${DETECTED_IP_ADDRESS}"
+
+exec /bin/sh
+EXECSCRIPT
+
+    chmod +x "${INSTALL_BASE_DIR}/takeover-execute.sh"
+}
+
+# Setup kexec locally
+setup_kexec_local() {
+    local apkovl_file="$1"
+
+    log_info "Setting up kexec..."
+
+    # Copy apkovl to cache
+    cp "$apkovl_file" "${INSTALL_CACHE_DIR}/"
+
+    # Generate kexec script
+    generate_kexec_script_local "$apkovl_file"
+
+    log_info "Kexec setup complete"
+    log_info "Run: sudo ${INSTALL_BASE_DIR}/kexec.sh"
+}
+
+# Generate kexec script locally
+generate_kexec_script_local() {
+    local apkovl_file="$1"
+    local apkovl_name
+    apkovl_name=$(basename "$apkovl_file")
+
+    local cmdline="console=tty0 console=ttyS0,115200n8 "
+    cmdline+="alpine_repo=${ALPINE_MIRROR}/v${ALPINE_VERSION}/main "
+    cmdline+="modloop=${INSTALL_CACHE_DIR}/modloop "
+    cmdline+="modules=loop,squashfs,sd-mod,usb-storage "
+
+    if [[ "$NETWORK_IS_DHCP" == "true" ]]; then
+        cmdline+="ip=dhcp "
+    else
+        cmdline+="ip=${DETECTED_IP_ADDRESS}::${DETECTED_GATEWAY}:${DETECTED_NETMASK}:${DETECTED_HOSTNAME}:${DETECTED_INTERFACE}:off "
+    fi
+
+    cmdline+="apkovl=${INSTALL_CACHE_DIR}/${apkovl_name}"
+
+    cat > "${INSTALL_BASE_DIR}/kexec.sh" << KEXECSCRIPT
+#!/bin/bash
+# Alpine Anywhere Kexec Script
+# Generated: $(date -Iseconds)
+
+set -e
+
+CACHE_DIR="${INSTALL_CACHE_DIR}"
+LOG="${INSTALL_LOG_DIR}/kexec.log"
+
+log() {
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] \$*" | tee -a "\$LOG"
+}
+
+log "=== Alpine Anywhere Kexec ==="
+
+# Verify files
+for f in vmlinuz initramfs modloop ${apkovl_name}; do
+    if [[ ! -f "\${CACHE_DIR}/\$f" ]]; then
+        log "ERROR: Missing \$f"
+        exit 1
+    fi
+done
+
+CMDLINE="${cmdline}"
+
+if [[ "\$1" == "--dry-run" ]]; then
+    log "[DRY-RUN] kexec -l \${CACHE_DIR}/vmlinuz --initrd=\${CACHE_DIR}/initramfs"
+    log "[DRY-RUN] cmdline: \$CMDLINE"
+    exit 0
+fi
+
+if [[ \$EUID -ne 0 ]]; then
+    log "ERROR: Run with sudo"
+    exit 1
+fi
+
+log "Loading kernel..."
+kexec -l "\${CACHE_DIR}/vmlinuz" --initrd="\${CACHE_DIR}/initramfs" --command-line="\$CMDLINE"
+
+log "Executing in 5 seconds..."
+sleep 5
+sync
+exec kexec -e
+KEXECSCRIPT
+
+    chmod +x "${INSTALL_BASE_DIR}/kexec.sh"
+}
+
+# Execute takeover locally
+execute_takeover_local() {
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY-RUN] Would execute takeover"
+        log_info "[DRY-RUN] Scripts generated at ${INSTALL_BASE_DIR}/"
+        return 0
+    fi
+
+    echo ""
+    echo "===================================================="
+    echo "Ready to takeover into Alpine Linux!"
+    echo "===================================================="
+    echo "Method:      takeover (pivot_root)"
+    echo "IP Address:  ${DETECTED_IP_ADDRESS}"
+    echo "Scripts at:  ${INSTALL_BASE_DIR}/"
+    echo ""
+    echo "To proceed:"
+    echo "  1. sudo ${INSTALL_BASE_DIR}/takeover-setup.sh"
+    echo "  2. sudo ${INSTALL_BASE_DIR}/takeover-execute.sh"
+    echo "===================================================="
+
+    confirm_action "Run takeover setup now?"
+
+    log_info "Running takeover setup..."
+    sudo "${INSTALL_BASE_DIR}/takeover-setup.sh"
+
+    confirm_action "Run takeover execute now? (This will pivot to Alpine)"
+
+    log_warn "Executing takeover..."
+    sudo "${INSTALL_BASE_DIR}/takeover-execute.sh"
+}
+
+# Execute kexec locally
+execute_kexec_local() {
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY-RUN] Would execute kexec"
+        log_info "[DRY-RUN] Script at ${INSTALL_BASE_DIR}/kexec.sh"
+        return 0
+    fi
+
+    echo ""
+    echo "===================================================="
+    echo "Ready to kexec into Alpine Linux!"
+    echo "===================================================="
+    echo "Method:      kexec"
+    echo "IP Address:  ${DETECTED_IP_ADDRESS}"
+    echo "Script at:   ${INSTALL_BASE_DIR}/kexec.sh"
+    echo "===================================================="
+
+    confirm_action "Execute kexec now? (This will reboot into Alpine)"
+
+    log_warn "Executing kexec..."
+    sudo "${INSTALL_BASE_DIR}/kexec.sh"
+}
+
+# Show completion message
+show_completion_message() {
     echo ""
     echo "=========================================="
     echo "         SUCCESS!"
@@ -141,11 +703,13 @@ main() {
     echo "Connect with:"
     echo "  ssh root@${TARGET_HOST}"
     echo ""
-    echo "The system is running entirely in RAM."
-    echo "No changes have been made to the disk."
+    echo "Scripts are available on the target at:"
+    echo "  ${INSTALL_BASE_DIR}/"
     echo ""
-    echo "To return to the original OS, simply reboot:"
-    echo "  ssh root@${TARGET_HOST} reboot"
+    echo "To reinstall or install to another server:"
+    echo "  ssh root@${TARGET_HOST}"
+    echo "  ~/.local/share/alpine-anywhere/alpine-anywhere --local"
+    echo "  ~/.local/share/alpine-anywhere/alpine-anywhere user@other-server"
     echo ""
 }
 

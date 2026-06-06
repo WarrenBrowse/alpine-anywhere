@@ -155,6 +155,10 @@ detect_dhcp_status() {
 # Architecture Detection
 # =============================================================================
 
+# Platform type (generic, rpi, etc.)
+DETECTED_PLATFORM="generic"
+DETECTED_RPI_VERSION=""
+
 detect_architecture() {
     log_step "Detecting architecture..."
 
@@ -167,6 +171,12 @@ detect_architecture() {
             ;;
         aarch64|arm64)
             DETECTED_ARCH="aarch64"
+            # Check if this is a Raspberry Pi
+            detect_raspberry_pi
+            ;;
+        armv7l|armhf)
+            DETECTED_ARCH="armv7"
+            detect_raspberry_pi
             ;;
         *)
             die "Unsupported architecture: $arch"
@@ -174,6 +184,43 @@ detect_architecture() {
     esac
 
     log_info "Detected architecture: $DETECTED_ARCH"
+    if [[ "$DETECTED_PLATFORM" == "rpi" ]]; then
+        log_info "Detected platform: Raspberry Pi ${DETECTED_RPI_VERSION}"
+    fi
+}
+
+# Detect if running on Raspberry Pi
+detect_raspberry_pi() {
+    log_debug "Checking for Raspberry Pi..."
+
+    local model=""
+
+    # Try device-tree model
+    model=$(ssh_exec_capture "cat /proc/device-tree/model 2>/dev/null | tr -d '\0'" || true)
+
+    # Fallback to cpuinfo
+    if [[ -z "$model" ]]; then
+        model=$(ssh_exec_capture "grep -i 'model' /proc/cpuinfo 2>/dev/null | head -1" || true)
+    fi
+
+    if [[ "$model" == *"Raspberry Pi"* ]]; then
+        DETECTED_PLATFORM="rpi"
+
+        # Detect RPi version for kernel selection
+        if [[ "$model" == *"Pi 5"* ]]; then
+            DETECTED_RPI_VERSION="5"
+        elif [[ "$model" == *"Pi 4"* ]] || [[ "$model" == *"Pi 400"* ]]; then
+            DETECTED_RPI_VERSION="4"
+        elif [[ "$model" == *"Pi 3"* ]]; then
+            DETECTED_RPI_VERSION="3"
+        elif [[ "$model" == *"Pi 2"* ]]; then
+            DETECTED_RPI_VERSION="2"
+        else
+            DETECTED_RPI_VERSION="generic"
+        fi
+
+        log_debug "Raspberry Pi detected: $model (version: $DETECTED_RPI_VERSION)"
+    fi
 }
 
 # =============================================================================
@@ -252,5 +299,8 @@ print_network_summary() {
     echo "Hostname:     $DETECTED_HOSTNAME"
     echo "DHCP:         $NETWORK_IS_DHCP"
     echo "Architecture: $DETECTED_ARCH"
+    if [[ "$DETECTED_PLATFORM" == "rpi" ]]; then
+        echo "Platform:     Raspberry Pi ${DETECTED_RPI_VERSION}"
+    fi
     echo ""
 }

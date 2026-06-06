@@ -19,10 +19,15 @@ EXTRA_PACKAGES="${EXTRA_PACKAGES:-}"
 REBOOT_DELAY="${REBOOT_DELAY:-5}"
 TARGET_HOST="${TARGET_HOST:-}"
 TARGET_USER="${TARGET_USER:-}"
+INSTALL_METHOD="${INSTALL_METHOD:-auto}"  # auto, kexec, takeover
+LOCAL_MODE="${LOCAL_MODE:-false}"         # Run locally (no SSH)
 
-# Working directories
+# Working directories (set by setup_install_dirs in exec.sh)
 WORK_DIR=""
-REMOTE_WORK_DIR="/tmp/alpine-anywhere"
+INSTALL_BASE_DIR=""
+INSTALL_LIB_DIR=""
+INSTALL_CACHE_DIR=""
+INSTALL_LOG_DIR=""
 
 # Detected values (populated by network.sh)
 DETECTED_INTERFACE=""
@@ -33,6 +38,8 @@ DETECTED_GATEWAY=""
 DETECTED_DNS=""
 DETECTED_HOSTNAME=""
 DETECTED_ARCH=""
+DETECTED_PLATFORM="generic"
+DETECTED_RPI_VERSION=""
 NETWORK_IS_DHCP=false
 
 # =============================================================================
@@ -208,9 +215,12 @@ parse_target() {
 
 show_usage() {
     cat <<EOF
-Usage: alpine-anywhere [OPTIONS] <user@host>
+Usage: alpine-anywhere [OPTIONS] [user@host]
 
-Boot any Linux server into Alpine Linux RAM-only mode via SSH + kexec.
+Boot any Linux server into Alpine Linux RAM-only mode.
+
+Arguments:
+  user@host                      Target server (omit for --local mode)
 
 Options:
   -V, --alpine-version VERSION   Alpine version (default: 3.20)
@@ -221,14 +231,25 @@ Options:
   -n, --dry-run                  Show what would be done without executing
   -v, --verbose                  Verbose output
   -f, --force                    Skip confirmation prompts
+  --local                        Run locally (no SSH, for running on target server)
+  --method METHOD                Installation method: auto, kexec, takeover (default: auto)
+                                   - kexec: Use kexec to boot new kernel (requires CONFIG_KEXEC)
+                                   - takeover: Pivot root to Alpine in RAM (no kexec needed)
+                                   - auto: Try kexec, fallback to takeover if unavailable
   --extra-packages PKGS          Additional packages (comma-separated)
   --reboot-delay SECONDS         Delay before kexec (default: 5)
   -h, --help                     Show this help message
 
 Examples:
+  # Remote installation (copies scripts to target, then runs locally there)
   alpine-anywhere root@192.168.1.100
-  alpine-anywhere -V 3.21 -k virt -v user@server.example.com
-  alpine-anywhere --dry-run -i ~/.ssh/id_ed25519 root@10.0.0.1
+  alpine-anywhere --method=takeover q@raspberry-pi
+
+  # Local installation (run directly on target server)
+  alpine-anywhere --local
+
+  # Chain installation (from server A to server B)
+  ssh root@server-a "~/.local/share/alpine-anywhere/alpine-anywhere root@server-b"
 
 EOF
 }
@@ -276,9 +297,27 @@ parse_arguments() {
                 FORCE=true
                 shift
                 ;;
+            --local)
+                LOCAL_MODE=true
+                shift
+                ;;
             --extra-packages)
                 EXTRA_PACKAGES="$2"
                 shift 2
+                ;;
+            --method)
+                INSTALL_METHOD="$2"
+                if [[ "$INSTALL_METHOD" != "auto" && "$INSTALL_METHOD" != "kexec" && "$INSTALL_METHOD" != "takeover" ]]; then
+                    die "Invalid method: $INSTALL_METHOD (must be 'auto', 'kexec', or 'takeover')"
+                fi
+                shift 2
+                ;;
+            --method=*)
+                INSTALL_METHOD="${1#*=}"
+                if [[ "$INSTALL_METHOD" != "auto" && "$INSTALL_METHOD" != "kexec" && "$INSTALL_METHOD" != "takeover" ]]; then
+                    die "Invalid method: $INSTALL_METHOD (must be 'auto', 'kexec', or 'takeover')"
+                fi
+                shift
                 ;;
             --reboot-delay)
                 REBOOT_DELAY="$2"
@@ -299,15 +338,18 @@ parse_arguments() {
     done
 
     if [[ ${#positional[@]} -eq 0 ]]; then
-        show_usage
-        die "Missing target host"
-    fi
-
-    if [[ ${#positional[@]} -gt 1 ]]; then
+        if [[ "$LOCAL_MODE" != "true" ]]; then
+            show_usage
+            die "Missing target host (use --local for local installation)"
+        fi
+        # Local mode - target is localhost
+        TARGET_USER="root"
+        TARGET_HOST="localhost"
+    elif [[ ${#positional[@]} -eq 1 ]]; then
+        parse_target "${positional[0]}"
+    else
         die "Too many arguments"
     fi
-
-    parse_target "${positional[0]}"
 }
 
 # =============================================================================

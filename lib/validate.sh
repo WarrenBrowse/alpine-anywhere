@@ -56,6 +56,39 @@ validate_remote_memory() {
 validate_kexec_enabled() {
     log_step "Validating kexec capability..."
 
+    # Check if kernel has CONFIG_KEXEC compiled in
+    local kexec_config=""
+
+    # Try /proc/config.gz first (requires CONFIG_IKCONFIG_PROC)
+    kexec_config=$(ssh_exec_capture "zcat /proc/config.gz 2>/dev/null | grep '^CONFIG_KEXEC=' || true")
+
+    # Fallback to /boot/config-*
+    if [[ -z "$kexec_config" ]]; then
+        local kernel_version
+        kernel_version=$(ssh_exec_capture "uname -r")
+        kexec_config=$(ssh_exec_capture "grep '^CONFIG_KEXEC=' /boot/config-${kernel_version} 2>/dev/null || true")
+    fi
+
+    if [[ -n "$kexec_config" ]]; then
+        if [[ "$kexec_config" != "CONFIG_KEXEC=y" ]]; then
+            log_error "Kernel does not have kexec support compiled in"
+            log_error "Found: $kexec_config"
+            log_error ""
+            log_error "The running kernel needs CONFIG_KEXEC=y to use kexec."
+            log_error ""
+            log_error "On Raspberry Pi / Armbian, you may need to:"
+            log_error "  1. Install a kernel with kexec support"
+            log_error "  2. Or recompile the kernel with CONFIG_KEXEC=y"
+            log_error ""
+            log_error "Check available kernels: apt search linux-image"
+            die "Kernel kexec support not available"
+        fi
+        log_debug "Kernel kexec support: CONFIG_KEXEC=y"
+    else
+        log_warn "Could not verify kernel kexec support (config not accessible)"
+        log_warn "Will attempt kexec anyway - it may fail at runtime"
+    fi
+
     # Check if kexec_load is disabled via sysctl
     local kexec_disabled
     kexec_disabled=$(ssh_exec_capture "cat /proc/sys/kernel/kexec_load_disabled 2>/dev/null || echo 0")
@@ -161,7 +194,7 @@ run_remote_validations() {
     log_step "Running remote validations..."
 
     validate_remote_memory
-    validate_kexec_enabled
+    # Note: kexec validation moved to determine_install_method (after method selection)
     validate_remote_disk_space
     detect_virtualization
     detect_current_os
@@ -183,6 +216,70 @@ run_all_validations() {
 }
 
 # =============================================================================
+# Method Selection
+# =============================================================================
+
+# Check if kexec is available (for auto method selection)
+is_kexec_available() {
+    # Check if kernel has CONFIG_KEXEC compiled in
+    local kexec_config=""
+
+    # Try /proc/config.gz first
+    kexec_config=$(ssh_exec_capture "zcat /proc/config.gz 2>/dev/null | grep '^CONFIG_KEXEC=' || true")
+
+    # Fallback to /boot/config-*
+    if [[ -z "$kexec_config" ]]; then
+        local kernel_version
+        kernel_version=$(ssh_exec_capture "uname -r")
+        kexec_config=$(ssh_exec_capture "grep '^CONFIG_KEXEC=' /boot/config-${kernel_version} 2>/dev/null || true")
+    fi
+
+    if [[ "$kexec_config" == "CONFIG_KEXEC=y" ]]; then
+        return 0
+    fi
+
+    # If we can't determine, assume not available (safer)
+    if [[ -z "$kexec_config" ]]; then
+        # Try to check if kexec_load syscall works
+        # This is a more reliable test but requires attempting to call it
+        return 1
+    fi
+
+    return 1
+}
+
+# Determine the installation method to use
+determine_install_method() {
+    log_step "Determining installation method..."
+
+    if [[ "$INSTALL_METHOD" == "auto" ]]; then
+        log_info "Auto-detecting best installation method..."
+
+        if is_kexec_available; then
+            INSTALL_METHOD="kexec"
+            log_info "kexec is available - using kexec method"
+        else
+            INSTALL_METHOD="takeover"
+            log_info "kexec not available - using takeover method"
+        fi
+    fi
+
+    log_info "Installation method: ${INSTALL_METHOD}"
+
+    # Additional validation for selected method
+    case "$INSTALL_METHOD" in
+        kexec)
+            # Validate kexec is actually usable
+            validate_kexec_enabled
+            ;;
+        takeover)
+            # Check takeover prerequisites (done later in run_takeover_install)
+            log_debug "Takeover method selected - will validate during installation"
+            ;;
+    esac
+}
+
+# =============================================================================
 # Validation Summary
 # =============================================================================
 
@@ -194,7 +291,7 @@ print_validation_summary() {
     echo "SSH connection:  OK"
     echo "Root access:     OK"
     echo "Remote memory:   OK"
-    echo "kexec enabled:   OK"
     echo "Disk space:      OK"
+    echo "Install method:  ${INSTALL_METHOD}"
     echo ""
 }
