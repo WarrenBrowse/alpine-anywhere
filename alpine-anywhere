@@ -441,6 +441,11 @@ ${ALPINE_MIRROR}/v${ALPINE_VERSION}/main
 ${ALPINE_MIRROR}/v${ALPINE_VERSION}/community
 APKREPOS
 
+# Mount necessary filesystems for chroot
+log "Mounting filesystems for chroot..."
+mount --bind /dev \${TAKEOVER_DIR}/dev
+mount --bind /proc \${TAKEOVER_DIR}/proc 2>/dev/null || mount -t proc proc \${TAKEOVER_DIR}/proc
+
 # Install essential packages
 log "Installing packages..."
 chroot \${TAKEOVER_DIR} /sbin/apk update
@@ -450,9 +455,14 @@ chroot \${TAKEOVER_DIR} /sbin/apk add --no-cache openssh-server openrc busybox-o
 log "Configuring SSH..."
 mkdir -p \${TAKEOVER_DIR}/root/.ssh
 chmod 700 \${TAKEOVER_DIR}/root/.ssh
-tar -xzf \${CACHE_DIR}/${apkovl_name} -C \${TAKEOVER_DIR} root/.ssh/authorized_keys 2>/dev/null || true
+tar -xzf \${CACHE_DIR}/${apkovl_name} -C \${TAKEOVER_DIR} ./root/.ssh/authorized_keys 2>/dev/null || true
+chown 0:0 \${TAKEOVER_DIR}/root/.ssh/authorized_keys 2>/dev/null || true
 chmod 600 \${TAKEOVER_DIR}/root/.ssh/authorized_keys 2>/dev/null || true
 chroot \${TAKEOVER_DIR} /usr/bin/ssh-keygen -A
+
+# Unmount chroot filesystems
+umount \${TAKEOVER_DIR}/proc 2>/dev/null || true
+umount \${TAKEOVER_DIR}/dev 2>/dev/null || true
 
 cat > \${TAKEOVER_DIR}/etc/ssh/sshd_config << 'SSHDCONFIG'
 PermitRootLogin prohibit-password
@@ -490,63 +500,55 @@ generate_takeover_execute_script() {
     if [[ "$NETWORK_IS_DHCP" == "true" ]]; then
         network_setup="/sbin/udhcpc -i ${DETECTED_INTERFACE} -b 2>/dev/null || true"
     else
-        network_setup="/sbin/ifconfig ${DETECTED_INTERFACE} ${DETECTED_IP_ADDRESS} netmask ${DETECTED_NETMASK} up
-/sbin/route add default gw ${DETECTED_GATEWAY}"
+        network_setup="/sbin/ifconfig ${DETECTED_INTERFACE} ${DETECTED_IP_ADDRESS} netmask ${DETECTED_NETMASK} up 2>/dev/null || true
+/sbin/route add default gw ${DETECTED_GATEWAY} 2>/dev/null || true"
     fi
 
     cat > "${INSTALL_BASE_DIR}/takeover-execute.sh" << EXECSCRIPT
 #!/bin/sh
 # Alpine Anywhere Takeover Execute Script
 # Generated: $(date -Iseconds)
-# Run this with sudo to pivot to Alpine
+# Run this with sudo to start Alpine in chroot
 
 set -e
 
 TAKEOVER_DIR="/takeover"
-OLD_ROOT="/old_root"
 
 log() {
     echo "[takeover] \$*"
 }
 
-log "=== Starting takeover ==="
+log "=== Starting Alpine takeover ==="
 
-# Sync and prepare
+# Sync filesystems
 sync
-sleep 2
 
-# Mount virtual filesystems
+# Mount virtual filesystems in chroot
+log "Mounting virtual filesystems..."
 mount -t proc proc \${TAKEOVER_DIR}/proc 2>/dev/null || true
 mount -t sysfs sys \${TAKEOVER_DIR}/sys 2>/dev/null || true
 mount --bind /dev \${TAKEOVER_DIR}/dev 2>/dev/null || true
-mkdir -p \${TAKEOVER_DIR}/dev/pts
+mkdir -p \${TAKEOVER_DIR}/dev/pts 2>/dev/null || true
 mount -t devpts devpts \${TAKEOVER_DIR}/dev/pts 2>/dev/null || true
+mount --bind /run \${TAKEOVER_DIR}/run 2>/dev/null || mkdir -p \${TAKEOVER_DIR}/run
 
-# Pivot root
-log "Executing pivot_root..."
-cd \${TAKEOVER_DIR}
-mkdir -p .\${OLD_ROOT}
-pivot_root . .\${OLD_ROOT}
+# Start Alpine services inside chroot
+log "Starting Alpine networking..."
+chroot \${TAKEOVER_DIR} /sbin/ifconfig lo 127.0.0.1 up
+chroot \${TAKEOVER_DIR} /bin/sh -c '${network_setup}'
 
-# Now in Alpine
-export PATH=/usr/sbin:/usr/bin:/sbin:/bin
-
-# Start networking
-log "Starting network..."
-/sbin/ifconfig lo 127.0.0.1 up
-${network_setup}
-
-# Start SSH
-log "Starting SSH..."
-mkdir -p /run/sshd
-/usr/sbin/sshd
+log "Starting Alpine SSH on port 2222..."
+chroot \${TAKEOVER_DIR} /bin/mkdir -p /run/sshd
+chroot \${TAKEOVER_DIR} /usr/sbin/sshd -p 2222
 
 log "=== Takeover complete ==="
-log "Alpine Linux running in RAM"
-log "Original system at \${OLD_ROOT}"
-log "SSH: ssh root@${DETECTED_IP_ADDRESS}"
-
-exec /bin/sh
+log "Alpine Linux SSH running in chroot on port 2222"
+log "Connect via: ssh -p 2222 root@${DETECTED_IP_ADDRESS}"
+log ""
+log "To fully enter the Alpine environment:"
+log "  sudo chroot /takeover /bin/sh"
+log ""
+log "Host SSH remains on port 22."
 EXECSCRIPT
 
     chmod +x "${INSTALL_BASE_DIR}/takeover-execute.sh"
@@ -700,14 +702,21 @@ show_completion_message() {
     echo ""
     echo "Alpine Linux is now running on ${TARGET_HOST}"
     echo ""
-    echo "Connect with:"
-    echo "  ssh root@${TARGET_HOST}"
+    if [[ "$INSTALL_METHOD" == "takeover" ]]; then
+        echo "Connect to Alpine (port 2222):"
+        echo "  ssh -p 2222 root@${TARGET_HOST}"
+        echo ""
+        echo "Host SSH still available on port 22"
+    else
+        echo "Connect with:"
+        echo "  ssh root@${TARGET_HOST}"
+    fi
     echo ""
     echo "Scripts are available on the target at:"
     echo "  ${INSTALL_BASE_DIR}/"
     echo ""
     echo "To reinstall or install to another server:"
-    echo "  ssh root@${TARGET_HOST}"
+    echo "  ssh -p 2222 root@${TARGET_HOST}"
     echo "  ~/.local/share/alpine-anywhere/alpine-anywhere --local"
     echo "  ~/.local/share/alpine-anywhere/alpine-anywhere user@other-server"
     echo ""

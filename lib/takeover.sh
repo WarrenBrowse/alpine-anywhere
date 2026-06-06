@@ -139,6 +139,12 @@ ${ALPINE_MIRROR}/v${ALPINE_VERSION}/main
 ${ALPINE_MIRROR}/v${ALPINE_VERSION}/community
 APKREPOS
 
+# Mount filesystems needed for chroot
+log \"Mounting filesystems for chroot...\"
+mkdir -p \${TAKEOVER_DIR}/dev \${TAKEOVER_DIR}/proc
+mount --bind /dev \${TAKEOVER_DIR}/dev
+mount --bind /proc \${TAKEOVER_DIR}/proc 2>/dev/null || mount -t proc proc \${TAKEOVER_DIR}/proc
+
 # Install essential packages
 log \"Installing essential packages (this may take a moment)...\"
 chroot \${TAKEOVER_DIR} /sbin/apk update
@@ -150,7 +156,8 @@ mkdir -p \${TAKEOVER_DIR}/root/.ssh
 chmod 700 \${TAKEOVER_DIR}/root/.ssh
 
 # Copy SSH authorized keys from apkovl
-tar -xzf \${WORK_DIR}/*.apkovl.tar.gz -C \${TAKEOVER_DIR} --strip-components=0 root/.ssh/authorized_keys 2>/dev/null || true
+tar -xzf \${WORK_DIR}/*.apkovl.tar.gz -C \${TAKEOVER_DIR} ./root/.ssh/authorized_keys 2>/dev/null || true
+chown 0:0 \${TAKEOVER_DIR}/root/.ssh/authorized_keys 2>/dev/null || true
 
 # Fallback: copy from current user and root
 if [[ ! -f \${TAKEOVER_DIR}/root/.ssh/authorized_keys ]]; then
@@ -188,6 +195,11 @@ log \"Enabling services...\"
 chroot \${TAKEOVER_DIR} /sbin/rc-update add networking boot 2>/dev/null || true
 chroot \${TAKEOVER_DIR} /sbin/rc-update add sshd default 2>/dev/null || true
 
+# Unmount chroot filesystems
+log \"Unmounting chroot filesystems...\"
+umount \${TAKEOVER_DIR}/proc 2>/dev/null || true
+umount \${TAKEOVER_DIR}/dev 2>/dev/null || true
+
 log \"=== Takeover environment setup complete ===\"
 log \"Alpine root is at \${TAKEOVER_DIR}\"
 
@@ -214,20 +226,19 @@ generate_takeover_script() {
     if [[ "$NETWORK_IS_DHCP" == "true" ]]; then
         network_setup="/sbin/udhcpc -i ${DETECTED_INTERFACE} -b 2>/dev/null || true"
     else
-        network_setup="/sbin/ifconfig ${DETECTED_INTERFACE} ${DETECTED_IP_ADDRESS} netmask ${DETECTED_NETMASK} up 2>/dev/null || ip addr add ${DETECTED_IP_ADDRESS}/${DETECTED_CIDR} dev ${DETECTED_INTERFACE}
-/sbin/route add default gw ${DETECTED_GATEWAY} 2>/dev/null || ip route add default via ${DETECTED_GATEWAY}"
+        network_setup="/sbin/ifconfig ${DETECTED_INTERFACE} ${DETECTED_IP_ADDRESS} netmask ${DETECTED_NETMASK} up 2>/dev/null || true
+/sbin/route add default gw ${DETECTED_GATEWAY} 2>/dev/null || true"
     fi
 
     # Create the takeover script (will be written by setup script with sudo)
     ssh_exec "cat > ${REMOTE_WORK_DIR}/takeover_script.sh << 'TAKEOVERSCRIPT'
 #!/bin/sh
 # Alpine Anywhere Takeover Script
-# This script pivots the root filesystem to Alpine in tmpfs
+# This script starts Alpine services in chroot
 
 set -e
 
 TAKEOVER_DIR=\"${TAKEOVER_DIR}\"
-OLD_ROOT=\"${OLD_ROOT}\"
 LOG=\"/dev/console\"
 
 log() {
@@ -241,56 +252,31 @@ log \"Starting takeover process...\"
 log \"Syncing filesystems...\"
 sync
 
-# Stop services gracefully (best effort)
-log \"Stopping services...\"
-if command -v systemctl >/dev/null 2>&1; then
-    systemctl stop \"*\" 2>/dev/null || true
-    systemctl isolate rescue.target 2>/dev/null || true
-elif command -v rc-service >/dev/null 2>&1; then
-    rc-service --stop --all 2>/dev/null || true
-fi
-
-# Give services time to stop
-sleep 2
-
-# Mount necessary filesystems in new root
+# Mount necessary filesystems in chroot
 log \"Mounting virtual filesystems...\"
 mount -t proc proc \${TAKEOVER_DIR}/proc 2>/dev/null || true
 mount -t sysfs sys \${TAKEOVER_DIR}/sys 2>/dev/null || true
 mount -t devtmpfs dev \${TAKEOVER_DIR}/dev 2>/dev/null || mount --bind /dev \${TAKEOVER_DIR}/dev 2>/dev/null || true
 mkdir -p \${TAKEOVER_DIR}/dev/pts 2>/dev/null || true
 mount -t devpts devpts \${TAKEOVER_DIR}/dev/pts 2>/dev/null || true
+mount --bind /run \${TAKEOVER_DIR}/run 2>/dev/null || mkdir -p \${TAKEOVER_DIR}/run
 
-# Pivot root
-log \"Executing pivot_root...\"
-cd \${TAKEOVER_DIR}
-mkdir -p .\${OLD_ROOT}
-pivot_root . .\${OLD_ROOT}
+# Start networking in chroot
+log \"Starting Alpine networking...\"
+chroot \${TAKEOVER_DIR} /sbin/ifconfig lo 127.0.0.1 up 2>/dev/null || true
+chroot \${TAKEOVER_DIR} /bin/sh -c '${network_setup}'
 
-# Now we're in the new root
-log \"Pivot complete, now in Alpine environment\"
-
-# Update PATH for Alpine
-export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
-# Start networking
-log \"Starting networking...\"
-/sbin/ifconfig lo 127.0.0.1 up 2>/dev/null || ip link set lo up 2>/dev/null || true
-${network_setup}
-
-# Start SSH daemon
-log \"Starting SSH daemon...\"
-mkdir -p /run/sshd
-/usr/sbin/sshd
+# Start SSH daemon in chroot on port 2222
+log \"Starting Alpine SSH daemon on port 2222...\"
+chroot \${TAKEOVER_DIR} /bin/mkdir -p /run/sshd
+chroot \${TAKEOVER_DIR} /usr/sbin/sshd -p 2222
 
 log \"=== Takeover complete ===\"
-log \"Alpine Linux is now running in RAM\"
-log \"Original system is mounted at \${OLD_ROOT}\"
+log \"Alpine Linux SSH running in chroot on port 2222\"
+log \"Connect via: ssh -p 2222 root@${DETECTED_IP_ADDRESS}\"
 log \"\"
-log \"You can reconnect via SSH: ssh root@${DETECTED_IP_ADDRESS}\"
-
-# Start a shell
-exec /bin/sh
+log \"Host SSH remains on port 22\"
+log \"To fully enter Alpine: sudo chroot /takeover /bin/sh\"
 TAKEOVERSCRIPT"
 
     # Copy takeover script to /takeover with sudo
