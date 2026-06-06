@@ -104,6 +104,12 @@ create_work_dir() {
 # Cleanup function called on exit
 cleanup() {
     local exit_code=$?
+
+    # Close SSH multiplexing if function exists
+    if type close_ssh_multiplexing &>/dev/null; then
+        close_ssh_multiplexing
+    fi
+
     if [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]]; then
         log_debug "Cleaning up work directory: $WORK_DIR"
         rm -rf "$WORK_DIR"

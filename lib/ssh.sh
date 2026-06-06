@@ -5,7 +5,27 @@
 # SSH Configuration
 # =============================================================================
 
-# Build SSH options as a string (bash 3 compatible)
+# SSH multiplexing socket path
+SSH_CONTROL_PATH=""
+
+# Setup SSH multiplexing for connection reuse (enables sudo credential caching)
+setup_ssh_multiplexing() {
+    # Use short path to avoid macOS 104-byte socket path limit
+    SSH_CONTROL_PATH="/tmp/aa-$$-%C"
+    log_debug "SSH multiplexing enabled: $SSH_CONTROL_PATH"
+}
+
+# Close SSH multiplexing connection
+close_ssh_multiplexing() {
+    if [[ -n "$SSH_CONTROL_PATH" ]]; then
+        local ssh_opts
+        ssh_opts=$(_ssh_opts_no_batch)
+        # shellcheck disable=SC2086
+        ssh $ssh_opts -O exit "${TARGET_USER}@${TARGET_HOST}" 2>/dev/null || true
+    fi
+}
+
+# Build SSH options as a string (bash 3 compatible) - batch mode
 _ssh_opts() {
     local opts="-o BatchMode=yes"
     opts="$opts -o StrictHostKeyChecking=accept-new"
@@ -13,6 +33,35 @@ _ssh_opts() {
     opts="$opts -o ServerAliveInterval=30"
     opts="$opts -o ServerAliveCountMax=3"
     opts="$opts -p $SSH_PORT"
+
+    # Add multiplexing if enabled
+    if [[ -n "$SSH_CONTROL_PATH" ]]; then
+        opts="$opts -o ControlPath=$SSH_CONTROL_PATH"
+        opts="$opts -o ControlMaster=auto"
+        opts="$opts -o ControlPersist=300"
+    fi
+
+    if [[ -n "$SSH_IDENTITY" ]]; then
+        opts="$opts -i $SSH_IDENTITY"
+    fi
+
+    echo "$opts"
+}
+
+# Build SSH options without batch mode (for interactive password prompts)
+_ssh_opts_no_batch() {
+    local opts="-o StrictHostKeyChecking=accept-new"
+    opts="$opts -o ConnectTimeout=10"
+    opts="$opts -o ServerAliveInterval=30"
+    opts="$opts -o ServerAliveCountMax=3"
+    opts="$opts -p $SSH_PORT"
+
+    # Add multiplexing if enabled
+    if [[ -n "$SSH_CONTROL_PATH" ]]; then
+        opts="$opts -o ControlPath=$SSH_CONTROL_PATH"
+        opts="$opts -o ControlMaster=auto"
+        opts="$opts -o ControlPersist=300"
+    fi
 
     if [[ -n "$SSH_IDENTITY" ]]; then
         opts="$opts -i $SSH_IDENTITY"
@@ -49,7 +98,8 @@ ssh_exec_sudo() {
     if [[ "$TARGET_USER" == "root" ]]; then
         ssh_exec "$command"
     else
-        ssh_exec "sudo -n $command"
+        # Sudo credentials are cached via SSH multiplexing after initial auth
+        ssh_exec "sudo $command"
     fi
 }
 
@@ -63,6 +113,18 @@ ssh_exec_capture() {
 
     # shellcheck disable=SC2086
     ssh $ssh_opts "${TARGET_USER}@${TARGET_HOST}" "$command"
+}
+
+# Execute command interactively (with TTY for password prompts)
+ssh_exec_interactive() {
+    local command="$1"
+    local ssh_opts
+    ssh_opts=$(_ssh_opts_no_batch)
+
+    log_debug "SSH interactive: $command"
+
+    # shellcheck disable=SC2086
+    ssh -t $ssh_opts "${TARGET_USER}@${TARGET_HOST}" "$command"
 }
 
 # =============================================================================
@@ -114,10 +176,12 @@ test_ssh_connection() {
     log_step "Testing SSH connection to ${TARGET_USER}@${TARGET_HOST}..."
 
     local ssh_opts
-    ssh_opts=$(_ssh_opts)
+    ssh_opts=$(_ssh_opts_no_batch)
 
+    # First connection may prompt for password - use interactive mode
+    # This also establishes the multiplexed connection for subsequent commands
     # shellcheck disable=SC2086
-    if ! ssh $ssh_opts "${TARGET_USER}@${TARGET_HOST}" "echo 'Connection successful'" >/dev/null 2>&1; then
+    if ! ssh $ssh_opts "${TARGET_USER}@${TARGET_HOST}" "echo 'Connection successful'" >/dev/null; then
         die "Cannot connect to ${TARGET_USER}@${TARGET_HOST} on port ${SSH_PORT}. Check credentials and connectivity."
     fi
 
@@ -134,22 +198,25 @@ check_root_access() {
         return 0
     fi
 
-    local can_root=false
-
     if [[ "$TARGET_USER" == "root" ]]; then
-        can_root=true
-    else
-        # Test sudo access
-        if ssh_exec_capture "sudo -n true" >/dev/null 2>&1; then
-            can_root=true
-        fi
+        log_info "Running as root"
+        return 0
     fi
 
-    if [[ "$can_root" != "true" ]]; then
-        die "Cannot get root access. Either login as root or ensure passwordless sudo is configured."
+    # Test passwordless sudo first
+    if ssh_exec_capture "sudo -n true" >/dev/null 2>&1; then
+        log_info "Passwordless sudo available"
+        return 0
     fi
 
-    log_info "Root access confirmed"
+    # Try interactive sudo - user will be prompted for password
+    log_info "Sudo requires password - you may be prompted"
+    if ssh_exec_interactive "sudo true"; then
+        log_info "Sudo access confirmed"
+        return 0
+    fi
+
+    die "Cannot get sudo access. Check your password or sudo configuration."
 }
 
 # =============================================================================
