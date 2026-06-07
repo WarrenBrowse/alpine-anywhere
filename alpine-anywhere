@@ -149,6 +149,16 @@ run_slot_action() {
         verify)    verify_current_slot ;;
         rollback)  rollback_slot ;;
         bootcount) increment_boot_counter ;;
+        switch)
+            case "$TARGET_SLOT" in
+                A|B) ;;
+                *) die "switch needs a slot: aa switch A|B" ;;
+            esac
+            mount_boot
+            switch_slot "$TARGET_SLOT"
+            umount_boot
+            log_info "Boot slot set to $TARGET_SLOT. Reboot to activate."
+            ;;
         *)         die "Unknown slot action: $SLOT_ACTION" ;;
     esac
 }
@@ -262,6 +272,7 @@ run_local_ab_install() {
         [ -n "$SSH_HOST_KEY_DIR" ] && sudo_args="$sudo_args --ssh-host-keys=$SSH_HOST_KEY_DIR"
         [ -n "$TARGET_DISK" ] && sudo_args="$sudo_args --disk=$TARGET_DISK"
         [ -n "$INIT_SYSTEM" ] && sudo_args="$sudo_args --init=$INIT_SYSTEM"
+        [ -n "$TARGET_SLOT" ] && sudo_args="$sudo_args --slot=$TARGET_SLOT"
         exec sudo -E sh "$0" $sudo_args
     fi
 
@@ -312,7 +323,13 @@ run_local_ab_install() {
     root_disk=$(strip_partition "$(findmnt -n -o SOURCE / 2>/dev/null)" 2>/dev/null)
     if [ -n "$TARGET_DISK" ] && [ -n "$root_disk" ] && [ "$TARGET_DISK" != "$root_disk" ]; then
         log_info "Target $TARGET_DISK differs from boot disk $root_disk -> installing without pivot"
-        run_ab_install
+        if [ -n "$TARGET_SLOT" ] && [ "$TARGET_SLOT" != "A" ]; then
+            # Install into a specific slot of an existing layout (keeps the other slot)
+            resolve_init_system
+            install_secondary_slot "$TARGET_DISK" "$TARGET_SLOT"
+        else
+            run_ab_install
+        fi
         show_install_completion_message
         return 0
     fi

@@ -994,6 +994,42 @@ EOF
     log_info "==================================="
 }
 
+# Install an image into a specific slot of an EXISTING A/B layout, without
+# repartitioning and without changing the active slot. Used for `--install
+# --slot B` (e.g. building a second variant alongside the current one).
+# Use `aa switch <slot>` afterwards to boot it.
+install_secondary_slot() {
+    local disk="$1" slot="$2"
+    local partnum dev sq boot_dev
+
+    partnum=$(slot_to_partnum "$slot")
+    dev=$(get_part_dev "$disk" "$partnum")
+    [ -b "$dev" ] || die "Slot $slot partition ($dev) not found — run a full install first"
+
+    log_step "Installing to slot $slot ($dev) on the existing layout (init: ${INIT_SYSTEM})..."
+    sq="/tmp/system-${slot}.squashfs"
+    generate_system_squashfs "$sq"   # builds image, wraps initramfs, saves /tmp/boot-files
+    log_step "Writing image to slot $slot ($dev)..."
+    dd if="$sq" of="$dev" bs=1M conv=fsync 2>/dev/null
+    sync
+    log_info "Slot $slot written: $(du -h "$sq" | cut -f1)"
+
+    boot_dev=$(get_part_dev "$disk" 1)
+    BOOT_MNT="/mnt/aa-boot"
+    mkdir -p "$BOOT_MNT"
+    mount "$boot_dev" "$BOOT_MNT"
+    place_slot_kernel "$BOOT_MNT" "$slot" "/tmp/boot-files/vmlinuz" "/tmp/boot-files/initramfs"
+    set_slot_meta "$slot" "VERSION" "$ALPINE_VERSION"
+    set_slot_meta "$slot" "INSTALLED" "$(date -Iseconds)"
+    set_slot_meta "$slot" "VERIFIED" "false"
+    set_slot_meta "$slot" "BOOT_COUNT" "0"
+    sync
+    umount "$BOOT_MNT"
+
+    rm -f "$sq"; rm -rf /tmp/boot-files
+    log_info "Slot $slot installed; active slot unchanged. Boot it with: aa switch $slot && reboot"
+}
+
 # =============================================================================
 # Slot / Boot helpers (shared by install.sh and upgrade.sh)
 # =============================================================================

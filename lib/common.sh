@@ -28,6 +28,7 @@ INSTALL_CONTINUE="${INSTALL_CONTINUE:-false}"  # Continue installation after piv
 UPGRADE_MODE="${UPGRADE_MODE:-false}"     # Upgrade mode (A/B switch)
 SLOT_ACTION="${SLOT_ACTION:-}"            # Slot subcommand: status|verify|rollback|bootcount
 INIT_SYSTEM="${INIT_SYSTEM:-}"            # Init system: openrc|s6 (empty = auto: s6 if hardened else openrc)
+TARGET_SLOT="${TARGET_SLOT:-}"            # Destination/boot slot: A|B (install dest; aa switch target)
 KEEP_EXISTING="${KEEP_EXISTING:-false}"   # Keep existing system (dual-boot)
 OVERLAY_DEVICE="${OVERLAY_DEVICE:-}"      # Device for persistent overlay
 TARGET_DISK="${TARGET_DISK:-}"            # Explicit install disk (e.g. /dev/sda); empty = auto-detect
@@ -262,6 +263,7 @@ A/B slot subcommands (run on an installed device; omit host to act locally):
   status                         Show active slot and per-slot metadata
   verify                         Mark the running slot as known-good (stops auto-rollback)
   rollback                       Switch back to the other slot and reboot
+  switch A|B                     Set the boot slot (reboot to activate)
 
 Options:
   -V, --alpine-version VERSION   Alpine version (default: 3.20)
@@ -279,6 +281,8 @@ Options:
 
 Install options:
   --keep                         Keep existing system (dual-boot)
+  --slot A|B                     Destination slot (default A). --slot B installs into the
+                                   second slot of an existing layout without touching slot A.
   --disk DEVICE                  Target install disk (e.g. /dev/sda). REQUIRED when more
                                    than one disk is present (e.g. SD + USB) - the installer
                                    refuses to guess and risk wiping the boot medium.
@@ -451,8 +455,16 @@ parse_arguments() {
                 UPGRADE_MODE=true
                 shift
                 ;;
-            status|verify|rollback|bootcount)
+            status|verify|rollback|bootcount|switch)
                 SLOT_ACTION="$1"
+                shift
+                ;;
+            --slot)
+                TARGET_SLOT="$2"
+                shift 2
+                ;;
+            --slot=*)
+                TARGET_SLOT="${1#*=}"
                 shift
                 ;;
             --hardened)
@@ -485,6 +497,15 @@ parse_arguments() {
                 ;;
         esac
     done
+
+    # `aa switch <A|B>`: the positional is the target slot, run locally.
+    if [ "$SLOT_ACTION" = "switch" ]; then
+        [ -n "$pos_0" ] && TARGET_SLOT="$pos_0"
+        LOCAL_MODE=true
+        TARGET_USER="root"
+        TARGET_HOST="localhost"
+        return 0
+    fi
 
     if [ "$pos_count" -eq 0 ]; then
         if [ -n "$SLOT_ACTION" ]; then
