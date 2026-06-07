@@ -206,19 +206,8 @@ Describe 'install.sh'
 
     End
 
-    Describe 'bake_boot_guard_shim()'
-        setup() { ROOT=$(mktemp -d); }
-        cleanup() { rm -rf "$ROOT"; }
-        Before 'setup'
-        After 'cleanup'
-
-        It 'installs the PID 1 boot-guard shim at /sbin/aa-boot-init'
-            When call bake_boot_guard_shim "$ROOT"
-            The path "$ROOT/sbin/aa-boot-init" should be exist
-            The contents of file "$ROOT/sbin/aa-boot-init" should include "aa bootcount"
-            The contents of file "$ROOT/sbin/aa-boot-init" should include "exec /sbin/init"
-        End
-    End
+    # NOTE: boot-guard (wrap_boot_initramfs / aa-guard) is WIP for next session,
+    # not wired into installs yet — see MEMORY.md. No test until it's validated.
 
     Describe 'persist_host_keys()'
         setup() {

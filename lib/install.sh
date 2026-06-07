@@ -577,34 +577,75 @@ bake_management_tools() {
         return 0
     fi
     log_info "Baking 'aa' command + alpine-anywhere tool into image..."
-    bake_boot_guard_shim "$root"
+    # NOTE: the boot-guard (wrap_boot_initramfs / aa-guard) is NOT wired in yet —
+    # it is WIP for the next session. Installs currently produce clean, vanilla
+    # OpenRC slots that boot reliably (stock initramfs, panic=10, no init=/rdinit).
     install_ab_services "$root"
 }
 
-# Bake the PID 1 boot-guard shim into the image at /sbin/aa-boot-init.
-# Selected via init=/sbin/aa-boot-init on the cmdline; Alpine's initramfs honours
-# init= and exec's it AFTER switch_root, so the shim runs as PID 1 in the full
-# squashfs root (modules loaded, disk accessible, aa CLI present) — making the
-# boot-attempt count reliable. It then exec's the real init (/sbin/init). If the
-# real init cannot exec, it force-reboots so the failed attempt still counts.
-bake_boot_guard_shim() {
-    local root="$1"
-    mkdir -p "${root}/sbin"
-    # Shebang uses busybox directly (NOT #!/bin/sh): switch_root's execv of a
-    # script whose interpreter is the /bin/sh symlink fails with ENOENT right
-    # after the pivot; /bin/busybox is a real binary and resolves reliably.
-    cat > "${root}/sbin/aa-boot-init" << 'EOF'
-#!/bin/busybox sh
-# A/B boot-guard PID 1 shim (init=/sbin/aa-boot-init), runs in the full root.
-export PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-mount -t proc proc /proc 2>/dev/null || true
-/usr/local/bin/aa bootcount 2>/dev/null || true   # counts; rolls back+reboots if a slot keeps failing
-exec /sbin/init "$@"
-# Only reached if the real init failed to exec — count it as a failed boot.
-sleep 5
-exec /sbin/reboot -f 2>/dev/null || reboot -f
+# Wrap the Alpine mkinitfs initramfs with the A/B boot-guard, in place.
+# Instead of changing the init (rdinit/init= both failed on the RPi), we PATCH
+# the Alpine init to call /sbin/aa-guard right before its `exec switch_root`.
+# At that point modules are loaded, busybox is set up and the disk is accessible
+# (the root was just mounted) — a reliable environment — yet we're still in the
+# initramfs, so the guard can roll back before handing off to the real init.
+wrap_boot_initramfs() {
+    local img="$1"
+    log_info "Wrapping initramfs with A/B boot-guard (aa-guard before switch_root)..."
+    local tmp; tmp=$(mktemp -d)
+    ( cd "$tmp" && gzip -dc "$img" 2>/dev/null | cpio -idm 2>/dev/null ) || {
+        log_warn "Could not unpack initramfs; skipping boot-guard"; rm -rf "$tmp"; return 0; }
+    [ -f "$tmp/init" ] || { log_warn "initramfs has no /init; skipping boot-guard"; rm -rf "$tmp"; return 0; }
+    grep -q 'exec switch_root' "$tmp/init" || { log_warn "no 'exec switch_root' in init; skipping boot-guard"; rm -rf "$tmp"; return 0; }
+
+    mkdir -p "$tmp/sbin"
+    cat > "$tmp/sbin/aa-guard" << 'EOF'
+#!/bin/sh
+# A/B boot-guard: invoked by the patched Alpine init just before switch_root,
+# in the initramfs with modules loaded + busybox ready + disk accessible.
+# Counts this boot attempt; rolls back to the other slot after too many
+# unverified boots. Best-effort: never blocks the boot (always exits 0 unless
+# it deliberately reboots for a rollback).
+root=$(sed -n 's/.*root=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null)
+case "$root" in *2) slot=A ;; *3) slot=B ;; *) exit 0 ;; esac
+disk=$(echo "$root" | sed -E 's/p?[0-9]+$//')
+case "$root" in *p[0-9]) boot="${disk}p1" ;; *) boot="${disk}1" ;; esac
+mkdir -p /aa-boot
+mount -t vfat "$boot" /aa-boot 2>/dev/null || mount "$boot" /aa-boot 2>/dev/null || exit 0
+meta=/aa-boot/slots.meta
+glog() { echo "[$(cut -d. -f1 /proc/uptime 2>/dev/null)s] aa-guard: $*" >> /aa-boot/init-aa.log 2>/dev/null; sync 2>/dev/null; }
+glog "start slot=$slot root=$root boot=$boot"
+[ -f "$meta" ] || { glog "no slots.meta; skip"; umount /aa-boot 2>/dev/null; exit 0; }
+cnt=$(sed -n "s/^SLOT_${slot}_BOOT_COUNT=//p" "$meta"); cnt=$((${cnt:-0}+1))
+ver=$(sed -n "s/^SLOT_${slot}_VERIFIED=//p" "$meta")
+grep -v "^SLOT_${slot}_BOOT_COUNT=" "$meta" > "$meta.t" 2>/dev/null; echo "SLOT_${slot}_BOOT_COUNT=$cnt" >> "$meta.t"; mv "$meta.t" "$meta"; sync
+glog "count=$cnt verified=$ver (max=1)"
+if [ "$cnt" -gt 1 ] && [ "$ver" != "true" ]; then
+    other=A; opart=2; [ "$slot" = A ] && { other=B; opart=3; }
+    if grep -q "^SLOT_${other}_VERSION=." "$meta"; then
+        odev="${disk}${opart}"; case "$disk" in *mmcblk*|*nvme*) odev="${disk}p${opart}" ;; esac
+        sed -i "s|^kernel=vmlinuz-.*|kernel=vmlinuz-${other}|; s|^initramfs initramfs-.*|initramfs initramfs-${other} followkernel|" /aa-boot/config.txt 2>/dev/null
+        echo "root=${odev} rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs panic=10 console=tty1 quiet" > /aa-boot/cmdline.txt
+        echo "$other" > /aa-boot/current_slot
+        glog "ROLLBACK $slot -> $other (root=$odev); rebooting"
+        sync; umount /aa-boot 2>/dev/null; reboot -f
+    else
+        glog "no $other image; cannot roll back"
+    fi
+fi
+umount /aa-boot 2>/dev/null
+exit 0
 EOF
-    chmod +x "${root}/sbin/aa-boot-init"
+    chmod +x "$tmp/sbin/aa-guard"
+
+    # Insert the guard call on the line before `exec switch_root` (once).
+    if ! grep -q '/sbin/aa-guard' "$tmp/init"; then
+        sed -i 's|^\([[:space:]]*\)\(exec switch_root.*\)$|\1/sbin/aa-guard 2>/dev/null \|\| true\n\1\2|' "$tmp/init"
+    fi
+
+    ( cd "$tmp" && find . | cpio -o -H newc 2>/dev/null | gzip ) > "$img" \
+        || log_warn "Could not repack initramfs boot-guard"
+    rm -rf "$tmp"
 }
 
 # OpenRC service for A/B auto-rollback:
@@ -1019,15 +1060,14 @@ slot_to_partnum() {
 }
 
 # Kernel cmdline shared by both slots (root= is appended per-slot).
-# The A/B boot-guard is a PID 1 shim (/sbin/aa-boot-init) selected via
-# init=/sbin/aa-boot-init. Alpine's initramfs HONOURS init= (it execs KOPT_init
-# after switch_root), so the shim runs in the full squashfs root — modules
-# loaded, the disk accessible, the aa CLI available — and counts the boot
-# attempt reliably, then exec's the real init. (rdinit=/init.aa was NOT honoured
-# on the RPi, and an initramfs guard proved too fragile.)
+# The A/B boot-guard is /sbin/aa-guard, invoked by the (patched) Alpine initramfs
+# init right BEFORE switch_root — i.e. in the initramfs once modules are loaded,
+# busybox is ready and the disk is accessible, but before handing off to the
+# real init. (init=/sbin/aa-boot-init failed: switch_root couldn't exec it;
+# rdinit=/init.aa was ignored; a first-thing /init guard hit a too-bare env.)
 # - panic=10: a dying init (PID 1 exit -> kernel panic) reboots after 10s so a
 #   broken-but-mountable slot accumulates failed boots toward rollback.
-SLOT_KERNEL_OPTS="rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs init=/sbin/aa-boot-init panic=10 console=tty1 quiet"
+SLOT_KERNEL_OPTS="rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs panic=10 console=tty1 quiet"
 
 # Place a slot's kernel + initramfs on the boot partition as vmlinuz-<slot>/initramfs-<slot>
 place_slot_kernel() {
