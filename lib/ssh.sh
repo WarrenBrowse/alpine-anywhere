@@ -148,38 +148,49 @@ ssh_exec_interactive() {
 # SCP Functions
 # =============================================================================
 
-# Copy file to remote host
+# Copy file to remote host.
+# Uses `ssh ... cat > dest` instead of scp/sftp so it works against minimal
+# hosts that ship neither the scp binary nor /usr/lib/ssh/sftp-server (e.g. the
+# immutable Alpine image itself). If remote_path ends with '/', the source
+# basename is appended (scp-like directory semantics).
 scp_to_remote() {
     local_path="$1"
     remote_path="$2"
-    scp_opts=$(_scp_opts)
+    ssh_opts=$(_ssh_opts)
 
-    log_debug "SCP to remote: $local_path -> $remote_path"
+    log_debug "Copy to remote (cat): $local_path -> $remote_path"
 
     if [ "$DRY_RUN" = "true" ]; then
-        echo "[DRY-RUN] scp $scp_opts '$local_path' '${TARGET_USER}@${TARGET_HOST}:$remote_path'"
+        echo "[DRY-RUN] cat '$local_path' | ssh ${TARGET_USER}@${TARGET_HOST} 'cat > $remote_path'"
         return 0
     fi
 
+    dest="$remote_path"
+    case "$dest" in
+        */) dest="${dest}$(basename "$local_path")" ;;
+    esac
+
     # shellcheck disable=SC2086
-    scp $scp_opts "$local_path" "${TARGET_USER}@${TARGET_HOST}:$remote_path"
+    ssh $ssh_opts "${TARGET_USER}@${TARGET_HOST}" "cat > '$dest'" < "$local_path"
 }
 
-# Copy directory to remote host
+# Copy a directory's CONTENTS to a remote directory via a tar stream over ssh
+# (busybox tar is enough; no scp/sftp needed). Creates remote_path if missing.
 scp_dir_to_remote() {
     local_path="$1"
     remote_path="$2"
-    scp_opts=$(_scp_opts)
+    ssh_opts=$(_ssh_opts)
 
-    log_debug "SCP dir to remote: $local_path -> $remote_path"
+    log_debug "Copy dir to remote (tar): $local_path -> $remote_path"
 
     if [ "$DRY_RUN" = "true" ]; then
-        echo "[DRY-RUN] scp -r $scp_opts '$local_path' '${TARGET_USER}@${TARGET_HOST}:$remote_path'"
+        echo "[DRY-RUN] tar -C '$local_path' -cf - . | ssh ${TARGET_USER}@${TARGET_HOST} 'tar -C $remote_path -xf -'"
         return 0
     fi
 
     # shellcheck disable=SC2086
-    scp -r $scp_opts "$local_path" "${TARGET_USER}@${TARGET_HOST}:$remote_path"
+    tar -C "$local_path" -cf - . \
+        | ssh $ssh_opts "${TARGET_USER}@${TARGET_HOST}" "mkdir -p '$remote_path' && tar -C '$remote_path' -xf -"
 }
 
 # =============================================================================

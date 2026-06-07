@@ -330,9 +330,13 @@ run_install_continue() {
     INSTALL_CACHE_DIR="${INSTALL_BASE_DIR}/cache"
     mkdir -p "$INSTALL_CACHE_DIR"
 
-    # Detect disk
+    # Detect disk (explicit --disk wins, consistent with run_ab_install)
     local disk
-    disk=$(detect_root_disk)
+    if [ -n "$TARGET_DISK" ]; then
+        disk="$TARGET_DISK"
+    else
+        disk=$(detect_root_disk)
+    fi
     log_info "Target disk: $disk"
 
     # Check disk is unmounted

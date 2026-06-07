@@ -418,7 +418,9 @@ EOF
     log_info "Installing packages (kernel: $kernel_pkg)..."
     chroot "$build_dir" /sbin/apk update
 
-    local ssh_pkg="openssh-server openssh-client"
+    # openssh-sftp-server: the image's sshd_config declares an sftp Subsystem;
+    # without this package scp/sftp into the installed system fail.
+    local ssh_pkg="openssh-server openssh-client openssh-sftp-server"
     if [ "$HARDENED_MODE" = "true" ]; then
         ssh_pkg="dropbear dropbear-openrc"
     fi

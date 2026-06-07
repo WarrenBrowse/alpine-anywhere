@@ -9,7 +9,14 @@
 validate_local_commands() {
     log_step "Validating local commands..."
 
-    local required_commands="ssh scp curl tar gzip"
+    # In local mode we run ON the target, so ssh/scp (control-host tools) are
+    # not needed there; only the download + archive tools are.
+    local required_commands
+    if [ "$LOCAL_MODE" = "true" ]; then
+        required_commands="curl tar gzip"
+    else
+        required_commands="ssh scp curl tar gzip"
+    fi
     local missing=""
 
     for cmd in $required_commands; do
