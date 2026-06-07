@@ -388,10 +388,14 @@ apply_hardening_to_image() {
     log_info "Applying security hardening..."
 
     # 0. Install hardening runtime dependencies into the image (the configs
-    #    below are useless — or dangerous — without them).
-    log_info "Installing hardening packages (nftables, hardened-malloc)..."
-    chroot "$root" /sbin/apk add --no-cache nftables hardened-malloc \
-        || log_warn "Some hardening packages unavailable"
+    #    below are useless — or dangerous — without them). Install separately:
+    #    apk add is atomic, so bundling an unavailable package (hardened-malloc
+    #    is not in Alpine aarch64 repos) would also skip the available ones.
+    log_info "Installing firewall (nftables)..."
+    chroot "$root" /sbin/apk add --no-cache nftables || log_warn "nftables unavailable"
+    log_info "Installing hardened-malloc (if available)..."
+    chroot "$root" /sbin/apk add --no-cache hardened-malloc 2>/dev/null \
+        || log_warn "hardened-malloc not packaged for this arch; skipping"
 
     # 1. Sysctl hardening
     log_info "Configuring sysctl hardening..."
@@ -416,11 +420,12 @@ apply_hardening_to_image() {
         rm -f "${root}/etc/ld.so.preload"
     fi
 
-    # 4. Firewall rules
+    # 4. Firewall rules. Alpine's nftables OpenRC service loads /etc/nftables.nft
+    #    by default, so write there (keep a copy under nftables.d for clarity).
     log_info "Configuring firewall..."
     mkdir -p "${root}/etc/nftables.d"
     generate_nftables_config > "${root}/etc/nftables.d/hardened.nft"
-    ln -sf /etc/nftables.d/hardened.nft "${root}/etc/nftables.conf"
+    generate_nftables_config > "${root}/etc/nftables.nft"
 
     # 5. Security audit script
     log_info "Installing security audit tool..."
