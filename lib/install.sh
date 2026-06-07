@@ -577,7 +577,7 @@ bake_management_tools() {
         return 0
     fi
     log_info "Baking 'aa' command + alpine-anywhere tool into image..."
-    # NOTE: the boot-guard (wrap_boot_initramfs / aa-guard) is NOT wired in yet —
+    # NOTE: the boot-guard (wrap_boot_initramfs / init.aa) is NOT wired in yet —
     # it is WIP for the next session. Installs currently produce clean, vanilla
     # OpenRC slots that boot reliably (stock initramfs, panic=10, no init=/rdinit).
     install_ab_services "$root"
@@ -585,13 +585,13 @@ bake_management_tools() {
 
 # Wrap the Alpine mkinitfs initramfs with the A/B boot-guard, in place.
 # Instead of changing the init (rdinit/init= both failed on the RPi), we PATCH
-# the Alpine init to call /sbin/aa-guard right before its `exec switch_root`.
+# the Alpine init to call /sbin/init.aa right before its `exec switch_root`.
 # At that point modules are loaded, busybox is set up and the disk is accessible
 # (the root was just mounted) — a reliable environment — yet we're still in the
 # initramfs, so the guard can roll back before handing off to the real init.
 wrap_boot_initramfs() {
     local img="$1"
-    log_info "Wrapping initramfs with A/B boot-guard (aa-guard before switch_root)..."
+    log_info "Wrapping initramfs with A/B boot-guard (init.aa before switch_root)..."
     local tmp; tmp=$(mktemp -d)
     ( cd "$tmp" && gzip -dc "$img" 2>/dev/null | cpio -idm 2>/dev/null ) || {
         log_warn "Could not unpack initramfs; skipping boot-guard"; rm -rf "$tmp"; return 0; }
@@ -599,7 +599,7 @@ wrap_boot_initramfs() {
     grep -q 'exec switch_root' "$tmp/init" || { log_warn "no 'exec switch_root' in init; skipping boot-guard"; rm -rf "$tmp"; return 0; }
 
     mkdir -p "$tmp/sbin"
-    cat > "$tmp/sbin/aa-guard" << 'EOF'
+    cat > "$tmp/sbin/init.aa" << 'EOF'
 #!/bin/sh
 # A/B boot-guard: invoked by the patched Alpine init just before switch_root,
 # in the initramfs with modules loaded + busybox ready + disk accessible.
@@ -613,7 +613,7 @@ case "$root" in *p[0-9]) boot="${disk}p1" ;; *) boot="${disk}1" ;; esac
 mkdir -p /aa-boot
 mount -t vfat "$boot" /aa-boot 2>/dev/null || mount "$boot" /aa-boot 2>/dev/null || exit 0
 meta=/aa-boot/slots.meta
-glog() { echo "[$(cut -d. -f1 /proc/uptime 2>/dev/null)s] aa-guard: $*" >> /aa-boot/init-aa.log 2>/dev/null; sync 2>/dev/null; }
+glog() { echo "[$(cut -d. -f1 /proc/uptime 2>/dev/null)s] init.aa: $*" >> /aa-boot/init-aa.log 2>/dev/null; sync 2>/dev/null; }
 glog "start slot=$slot root=$root boot=$boot"
 [ -f "$meta" ] || { glog "no slots.meta; skip"; umount /aa-boot 2>/dev/null; exit 0; }
 cnt=$(sed -n "s/^SLOT_${slot}_BOOT_COUNT=//p" "$meta"); cnt=$((${cnt:-0}+1))
@@ -636,11 +636,11 @@ fi
 umount /aa-boot 2>/dev/null
 exit 0
 EOF
-    chmod +x "$tmp/sbin/aa-guard"
+    chmod +x "$tmp/sbin/init.aa"
 
     # Insert the guard call on the line before `exec switch_root` (once).
-    if ! grep -q '/sbin/aa-guard' "$tmp/init"; then
-        sed -i 's|^\([[:space:]]*\)\(exec switch_root.*\)$|\1/sbin/aa-guard 2>/dev/null \|\| true\n\1\2|' "$tmp/init"
+    if ! grep -q '/sbin/init.aa' "$tmp/init"; then
+        sed -i 's|^\([[:space:]]*\)\(exec switch_root.*\)$|\1/sbin/init.aa 2>/dev/null \|\| true\n\1\2|' "$tmp/init"
     fi
 
     ( cd "$tmp" && find . | cpio -o -H newc 2>/dev/null | gzip ) > "$img" \
@@ -1060,7 +1060,7 @@ slot_to_partnum() {
 }
 
 # Kernel cmdline shared by both slots (root= is appended per-slot).
-# The A/B boot-guard is /sbin/aa-guard, invoked by the (patched) Alpine initramfs
+# The A/B boot-guard is /sbin/init.aa, invoked by the (patched) Alpine initramfs
 # init right BEFORE switch_root — i.e. in the initramfs once modules are loaded,
 # busybox is ready and the disk is accessible, but before handing off to the
 # real init. (init=/sbin/aa-boot-init failed: switch_root couldn't exec it;

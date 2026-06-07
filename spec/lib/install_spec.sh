@@ -206,7 +206,7 @@ Describe 'install.sh'
 
     End
 
-    # NOTE: boot-guard (wrap_boot_initramfs / aa-guard) is WIP for next session,
+    # NOTE: boot-guard (wrap_boot_initramfs / init.aa) is WIP for next session,
     # not wired into installs yet — see MEMORY.md. No test until it's validated.
 
     Describe 'persist_host_keys()'
