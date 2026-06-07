@@ -500,10 +500,8 @@ EOF
     cp "${build_dir}"/boot/start*.elf /tmp/boot-files/ 2>/dev/null || true
     cp "${build_dir}"/boot/fixup*.dat /tmp/boot-files/ 2>/dev/null || true
     cp "${build_dir}"/boot/bootcode.bin /tmp/boot-files/ 2>/dev/null || true
-
-    # Add the A/B boot-guard to the initramfs (same image used for both slots;
-    # it reads the booted slot from root= at runtime).
-    [ -f /tmp/boot-files/initramfs ] && wrap_boot_initramfs /tmp/boot-files/initramfs
+    # NB: the A/B boot-guard is a PID 1 shim baked into the squashfs
+    # (/sbin/aa-boot-init, selected by init=); the stock initramfs is used as-is.
 
     # Create squashfs
     log_info "Creating squashfs image..."
@@ -579,105 +577,31 @@ bake_management_tools() {
         return 0
     fi
     log_info "Baking 'aa' command + alpine-anywhere tool into image..."
+    bake_boot_guard_shim "$root"
     install_ab_services "$root"
 }
 
-# Wrap an Alpine mkinitfs initramfs with an A/B boot-guard, in place.
-# Installs our guard AS /init (the kernel always runs /init; rdinit= is not
-# honoured on the RPi) and preserves the original Alpine init as /init.real.
-# The guard counts the boot attempt and, if the slot's squashfs won't mount,
-# rolls back immediately, then hands off to /init.real. Best-effort: any failure
-# falls through to `exec /init.real`, so a bug here cannot brick the boot.
-wrap_boot_initramfs() {
-    local img="$1"        # initramfs image to wrap (modified in place)
-    _aa_cli_src >/dev/null || { log_warn "CLI source not found; skipping initramfs boot-guard"; return 0; }
-
-    log_info "Wrapping initramfs with A/B boot-guard (/init.aa)..."
-    local tmp; tmp=$(mktemp -d)
-    ( cd "$tmp" && gzip -dc "$img" 2>/dev/null | cpio -idm 2>/dev/null ) || {
-        log_warn "Could not unpack initramfs; skipping boot-guard"; rm -rf "$tmp"; return 0; }
-    [ -f "$tmp/init" ] || { log_warn "initramfs has no /init; skipping"; rm -rf "$tmp"; return 0; }
-
-    install_aa_cli "$tmp" || { log_warn "could not stage aa in initramfs"; rm -rf "$tmp"; return 0; }
-
-    # The kernel always runs /init from the initramfs (rdinit=/init.aa is NOT
-    # honoured on the RPi — confirmed: the guard never ran). So our guard BECOMES
-    # /init, and the original Alpine init is preserved as /init.real.
-    mv "$tmp/init" "$tmp/init.real"
-
-    cat > "$tmp/init" << 'EOF'
+# Bake the PID 1 boot-guard shim into the image at /sbin/aa-boot-init.
+# Selected via init=/sbin/aa-boot-init on the cmdline; Alpine's initramfs honours
+# init= and exec's it AFTER switch_root, so the shim runs as PID 1 in the full
+# squashfs root (modules loaded, disk accessible, aa CLI present) — making the
+# boot-attempt count reliable. It then exec's the real init (/sbin/init). If the
+# real init cannot exec, it force-reboots so the failed attempt still counts.
+bake_boot_guard_shim() {
+    local root="$1"
+    mkdir -p "${root}/sbin"
+    cat > "${root}/sbin/aa-boot-init" << 'EOF'
 #!/bin/sh
-# A/B boot-guard (best-effort): count the attempt, roll back an unmountable
-# slot, then hand off to the real Alpine init (/init.real). Heavily logged to
-# the FAT boot partition (init-aa.log) so boots can be diagnosed after the fact.
-# ANY failure here falls through to `exec /init.real` so it cannot brick boot.
-export PATH=/usr/local/bin:/usr/bin:/sbin:/bin
-
-mount -t proc proc /proc 2>/dev/null
-mount -t sysfs sysfs /sys 2>/dev/null
-mount -t devtmpfs devtmpfs /dev 2>/dev/null
-
-cmdline=$(cat /proc/cmdline 2>/dev/null)
-root=$(echo "$cmdline" | sed -n 's/.*root=\([^ ]*\).*/\1/p')
-case "$root" in
-    *p[0-9]) bootdev="${root%p[0-9]}p1" ;;
-    *[0-9])  bootdev="$(echo "$root" | sed 's/[0-9]*$//')1" ;;
-    *)       bootdev="" ;;
-esac
-
-# Mount the boot partition for logging (best-effort)
-modprobe vfat 2>/dev/null; modprobe nls_cp437 2>/dev/null
-mkdir -p /aa-boot
-[ -n "$bootdev" ] && mount -t vfat "$bootdev" /aa-boot 2>/dev/null
-ilog() {
-    local t; t="up$(cut -d. -f1 /proc/uptime 2>/dev/null)s"
-    echo "[init.aa $t] $*" > /dev/console 2>/dev/null
-    echo "[$t] $*" >> /aa-boot/init-aa.log 2>/dev/null
-    sync 2>/dev/null || true
-}
-
-ilog "=== boot-guard /init START ==="
-ilog "cmdline: $cmdline"
-ilog "root=$root bootdev=$bootdev"
-
-# Load storage/fs modules and wait for the root block device
-for m in sd-mod usb-storage uas scsi_mod nvme mmcblk squashfs loop ext4 vfat overlay; do
-    modprobe "$m" 2>/dev/null
-done
-i=0
-while [ -n "$root" ] && [ ! -b "$root" ] && [ "$i" -lt 10 ]; do sleep 1; i=$((i+1)); done
-ilog "waited ${i}s for $root; present=$([ -b "$root" ] && echo yes || echo no)"
-
-if [ -n "$root" ] && [ -b "$root" ]; then
-    ilog "running: aa bootcount"
-    if [ -x /usr/local/bin/aa ]; then
-        /usr/local/bin/aa bootcount >>/aa-boot/init-aa.log 2>&1 || ilog "aa bootcount returned $?"
-    else
-        ilog "WARN: /usr/local/bin/aa missing in initramfs"
-    fi
-    ilog "test-mounting $root (squashfs)"
-    mkdir -p /aa-test
-    if mount -t squashfs -o ro "$root" /aa-test 2>/dev/null; then
-        ilog "test-mount OK -> slot is mountable"
-        umount /aa-test 2>/dev/null
-    else
-        ilog "test-mount FAILED -> slot unmountable -> rollback + reboot"
-        [ -x /usr/local/bin/aa ] && /usr/local/bin/aa rollback >>/aa-boot/init-aa.log 2>&1
-        sync; sleep 2; reboot -f
-    fi
-else
-    ilog "WARN: root device $root not available; skipping guard"
-fi
-
-ilog "handing off to /init.real (Alpine init)"
-umount /aa-boot 2>/dev/null
-exec /init.real
+# A/B boot-guard PID 1 shim (init=/sbin/aa-boot-init), runs in the full root.
+export PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+mount -t proc proc /proc 2>/dev/null || true
+/usr/local/bin/aa bootcount 2>/dev/null || true   # counts; rolls back+reboots if a slot keeps failing
+exec /sbin/init "$@"
+# Only reached if the real init failed to exec — count it as a failed boot.
+sleep 5
+exec /sbin/reboot -f 2>/dev/null || reboot -f
 EOF
-    chmod +x "$tmp/init"
-
-    ( cd "$tmp" && find . | cpio -o -H newc 2>/dev/null | gzip ) > "$img" \
-        || log_warn "Could not repack initramfs boot-guard"
-    rm -rf "$tmp"
+    chmod +x "${root}/sbin/aa-boot-init"
 }
 
 # OpenRC service for A/B auto-rollback:
@@ -1092,12 +1016,15 @@ slot_to_partnum() {
 }
 
 # Kernel cmdline shared by both slots (root= is appended per-slot).
-# The A/B boot-guard IS the initramfs /init (wrap_boot_initramfs installs it as
-# /init and the original Alpine init as /init.real). No rdinit= — that is not
-# honoured on the RPi, so the guard must be /init, which the kernel always runs.
+# The A/B boot-guard is a PID 1 shim (/sbin/aa-boot-init) selected via
+# init=/sbin/aa-boot-init. Alpine's initramfs HONOURS init= (it execs KOPT_init
+# after switch_root), so the shim runs in the full squashfs root — modules
+# loaded, the disk accessible, the aa CLI available — and counts the boot
+# attempt reliably, then exec's the real init. (rdinit=/init.aa was NOT honoured
+# on the RPi, and an initramfs guard proved too fragile.)
 # - panic=10: a dying init (PID 1 exit -> kernel panic) reboots after 10s so a
-#   broken-but-mountable slot also accumulates failed boots toward rollback.
-SLOT_KERNEL_OPTS="rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs panic=10 console=tty1 quiet"
+#   broken-but-mountable slot accumulates failed boots toward rollback.
+SLOT_KERNEL_OPTS="rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs init=/sbin/aa-boot-init panic=10 console=tty1 quiet"
 
 # Place a slot's kernel + initramfs on the boot partition as vmlinuz-<slot>/initramfs-<slot>
 place_slot_kernel() {

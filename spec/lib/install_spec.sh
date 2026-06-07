@@ -206,24 +206,17 @@ Describe 'install.sh'
 
     End
 
-    Describe 'wrap_boot_initramfs()'
-        setup() {
-            INSTALL_BASE_DIR="$PWD"
-            WORKD=$(mktemp -d)
-            # build a minimal fake mkinitfs initramfs (gzip cpio with an /init)
-            mkdir -p "$WORKD/src"
-            printf '#!/bin/sh\necho original-alpine-init\n' > "$WORKD/src/init"
-            ( cd "$WORKD/src" && find . | cpio -o -H newc 2>/dev/null | gzip ) > "$WORKD/initramfs"
-        }
-        cleanup() { rm -rf "$WORKD"; }
+    Describe 'bake_boot_guard_shim()'
+        setup() { ROOT=$(mktemp -d); }
+        cleanup() { rm -rf "$ROOT"; }
         Before 'setup'
         After 'cleanup'
 
-        It 'installs the guard as /init, preserves the original as /init.real, stages aa'
-            When call wrap_boot_initramfs "$WORKD/initramfs"
-            The stderr should be defined
-            The value "$(gzip -dc "$WORKD/initramfs" | cpio -t 2>/dev/null)" should include "init.real"
-            The value "$(gzip -dc "$WORKD/initramfs" | cpio -t 2>/dev/null)" should include "usr/local/bin/aa"
+        It 'installs the PID 1 boot-guard shim at /sbin/aa-boot-init'
+            When call bake_boot_guard_shim "$ROOT"
+            The path "$ROOT/sbin/aa-boot-init" should be exist
+            The contents of file "$ROOT/sbin/aa-boot-init" should include "aa bootcount"
+            The contents of file "$ROOT/sbin/aa-boot-init" should include "exec /sbin/init"
         End
     End
 
