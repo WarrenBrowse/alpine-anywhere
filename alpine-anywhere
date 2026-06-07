@@ -369,6 +369,10 @@ run_local_upgrade() {
         die "This system does not appear to have an A/B installation (no squashfs root)"
     fi
 
+    # Populate DETECTED_* (arch/platform/hostname/network) — the image build in
+    # the upgrade needs them just like a fresh install does.
+    detect_local_network
+
     # Run upgrade (mounts the boot partition itself, derived from root=)
     run_upgrade "$ALPINE_VERSION"
 }

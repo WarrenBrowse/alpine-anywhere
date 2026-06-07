@@ -133,21 +133,34 @@ run_on_remote() {
 
     log_step "Executing on remote server..."
 
-    # Stage control-host customization inputs onto the remote (the build runs
-    # there after the pivot), then point the remote CLI at the remote copies.
+    # Where the alpine-anywhere CLI lives on the remote, and where to stage files.
+    # Fresh install/live: scripts were deployed to INSTALL_BASE_DIR. Upgrade/slot
+    # ops on an already-installed system: no deploy, use the baked CLI on PATH and
+    # stage into /tmp.
+    local remote_aa stage_dir
+    if [ -n "$INSTALL_BASE_DIR" ]; then
+        remote_aa="${INSTALL_BASE_DIR}/alpine-anywhere"
+        stage_dir="$INSTALL_BASE_DIR"
+    else
+        remote_aa="alpine-anywhere"   # baked at /usr/local/sbin (on PATH)
+        stage_dir="/tmp"
+    fi
+
+    # Stage control-host customization inputs onto the remote, then point the
+    # remote CLI at the remote copies.
     local remote_custom_script="" remote_host_key_dir=""
     if [ -n "$CUSTOM_SCRIPT" ]; then
-        scp_to_remote "$CUSTOM_SCRIPT" "${INSTALL_BASE_DIR}/custom-script.sh"
-        remote_custom_script="${INSTALL_BASE_DIR}/custom-script.sh"
+        scp_to_remote "$CUSTOM_SCRIPT" "${stage_dir}/aa-custom-script.sh"
+        remote_custom_script="${stage_dir}/aa-custom-script.sh"
     fi
     if [ -n "$SSH_HOST_KEY_DIR" ]; then
-        ssh_exec "mkdir -p '${INSTALL_BASE_DIR}/host-keys'"
-        scp_dir_to_remote "$SSH_HOST_KEY_DIR" "${INSTALL_BASE_DIR}/host-keys"
-        remote_host_key_dir="${INSTALL_BASE_DIR}/host-keys"
+        ssh_exec "mkdir -p '${stage_dir}/aa-host-keys'"
+        scp_dir_to_remote "$SSH_HOST_KEY_DIR" "${stage_dir}/aa-host-keys"
+        remote_host_key_dir="${stage_dir}/aa-host-keys"
     fi
 
     # Build the command line to pass to remote
-    local remote_cmd="${INSTALL_BASE_DIR}/alpine-anywhere --local"
+    local remote_cmd="${remote_aa} --local"
 
     # Pass through relevant options
     [ "$VERBOSE" = "true" ] && remote_cmd="$remote_cmd -v"
