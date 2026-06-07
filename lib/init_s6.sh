@@ -178,11 +178,18 @@ EOF
     # --- build the basedir + install as PID 1 ------------------------------
     log_info "Building s6-linux-init basedir..."
     rm -rf "${root}/etc/s6-linux-init/current"
+    # CRITICAL: -c is the STATIC basedir where stage 1 reads its read-only data
+    # (notably run-image), i.e. the maker's OUTPUT dir = /etc/s6-linux-init/current.
+    # It is NOT the runtime live dir. Passing -c /run/s6-linux-init made bin/init
+    # do `s6-linux-init -c /run/s6-linux-init`, so at boot it looked for the
+    # run-image at /run/s6-linux-init/run-image — which does not exist yet (that's
+    # the tmpfs being created) -> fatal "unable to copy run-image to /run: No such
+    # file or directory" -> PID 1 dies (the s6 brick). The runtime live dir is
+    # /run/s6-linux-init by default and is created by s6-linux-init itself.
     # NOTE: no -d /dev — the Alpine initramfs already mounted devtmpfs on /dev;
-    # having s6-linux-init mount a second devtmpfs over it can kill stage 1
-    # (PID 1) before rc.init runs (observed: empty /s6-boot.log, unreachable).
+    # having s6-linux-init mount a second devtmpfs over it can kill stage 1.
     chroot "$root" /bin/sh -c \
-        's6-linux-init-maker -c /run/s6-linux-init -p "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" -m 0022 -1 -f /etc/s6-linux-init/skel /etc/s6-linux-init/current' \
+        's6-linux-init-maker -c /etc/s6-linux-init/current -p "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" -m 0022 -1 -f /etc/s6-linux-init/skel /etc/s6-linux-init/current' \
         || die "s6-linux-init-maker failed"
 
     ln -sf /etc/s6-linux-init/current/bin/init "${root}/sbin/init"
