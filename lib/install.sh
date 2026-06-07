@@ -542,6 +542,10 @@ bake_management_tools() {
 exec /usr/local/lib/alpine-anywhere/alpine-anywhere "$@"
 EOF
     chmod +x "${root}/usr/local/sbin/alpine-anywhere"
+    # Also expose on /usr/sbin: dropbear's non-interactive PATH does not include
+    # /usr/local/sbin, so `alpine-anywhere ...` would be "not found" otherwise.
+    mkdir -p "${root}/usr/sbin"
+    ln -sf /usr/local/sbin/alpine-anywhere "${root}/usr/sbin/alpine-anywhere"
 
     install_ab_services "$root"
 }
