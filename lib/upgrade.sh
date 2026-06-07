@@ -22,6 +22,19 @@
 BOOT_MNT="/mnt/aa-boot"
 MAX_BOOT_ATTEMPTS=3
 
+# Append a timestamped line to the persistent A/B log on the boot partition
+# (requires BOOT_MNT mounted). Also echoes to stderr. This is the breadcrumb
+# trail for debugging boots/upgrades/rollbacks after the fact.
+aa_log() {
+    local ts
+    ts=$(date '+%Y-%m-%dT%H:%M:%S' 2>/dev/null) || ts="up$(cut -d. -f1 /proc/uptime 2>/dev/null)s"
+    echo "aa[$ts] $*" >&2
+    if [ -d "$BOOT_MNT" ]; then
+        echo "[$ts] $*" >> "${BOOT_MNT}/aa.log" 2>/dev/null
+        sync 2>/dev/null || true
+    fi
+}
+
 # =============================================================================
 # Disk / boot partition discovery
 # =============================================================================
@@ -184,6 +197,7 @@ switch_slot() {
     fi
     echo "$new_slot" > "${BOOT_MNT}/current_slot"
     sync
+    aa_log "switch: boot slot set to $new_slot (root=${slot_dev})"
     log_info "Boot slot switched to $new_slot (reboot to activate)"
 }
 
@@ -205,12 +219,13 @@ verify_current_slot() {
     current=$(get_current_slot)
     set_slot_meta "$current" "VERIFIED" "true"
     set_slot_meta "$current" "BOOT_COUNT" "0"
+    aa_log "verify: slot $current marked VERIFIED, boot_count reset"
     umount_boot
     log_info "Slot $current marked verified"
 }
 
 # Increment the boot counter for the running slot; roll back if it keeps
-# failing without being verified. Intended to run from an early boot service.
+# failing without being verified. Intended to run from the early boot guard.
 increment_boot_counter() {
     mount_boot
     local current count verified
@@ -219,12 +234,15 @@ increment_boot_counter() {
     count=$((${count:-0} + 1))
     set_slot_meta "$current" "BOOT_COUNT" "$count"
     verified=$(get_slot_meta "$current" "VERIFIED")
+    aa_log "bootcount: slot=$current root=$(get_root_device) count=$count verified=$verified max=$MAX_BOOT_ATTEMPTS"
 
     if [ "$count" -gt "$MAX_BOOT_ATTEMPTS" ] && [ "$verified" != "true" ]; then
+        aa_log "bootcount: slot $current exceeded ($count>$MAX_BOOT_ATTEMPTS) unverified -> ROLLBACK"
         log_warn "Slot $current failed $count boots without verify; rolling back"
         rollback_slot
         return
     fi
+    aa_log "bootcount: slot $current ok to proceed (count=$count)"
     umount_boot
 }
 
@@ -237,11 +255,13 @@ rollback_slot() {
 
     prev_ver=$(get_slot_meta "$previous" "VERSION")
     if [ -z "$prev_ver" ]; then
+        aa_log "rollback: ABORTED — slot $previous has no installed image"
         umount_boot
         log_error "Cannot roll back: slot $previous has no installed image"
         return 1
     fi
 
+    aa_log "rollback: $current -> $previous"
     log_warn "Rolling back: $current -> $previous"
     switch_slot "$previous"
     umount_boot
@@ -304,18 +324,27 @@ run_upgrade() {
 
 show_status() {
     mount_boot
-    local current
-    current=$(get_current_slot)
+    local running boot_slot boot_root
+    running=$(get_current_slot)                                    # slot we're executing
+    boot_slot=$(cat "${BOOT_MNT}/current_slot" 2>/dev/null || echo "?")   # slot configured for next boot
+    boot_root=$(sed -n 's/.*\(root=[^ ]*\).*/\1/p' "${BOOT_MNT}/cmdline.txt" 2>/dev/null)
 
     echo "Alpine Anywhere A/B Status"
     echo "=========================="
     echo ""
-    echo "Disk:         $(get_boot_disk)"
-    echo "Active slot:  $current"
+    echo "Disk:          $(get_boot_disk)"
+    echo "Running slot:  $running   (booted from $(get_root_device))"
+    echo "Boot slot:     $boot_slot   (next boot -> ${boot_root:-unknown})"
+    if [ "$running" != "$boot_slot" ]; then
+        echo "  NOTE: boot slot differs from running slot — reboot will switch to $boot_slot"
+    fi
     echo ""
 
     for slot in A B; do
-        echo "Slot $slot:"
+        local mark=""
+        [ "$slot" = "$running" ] && mark="${mark} [running]"
+        [ "$slot" = "$boot_slot" ] && mark="${mark} [boot]"
+        echo "Slot ${slot}${mark}:"
         local ver
         ver=$(get_slot_meta "$slot" "VERSION")
         if [ -n "$ver" ]; then

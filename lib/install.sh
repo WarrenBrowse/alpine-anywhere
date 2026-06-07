@@ -602,27 +602,70 @@ wrap_boot_initramfs() {
 
     cat > "$tmp/init.aa" << 'EOF'
 #!/bin/sh
-# A/B boot-guard (best-effort) -> hand off to the original Alpine init at /init.
+# A/B boot-guard (best-effort): count the attempt, roll back an unmountable
+# slot, then hand off to the original Alpine init at /init. Heavily logged to
+# the FAT boot partition (init-aa.log) so boots can be diagnosed after the fact.
+# ANY failure here falls through to `exec /init` so the guard cannot brick boot.
 export PATH=/usr/local/bin:/usr/bin:/sbin:/bin
+
 mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sysfs /sys 2>/dev/null
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
+
+cmdline=$(cat /proc/cmdline 2>/dev/null)
+root=$(echo "$cmdline" | sed -n 's/.*root=\([^ ]*\).*/\1/p')
+case "$root" in
+    *p[0-9]) bootdev="${root%p[0-9]}p1" ;;
+    *[0-9])  bootdev="$(echo "$root" | sed 's/[0-9]*$//')1" ;;
+    *)       bootdev="" ;;
+esac
+
+# Mount the boot partition for logging (best-effort)
+modprobe vfat 2>/dev/null; modprobe nls_cp437 2>/dev/null
+mkdir -p /aa-boot
+[ -n "$bootdev" ] && mount -t vfat "$bootdev" /aa-boot 2>/dev/null
+ilog() {
+    local t; t="up$(cut -d. -f1 /proc/uptime 2>/dev/null)s"
+    echo "[init.aa $t] $*" > /dev/console 2>/dev/null
+    echo "[$t] $*" >> /aa-boot/init-aa.log 2>/dev/null
+    sync 2>/dev/null || true
+}
+
+ilog "=== /init.aa START (rdinit honoured) ==="
+ilog "cmdline: $cmdline"
+ilog "root=$root bootdev=$bootdev"
+
+# Load storage/fs modules and wait for the root block device
 for m in sd-mod usb-storage uas scsi_mod nvme mmcblk squashfs loop ext4 vfat overlay; do
     modprobe "$m" 2>/dev/null
 done
-root=$(sed -n 's/.*root=\([^ ]*\).*/\1/p' /proc/cmdline)
-i=0; while [ -n "$root" ] && [ ! -b "$root" ] && [ "$i" -lt 10 ]; do sleep 1; i=$((i+1)); done
+i=0
+while [ -n "$root" ] && [ ! -b "$root" ] && [ "$i" -lt 10 ]; do sleep 1; i=$((i+1)); done
+ilog "waited ${i}s for $root; present=$([ -b "$root" ] && echo yes || echo no)"
+
 if [ -n "$root" ] && [ -b "$root" ]; then
-    /usr/local/bin/aa bootcount 2>/dev/null || true   # rolls back after too many unverified boots
+    ilog "running: aa bootcount"
+    if [ -x /usr/local/bin/aa ]; then
+        /usr/local/bin/aa bootcount >>/aa-boot/init-aa.log 2>&1 || ilog "aa bootcount returned $?"
+    else
+        ilog "WARN: /usr/local/bin/aa missing in initramfs"
+    fi
+    ilog "test-mounting $root (squashfs)"
     mkdir -p /aa-test
     if mount -t squashfs -o ro "$root" /aa-test 2>/dev/null; then
+        ilog "test-mount OK -> slot is mountable"
         umount /aa-test 2>/dev/null
     else
-        echo "[boot-guard] $root squashfs unmountable -> rolling back" > /dev/console 2>&1
-        /usr/local/bin/aa rollback 2>/dev/null
-        sleep 3; reboot -f
+        ilog "test-mount FAILED -> slot unmountable -> rollback + reboot"
+        [ -x /usr/local/bin/aa ] && /usr/local/bin/aa rollback >>/aa-boot/init-aa.log 2>&1
+        sync; sleep 2; reboot -f
     fi
+else
+    ilog "WARN: root device $root not available; skipping guard"
 fi
+
+ilog "handing off to /init (Alpine init)"
+umount /aa-boot 2>/dev/null
 exec /init
 EOF
     chmod +x "$tmp/init.aa"
