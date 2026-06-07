@@ -118,6 +118,36 @@ Describe 'install.sh'
         End
     End
 
+    Describe 'detect_root_disk() multi-disk safety'
+        Context 'tmpfs root with two disks (SD + USB)'
+            setup() {
+                stat() { echo tmpfs; }
+                lsblk() { printf '/dev/mmcblk0 disk\n/dev/sda disk\n'; }
+                list_available_disks() { printf '/dev/mmcblk0 16G\n/dev/sda 931G\n'; }
+            }
+            Before 'setup'
+
+            It 'refuses to guess and asks for --disk'
+                When run detect_root_disk
+                The status should be failure
+                The stderr should include "Refusing to guess"
+            End
+        End
+
+        Context 'tmpfs root with a single disk'
+            setup() {
+                stat() { echo tmpfs; }
+                lsblk() { printf '/dev/sda disk\n'; }
+            }
+            Before 'setup'
+
+            It 'uses the only disk'
+                When call detect_root_disk
+                The output should equal "/dev/sda"
+            End
+        End
+    End
+
     Describe 'install_ab_services()'
         setup() { ROOT=$(mktemp -d); }
         cleanup() { rm -rf "$ROOT"; }

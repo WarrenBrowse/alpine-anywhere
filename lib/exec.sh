@@ -133,6 +133,19 @@ run_on_remote() {
 
     log_step "Executing on remote server..."
 
+    # Stage control-host customization inputs onto the remote (the build runs
+    # there after the pivot), then point the remote CLI at the remote copies.
+    local remote_custom_script="" remote_host_key_dir=""
+    if [ -n "$CUSTOM_SCRIPT" ]; then
+        scp_to_remote "$CUSTOM_SCRIPT" "${INSTALL_BASE_DIR}/custom-script.sh"
+        remote_custom_script="${INSTALL_BASE_DIR}/custom-script.sh"
+    fi
+    if [ -n "$SSH_HOST_KEY_DIR" ]; then
+        ssh_exec "mkdir -p '${INSTALL_BASE_DIR}/host-keys'"
+        scp_dir_to_remote "$SSH_HOST_KEY_DIR" "${INSTALL_BASE_DIR}/host-keys"
+        remote_host_key_dir="${INSTALL_BASE_DIR}/host-keys"
+    fi
+
     # Build the command line to pass to remote
     local remote_cmd="${INSTALL_BASE_DIR}/alpine-anywhere --local"
 
@@ -147,6 +160,9 @@ run_on_remote() {
     [ -n "$EXTRA_PACKAGES" ] && remote_cmd="$remote_cmd --extra-packages='$EXTRA_PACKAGES'"
     [ "$HARDENED_MODE" = "true" ] && remote_cmd="$remote_cmd --hardened"
     [ -n "$OVERLAY_DEVICE" ] && remote_cmd="$remote_cmd --overlay='$OVERLAY_DEVICE'"
+    [ -n "$TARGET_DISK" ] && remote_cmd="$remote_cmd --disk='$TARGET_DISK'"
+    [ -n "$remote_custom_script" ] && remote_cmd="$remote_cmd --custom-script='$remote_custom_script'"
+    [ -n "$remote_host_key_dir" ] && remote_cmd="$remote_cmd --ssh-host-keys='$remote_host_key_dir'"
     [ "$KEEP_EXISTING" = "true" ] && remote_cmd="$remote_cmd --keep"
     [ -n "$extra_args" ] && remote_cmd="$remote_cmd $extra_args"
 

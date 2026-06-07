@@ -259,6 +259,7 @@ run_local_ab_install() {
         [ -n "$EXTRA_PACKAGES" ] && sudo_args="$sudo_args --extra-packages=$EXTRA_PACKAGES"
         [ -n "$CUSTOM_SCRIPT" ] && sudo_args="$sudo_args --custom-script=$CUSTOM_SCRIPT"
         [ -n "$SSH_HOST_KEY_DIR" ] && sudo_args="$sudo_args --ssh-host-keys=$SSH_HOST_KEY_DIR"
+        [ -n "$TARGET_DISK" ] && sudo_args="$sudo_args --disk=$TARGET_DISK"
         exec sudo -E sh "$0" $sudo_args
     fi
 

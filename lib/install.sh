@@ -33,12 +33,22 @@ detect_root_disk() {
     root_type=$(stat -f -c %T / 2>/dev/null || df -T / 2>/dev/null | awk 'NR==2{print $2}')
 
     if echo "$root_type" | grep -qi tmpfs; then
-        # Running from RAM - find first physical disk
-        disk=$(lsblk -dnpo NAME,TYPE 2>/dev/null | awk '$2=="disk"{print $1; exit}')
-        if [ -z "$disk" ]; then
+        # Running from RAM - pick the target physical disk.
+        # DANGER: with both an SD card (mmcblk0) and a USB/NVMe disk present,
+        # guessing "the first disk" could wipe the boot medium. So refuse to
+        # guess when there is more than one disk — require --disk.
+        local disks ndisks
+        disks=$(lsblk -dnpo NAME,TYPE 2>/dev/null | awk '$2=="disk"{print $1}')
+        ndisks=$(printf '%s\n' "$disks" | grep -c .)
+        if [ "$ndisks" -eq 0 ]; then
             die "No physical disk found"
+        elif [ "$ndisks" -gt 1 ]; then
+            log_error "Multiple disks present:"
+            list_available_disks >&2
+            die "Refusing to guess the install disk. Re-run with --disk <device> (e.g. --disk /dev/sda)"
         fi
-        log_debug "Running from tmpfs, using first disk: $disk"
+        disk="$disks"
+        log_debug "Running from tmpfs, single disk: $disk"
     else
         # Running from disk - detect root device
         disk=$(findmnt -n -o SOURCE / 2>/dev/null | sed 's/[0-9]*$//' | sed 's/p$//')
@@ -758,9 +768,17 @@ run_ab_install() {
 
     log_step "Starting A/B installation..."
 
+    # Explicit --disk wins; otherwise auto-detect (which refuses to guess when
+    # more than one disk is present, to avoid wiping the SD/boot medium).
     local disk
-    disk=$(detect_root_disk)
-    log_info "Target disk: $disk ($(get_disk_size_mb "$disk")MB)"
+    if [ -n "$TARGET_DISK" ]; then
+        disk="$TARGET_DISK"
+        [ -b "$disk" ] || die "--disk $disk is not a block device"
+        log_info "Target disk (explicit --disk): $disk ($(get_disk_size_mb "$disk")MB)"
+    else
+        disk=$(detect_root_disk)
+        log_info "Target disk (auto-detected): $disk ($(get_disk_size_mb "$disk")MB)"
+    fi
 
     # Confirm
     if [ "$FORCE" != "true" ]; then

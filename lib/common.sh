@@ -29,6 +29,7 @@ UPGRADE_MODE="${UPGRADE_MODE:-false}"     # Upgrade mode (A/B switch)
 SLOT_ACTION="${SLOT_ACTION:-}"            # Slot subcommand: status|verify|rollback|bootcount
 KEEP_EXISTING="${KEEP_EXISTING:-false}"   # Keep existing system (dual-boot)
 OVERLAY_DEVICE="${OVERLAY_DEVICE:-}"      # Device for persistent overlay
+TARGET_DISK="${TARGET_DISK:-}"            # Explicit install disk (e.g. /dev/sda); empty = auto-detect
 BOOT_SLOT="${BOOT_SLOT:-A}"               # Current boot slot (A/B)
 HARDENED_MODE="${HARDENED_MODE:-false}"   # Security hardened mode
 
@@ -277,6 +278,9 @@ Options:
 
 Install options:
   --keep                         Keep existing system (dual-boot)
+  --disk DEVICE                  Target install disk (e.g. /dev/sda). REQUIRED when more
+                                   than one disk is present (e.g. SD + USB) - the installer
+                                   refuses to guess and risk wiping the boot medium.
   --overlay DEVICE               Device/partition for persistent data overlay
 
 Image customization:
@@ -428,6 +432,14 @@ parse_arguments() {
                 ;;
             --overlay=*)
                 OVERLAY_DEVICE="${1#*=}"
+                shift
+                ;;
+            --disk)
+                TARGET_DISK="$2"
+                shift 2
+                ;;
+            --disk=*)
+                TARGET_DISK="${1#*=}"
                 shift
                 ;;
             upgrade)
