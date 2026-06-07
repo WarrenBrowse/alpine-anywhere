@@ -423,12 +423,14 @@ EOF
         ssh_pkg="dropbear dropbear-openrc"
     fi
 
+    # squashfs-tools is needed on the installed system so `alpine-anywhere
+    # upgrade` can build the next slot's image in place.
     chroot "$build_dir" /sbin/apk add --no-cache \
         alpine-base openrc busybox-openrc \
         "$kernel_pkg" linux-firmware-none \
         mkinitfs \
         $ssh_pkg \
-        e2fsprogs dosfstools \
+        e2fsprogs dosfstools squashfs-tools \
         chrony ca-certificates curl
 
     # RPi: install firmware package
