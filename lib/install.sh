@@ -501,6 +501,10 @@ EOF
     cp "${build_dir}"/boot/fixup*.dat /tmp/boot-files/ 2>/dev/null || true
     cp "${build_dir}"/boot/bootcode.bin /tmp/boot-files/ 2>/dev/null || true
 
+    # Add the A/B boot-guard to the initramfs (same image used for both slots;
+    # it reads the booted slot from root= at runtime).
+    [ -f /tmp/boot-files/initramfs ] && wrap_boot_initramfs /tmp/boot-files/initramfs
+
     # Create squashfs
     log_info "Creating squashfs image..."
     # NOTE: gzip (not zstd) — the Alpine linux-rpi4 kernel builds squashfs
@@ -572,25 +576,75 @@ EOF
     mkdir -p "${root}/usr/sbin"
     ln -sf /usr/local/sbin/alpine-anywhere "${root}/usr/sbin/alpine-anywhere"
 
-    # PID 1 boot-guard shim (set as init= on the kernel cmdline). Runs before
-    # the real init: counts this boot attempt (rolling back to the other slot
-    # if a slot fails to verify too many times), then hands off to the real
-    # init. If the real init can't even exec, force a reboot so the failed
-    # attempt still counts toward rollback (rather than hanging).
-    mkdir -p "${root}/sbin"
-    cat > "${root}/sbin/aa-boot-init" << 'EOF'
-#!/bin/sh
-export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-mount -t proc proc /proc 2>/dev/null || true
-/usr/local/sbin/alpine-anywhere bootcount || true
-exec /sbin/init "$@"
-# Reached only if the real init failed to exec — count this as a failed boot.
-sleep 5
-exec /sbin/reboot -f 2>/dev/null || reboot -f
-EOF
-    chmod +x "${root}/sbin/aa-boot-init"
-
     install_ab_services "$root"
+}
+
+# Wrap an Alpine mkinitfs initramfs with an A/B boot-guard, in place.
+# The guard runs BEFORE the real init: it counts the boot attempt (rolling back
+# after too many unverified tries) and, crucially, rolls back immediately if the
+# slot's squashfs won't mount at all — then hands off to the original Alpine init
+# for the real root setup. Best-effort: any guard failure falls through to a
+# normal boot (exec /init.alpine), so a bug here cannot brick the boot.
+wrap_boot_initramfs() {
+    local img="$1"        # initramfs image to wrap (modified in place)
+    local src_cli src_lib
+    if [ -f "${INSTALL_BASE_DIR}/alpine-anywhere" ]; then
+        src_cli="${INSTALL_BASE_DIR}/alpine-anywhere"; src_lib="${INSTALL_BASE_DIR}/lib"
+    elif [ -f "${SCRIPT_DIR}/alpine-anywhere" ]; then
+        src_cli="${SCRIPT_DIR}/alpine-anywhere"; src_lib="${SCRIPT_DIR}/lib"
+    else
+        log_warn "CLI source not found; skipping initramfs boot-guard"
+        return 0
+    fi
+
+    log_info "Wrapping initramfs with A/B boot-guard..."
+    local tmp; tmp=$(mktemp -d)
+    ( cd "$tmp" && gzip -dc "$img" 2>/dev/null | cpio -idm 2>/dev/null ) || {
+        log_warn "Could not unpack initramfs; skipping boot-guard"; rm -rf "$tmp"; return 0; }
+    [ -f "$tmp/init" ] || { log_warn "initramfs has no /init; skipping"; rm -rf "$tmp"; return 0; }
+
+    mv "$tmp/init" "$tmp/init.alpine"
+    mkdir -p "$tmp/usr/local/lib/alpine-anywhere/lib" "$tmp/usr/local/sbin"
+    cp "$src_cli" "$tmp/usr/local/lib/alpine-anywhere/alpine-anywhere"
+    cp "$src_lib"/*.sh "$tmp/usr/local/lib/alpine-anywhere/lib/"
+    cat > "$tmp/usr/local/sbin/alpine-anywhere" << 'EOF'
+#!/bin/sh
+exec /usr/local/lib/alpine-anywhere/alpine-anywhere "$@"
+EOF
+    chmod +x "$tmp/usr/local/sbin/alpine-anywhere" "$tmp/usr/local/lib/alpine-anywhere/alpine-anywhere"
+
+    cat > "$tmp/init" << 'EOF'
+#!/bin/sh
+# A/B boot-guard (best-effort) -> hand off to the real Alpine init.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+for m in sd-mod usb-storage uas scsi_mod nvme mmcblk squashfs loop ext4 vfat overlay; do
+    modprobe "$m" 2>/dev/null
+done
+root=$(sed -n 's/.*root=\([^ ]*\).*/\1/p' /proc/cmdline)
+i=0; while [ -n "$root" ] && [ ! -b "$root" ] && [ "$i" -lt 10 ]; do sleep 1; i=$((i+1)); done
+if [ -n "$root" ] && [ -b "$root" ]; then
+    # count this attempt (rolls back after too many unverified boots)
+    /usr/local/sbin/alpine-anywhere bootcount 2>/dev/null || true
+    # unmountable-slot guard: a slot whose squashfs won't mount is bad now
+    mkdir -p /aa-test
+    if mount -t squashfs -o ro "$root" /aa-test 2>/dev/null; then
+        umount /aa-test 2>/dev/null
+    else
+        echo "[boot-guard] $root squashfs unmountable -> rolling back" > /dev/console 2>&1
+        /usr/local/sbin/alpine-anywhere rollback 2>/dev/null
+        sleep 3; reboot -f
+    fi
+fi
+exec /init.alpine
+EOF
+    chmod +x "$tmp/init"
+
+    ( cd "$tmp" && find . | cpio -o -H newc 2>/dev/null | gzip ) > "$img" \
+        || log_warn "Could not repack initramfs boot-guard"
+    rm -rf "$tmp"
 }
 
 # OpenRC service for A/B auto-rollback:
@@ -969,12 +1023,12 @@ slot_to_partnum() {
 }
 
 # Kernel cmdline shared by both slots (root= is appended per-slot).
-# - init=/sbin/aa-boot-init: PID 1 boot-guard shim that counts boot attempts
-#   BEFORE the real init runs, and rolls back to the other slot after too many
-#   unverified attempts (catches a slot whose init is broken, e.g. s6).
-# - panic=10: a dying init (PID 1 exit -> kernel panic) reboots after 10s so
-#   the attempt counts toward rollback instead of hanging forever.
-SLOT_KERNEL_OPTS="rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs init=/sbin/aa-boot-init panic=10 console=tty1 quiet"
+# The A/B boot-guard lives in the initramfs (wrap_boot_initramfs): it counts
+# boot attempts and rolls back BEFORE mounting the root, and rolls back
+# immediately if the slot's squashfs won't even mount.
+# - panic=10: a dying init (PID 1 exit -> kernel panic) reboots after 10s so a
+#   broken-but-mountable slot also accumulates failed boots toward rollback.
+SLOT_KERNEL_OPTS="rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs panic=10 console=tty1 quiet"
 
 # Place a slot's kernel + initramfs on the boot partition as vmlinuz-<slot>/initramfs-<slot>
 place_slot_kernel() {

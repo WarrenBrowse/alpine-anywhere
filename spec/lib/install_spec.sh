@@ -203,12 +203,26 @@ Describe 'install.sh'
             The stderr should be defined
         End
 
-        It 'bakes the PID 1 boot-guard shim'
-            When call bake_management_tools "$ROOT"
-            The path "$ROOT/sbin/aa-boot-init" should be exist
-            The contents of file "$ROOT/sbin/aa-boot-init" should include "bootcount"
-            The contents of file "$ROOT/sbin/aa-boot-init" should include "exec /sbin/init"
+    End
+
+    Describe 'wrap_boot_initramfs()'
+        setup() {
+            INSTALL_BASE_DIR="$PWD"
+            WORKD=$(mktemp -d)
+            # build a minimal fake mkinitfs initramfs (gzip cpio with an /init)
+            mkdir -p "$WORKD/src"
+            printf '#!/bin/sh\necho original-alpine-init\n' > "$WORKD/src/init"
+            ( cd "$WORKD/src" && find . | cpio -o -H newc 2>/dev/null | gzip ) > "$WORKD/initramfs"
+        }
+        cleanup() { rm -rf "$WORKD"; }
+        Before 'setup'
+        After 'cleanup'
+
+        It 'injects the boot-guard and preserves the original init as init.alpine'
+            When call wrap_boot_initramfs "$WORKD/initramfs"
             The stderr should be defined
+            The value "$(gzip -dc "$WORKD/initramfs" | cpio -t 2>/dev/null)" should include "init.alpine"
+            The value "$(gzip -dc "$WORKD/initramfs" | cpio -t 2>/dev/null)" should include "alpine-anywhere"
         End
     End
 
