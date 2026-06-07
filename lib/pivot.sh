@@ -33,17 +33,28 @@ detect_init_system() {
     local init_comm
     init_comm=$(cat /proc/1/comm 2>/dev/null)
 
+    # The real PID 1 binary disambiguates busybox init from sysvinit (both have
+    # comm="init"); they need completely different re-exec mechanisms.
+    local init_exe
+    init_exe=$(readlink -f /proc/1/exe 2>/dev/null)
+
     case "$init_comm" in
         systemd)
             echo "systemd"
             ;;
         init)
-            # Could be sysvinit or busybox init
-            if [ -f /etc/inittab ]; then
-                echo "sysvinit"
-            else
-                echo "unknown"
-            fi
+            case "$init_exe" in
+                */busybox)
+                    echo "busybox"
+                    ;;
+                *)
+                    if [ -f /etc/inittab ]; then
+                        echo "sysvinit"
+                    else
+                        echo "unknown"
+                    fi
+                    ;;
+            esac
             ;;
         runit)
             echo "runit"
@@ -409,6 +420,108 @@ done
 FAKEINIT
 
     run_privileged chmod +x "${PIVOT_DIR}/sbin/fakeinit"
+
+    # === TAKEOVER-INIT (busybox/OpenRC source) ===
+    # busybox init re-execs this (as PID 1) via an inittab `restart` action on
+    # SIGQUIT. It runs FIRST on the OLD root, whose userland is a minimal Alpine
+    # with no bash — so this MUST be POSIX sh (/bin/sh = busybox), unlike the
+    # bash fakeinit used for systemd sources.
+    run_privileged tee "${PIVOT_DIR}/sbin/takeover-init" > /dev/null << 'TAKEOVERINIT'
+#!/bin/sh
+# takeover-init - PID 1 after busybox init re-execs (Alpine/busybox source)
+PIVOT_DIR="/mnt/alpine"
+OLD_ROOT="/mnt/oldroot"
+
+exec > /dev/console 2>&1
+echo "[takeover-init] === PID 1 takeover (busybox) === pid=$$"
+
+# Release old-root file descriptors
+for fd in /proc/self/fd/*; do
+    n=${fd##*/}
+    [ "$n" -gt 2 ] 2>/dev/null && eval "exec ${n}>&-" 2>/dev/null || true
+done
+
+mount --make-rprivate / 2>/dev/null || true
+
+echo "[takeover-init] pivot_root into ${PIVOT_DIR}..."
+cd "$PIVOT_DIR" || { echo "[takeover-init] cd failed"; exec /bin/sh; }
+mkdir -p ".${OLD_ROOT}"
+if ! pivot_root . ".${OLD_ROOT}"; then
+    echo "[takeover-init] ERROR: pivot_root failed"
+    exec /bin/sh
+fi
+echo "[takeover-init] pivot_root OK"
+
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+mount -t proc proc /proc 2>/dev/null || true
+
+# Kill every process still on the old root (frees the install disk)
+echo "[takeover-init] killing old-root processes..."
+for sig in TERM KILL; do
+    for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$' | sort -n); do
+        [ "$pid" = "1" ] && continue
+        [ "$pid" = "$$" ] && continue
+        kill -"$sig" "$pid" 2>/dev/null || true
+    done
+    [ "$sig" = "TERM" ] && sleep 3
+done
+sleep 2
+
+echo "[takeover-init] unmounting old root (frees the disk)..."
+for mnt in $(awk '{print $2}' /proc/mounts | grep "^${OLD_ROOT}" | sort -r); do
+    umount -l "$mnt" 2>/dev/null || true
+done
+umount -l "${OLD_ROOT}" 2>/dev/null || true
+
+mount -t sysfs sysfs /sys 2>/dev/null || true
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+mkdir -p /dev/pts && mount -t devpts devpts /dev/pts 2>/dev/null || true
+mkdir -p /run
+
+[ -f /etc/alpine-anywhere/config.env ] && . /etc/alpine-anywhere/config.env
+
+echo "[takeover-init] networking..."
+/sbin/ifconfig lo 127.0.0.1 up 2>/dev/null || true
+if [ -n "$NETWORK_INTERFACE" ]; then
+    if [ "$NETWORK_DHCP" = "true" ]; then
+        /sbin/udhcpc -i "$NETWORK_INTERFACE" -b -q 2>/dev/null &
+        sleep 3
+    else
+        /sbin/ifconfig "$NETWORK_INTERFACE" "$NETWORK_IP" netmask "$NETWORK_NETMASK" up 2>/dev/null || true
+        /sbin/route add default gw "$NETWORK_GATEWAY" 2>/dev/null || true
+    fi
+fi
+
+echo "[takeover-init] sshd..."
+if [ "$HARDENED_MODE" = "true" ]; then
+    /usr/sbin/dropbear -R -p 22 -E 2>/dev/null &
+else
+    mkdir -p /run/sshd
+    /usr/sbin/sshd 2>/dev/null || true
+fi
+
+if [ -f /root/.local/share/alpine-anywhere/alpine-anywhere ]; then
+    echo "[takeover-init] starting A/B install (--install-continue)..."
+    INSTALL_CMD="sh /root/.local/share/alpine-anywhere/alpine-anywhere --local --install-continue"
+    [ "$VERBOSE" = "true" ] && INSTALL_CMD="$INSTALL_CMD -v"
+    [ "$FORCE" = "true" ] && INSTALL_CMD="$INSTALL_CMD -f"
+    [ -n "$ALPINE_VERSION" ] && INSTALL_CMD="$INSTALL_CMD -V $ALPINE_VERSION"
+    [ -n "$ALPINE_MIRROR" ] && INSTALL_CMD="$INSTALL_CMD -m $ALPINE_MIRROR"
+    # --disk / --custom-script / --ssh-host-keys come from config.env (sourced
+    # by --install-continue), so they don't need to be on the command line.
+    echo "[takeover-init] $INSTALL_CMD"
+    $INSTALL_CMD > /var/log/alpine-install.log 2>&1 &
+    echo "[takeover-init] monitor: tail -f /var/log/alpine-install.log"
+fi
+
+echo "[takeover-init] entering PID 1 reaper loop"
+while :; do
+    wait 2>/dev/null
+    sleep 1
+done
+TAKEOVERINIT
+
+    run_privileged chmod +x "${PIVOT_DIR}/sbin/takeover-init"
 }
 
 # =============================================================================
@@ -452,6 +565,33 @@ pivot_sysvinit() {
     # Tell init to re-exec
     log_warn "Triggering init re-exec..."
     run_privileged telinit u
+}
+
+# Strategy for busybox init (Alpine / OpenRC source)
+# busybox init has no `telinit u`; instead it re-execs the program from an
+# inittab `restart` action when it receives SIGQUIT. We point that action at our
+# POSIX-sh takeover-init in the tmpfs, reload inittab, then signal.
+pivot_busybox() {
+    log_info "Using busybox-init strategy (inittab restart + SIGQUIT)..."
+
+    local takeover="${PIVOT_DIR}/sbin/takeover-init"
+    if [ ! -x "$takeover" ]; then
+        log_error "takeover-init missing at $takeover; falling back to direct"
+        pivot_direct
+        return
+    fi
+
+    local restart_line="::restart:${takeover}"
+    if ! grep -qF "$restart_line" /etc/inittab 2>/dev/null; then
+        # /etc/inittab is writable via the tmpfs overlay on the running system
+        echo "$restart_line" | run_privileged tee -a /etc/inittab >/dev/null
+    fi
+
+    log_warn "Reloading inittab, then re-execing PID 1 into takeover-init..."
+    log_warn "Connection WILL be lost. Reconnect via: ssh root@${DETECTED_IP_ADDRESS}"
+    run_privileged kill -HUP 1    # busybox init: re-read /etc/inittab
+    sleep 1
+    run_privileged kill -QUIT 1   # busybox init: run `restart` action -> exec takeover-init as PID 1
 }
 
 # Strategy for runit
@@ -519,11 +659,15 @@ execute_pivot() {
         sysvinit)
             pivot_sysvinit
             ;;
+        busybox)
+            pivot_busybox
+            ;;
         runit)
             pivot_runit
             ;;
         openrc)
-            pivot_sysvinit  # OpenRC uses similar mechanism
+            # Alpine's OpenRC runs on top of busybox init (PID 1)
+            pivot_busybox
             ;;
         *)
             log_warn "Unknown init system, trying direct approach"
