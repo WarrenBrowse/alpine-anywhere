@@ -589,11 +589,15 @@ bake_management_tools() {
 }
 
 # Wrap the Alpine mkinitfs initramfs with the A/B boot-guard, in place.
-# Instead of changing the init (rdinit/init= both failed on the RPi), we PATCH
-# the Alpine init to call /sbin/init.aa right before its `exec ... switch_root`.
-# At that point modules are loaded, busybox is set up and the disk is accessible
-# (the root was just mounted) — a reliable environment — yet we're still in the
-# initramfs, so the guard can roll back before handing off to the real init.
+# We PATCH the Alpine init to call /sbin/init.aa right before its
+# `exec ... switch_root`. CRUCIAL DETAIL: at that point the init has ALREADY
+# run its "move mounts into $sysroot" loop, so /proc and /dev are NO LONGER at
+# their normal paths (/proc/cmdline is empty, /dev/<part> is gone) — they live
+# under $sysroot now. So the patch passes the init's OWN variables to the guard:
+#     /sbin/init.aa "$KOPT_root" "$sysroot"
+# and init.aa reads root from the arg (fallback: $sysroot/proc/cmdline) and
+# finds the FAT boot node under /dev OR $sysroot/dev. busybox runs as a
+# standalone shell, so applets (mount/sed/reboot/...) resolve without symlinks.
 wrap_boot_initramfs() {
     local img="$1"
     [ -f "$img" ] || { log_warn "initramfs $img missing; skipping boot-guard"; return 0; }
@@ -607,36 +611,51 @@ wrap_boot_initramfs() {
     mkdir -p "$tmp/sbin"
     cat > "$tmp/sbin/init.aa" << 'EOF'
 #!/bin/sh
-# A/B boot-guard: invoked by the patched Alpine init just before switch_root,
-# in the initramfs with modules loaded + busybox ready + disk accessible.
-# Counts this boot attempt; rolls back to the other slot after one unverified
-# boot. Best-effort: never blocks the boot (always exits 0 unless it
-# deliberately reboots for a rollback). Logs to console AND <boot>/init-aa.log.
-say() { echo "init.aa: $*"; echo "[$(cut -d. -f1 /proc/uptime 2>/dev/null)s] $*" >> /aa-boot/init-aa.log 2>/dev/null; }
+# A/B boot-guard: invoked by the patched Alpine init right before switch_root,
+# as:  init.aa "$KOPT_root" "$sysroot"
+# By this point the init has moved /proc,/sys,/dev into $sysroot, so we must NOT
+# rely on /proc/cmdline or /dev/* being at their usual paths. Best-effort: never
+# blocks the boot (exit 0) unless it deliberately reboots for a rollback.
+ROOTARG="$1"; SYSROOT="$2"
 
-root=$(cat /proc/cmdline 2>/dev/null | tr ' ' '\n' | sed -n 's/^root=//p' | head -n1)
-case "$root" in
-    *2) slot=A; opart=2 ;;
-    *3) slot=B; opart=3 ;;
-    *) echo "init.aa: root='$root' is not an A/B slot; skip"; exit 0 ;;
-esac
-# Derive the base disk + partition prefix (p for nvme/mmc, none for sd) from root=.
-case "$root" in
-    *mmcblk*|*nvme*) pfx="p" ;;
-    *) pfx="" ;;
-esac
-disk=${root%${pfx}[0-9]}
-boot="${disk}${pfx}1"
+# Kernel-log breadcrumbs (survive into the booted system's `dmesg`). /dev may be
+# at $SYSROOT/dev now, so pick whichever /dev/kmsg is writable.
+KMSG=/dev/kmsg; [ -w "$KMSG" ] || KMSG="${SYSROOT}/dev/kmsg"
+klog() { echo "init.aa: $*" > "$KMSG" 2>/dev/null; echo "init.aa: $*"; }
 
+# 1) Root device: prefer the init's $KOPT_root arg; fall back to the (moved)
+#    cmdline under $SYSROOT/proc, then a bare /proc/cmdline.
+root="$ROOTARG"
+[ -z "$root" ] && [ -n "$SYSROOT" ] && root=$(sed -n 's/.*[ ]root=\([^ ]*\).*/\1/p' "${SYSROOT}/proc/cmdline" 2>/dev/null | head -n1)
+[ -z "$root" ] && root=$(sed -n 's/.*[ ]root=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null | head -n1)
+klog "enter root='$root' sysroot='$SYSROOT'"
+case "$root" in
+    *2) slot=A ;;
+    *3) slot=B ;;
+    *) klog "root not an A/B slot; skip"; exit 0 ;;
+esac
+case "$root" in *mmcblk*|*nvme*) pfx="p" ;; *) pfx="" ;; esac
+disk=${root%${pfx}[0-9]}            # e.g. /dev/sda  /dev/mmcblk0
+base=${disk##*/}                    # e.g. sda       mmcblk0
+
+# 2) Locate the FAT boot partition node (part 1). /dev was likely moved to
+#    $SYSROOT/dev, so search there too.
+bootname="${base}${pfx}1"
+boot=""
+for c in "/dev/${bootname}" "${SYSROOT}/dev/${bootname}"; do
+    [ -b "$c" ] && { boot="$c"; break; }
+done
+[ -z "$boot" ] && boot="/dev/${bootname}"
+klog "slot=$slot disk=$disk boot=$boot"
+
+# 3) Mount it (vfat is built into the kernel — no module needed).
 mkdir -p /aa-boot 2>/dev/null
-# vfat is needed to read the FAT boot partition; load it if not already present.
-modprobe vfat 2>/dev/null || true
-modprobe nls_cp437 2>/dev/null || true
 if ! mount -t vfat "$boot" /aa-boot 2>/dev/null && ! mount "$boot" /aa-boot 2>/dev/null; then
-    echo "init.aa: cannot mount boot $boot; skip (boot continues)"
+    klog "cannot mount boot $boot; skip (boot continues)"
     exit 0
 fi
 meta=/aa-boot/slots.meta
+say() { echo "$*" >> /aa-boot/init-aa.log 2>/dev/null; sync 2>/dev/null; klog "$*"; }
 say "start slot=$slot root=$root boot=$boot"
 if [ ! -f "$meta" ]; then say "no slots.meta; skip"; umount /aa-boot 2>/dev/null; exit 0; fi
 
@@ -655,7 +674,7 @@ if [ "$cnt" -gt 1 ] && [ "$ver" != "true" ]; then
     other=B; [ "$slot" = B ] && other=A
     opart_other=3; [ "$other" = A ] && opart_other=2
     if grep -q "^SLOT_${other}_VERSION=." "$meta"; then
-        odev="${disk}${pfx}${opart_other}"
+        odev="/dev/${base}${pfx}${opart_other}"      # canonical path for next boot
         # config.txt: select the other slot's kernel + initramfs (RPi).
         sed -i "s|^kernel=vmlinuz-.*|kernel=vmlinuz-${other}|; s|^initramfs initramfs-.*|initramfs initramfs-${other} followkernel|" /aa-boot/config.txt 2>/dev/null
         # cmdline.txt: swap only root=, preserving the rest of the options.
@@ -665,9 +684,10 @@ if [ "$cnt" -gt 1 ] && [ "$ver" != "true" ]; then
         echo "$other" > /aa-boot/current_slot
         say "ROLLBACK $slot -> $other (root=$odev); rebooting now"
         sync; umount /aa-boot 2>/dev/null; sync
-        reboot -f
-        # If reboot -f is unavailable, fall through to a kernel reboot.
+        reboot -f 2>/dev/null
+        # Fallbacks if the reboot applet is unavailable (/proc may be at $SYSROOT).
         echo b > /proc/sysrq-trigger 2>/dev/null
+        echo b > "${SYSROOT}/proc/sysrq-trigger" 2>/dev/null
     else
         say "no bootable $other image (no SLOT_${other}_VERSION); cannot roll back"
     fi
@@ -678,13 +698,16 @@ EOF
     chmod +x "$tmp/sbin/init.aa"
 
     # Insert the guard call on the line(s) before `exec ... switch_root`, once,
-    # preserving indentation. awk (not `sed -i ...\n...`) so it's portable and
-    # doesn't depend on GNU-sed newline-in-replacement behaviour.
+    # preserving indentation. We pass the init's own $KOPT_root and $sysroot so
+    # the guard works even though /proc and /dev have been moved into $sysroot.
+    # awk (not `sed -i ...\n...`) so it's portable + idempotent. NOTE: $KOPT_root
+    # / $sysroot are LITERAL text emitted into /init (shell expands them at boot);
+    # inside an awk string literal `$` is not the field operator.
     if ! grep -q '/sbin/init.aa' "$tmp/init"; then
         awk '
             /^[[:space:]]*exec .*switch_root/ {
                 match($0, /^[[:space:]]*/)
-                printf "%s/sbin/init.aa 2>/dev/null || true\n", substr($0, 1, RLENGTH)
+                print substr($0, 1, RLENGTH) "/sbin/init.aa \"$KOPT_root\" \"$sysroot\" 2>/dev/null || true"
             }
             { print }
         ' "$tmp/init" > "$tmp/init.aa.new" && mv "$tmp/init.aa.new" "$tmp/init"

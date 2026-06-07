@@ -228,6 +228,9 @@ Describe 'install.sh'
             [ -x "$WD/out/sbin/init.aa" ] && echo "HAS_GUARD_FILE"
             # guard call must appear BEFORE the switch_root line
             awk '/\/sbin\/init\.aa/{g=NR} /exec .*switch_root/{s=NR} END{ if (g>0 && s>0 && g<s) print "ORDER_OK" }' "$WD/out/init"
+            # the guard must receive the init's own root + sysroot (they are passed
+            # because /proc and /dev are moved into $sysroot before switch_root)
+            grep -q '/sbin/init.aa "$KOPT_root" "$sysroot"' "$WD/out/init" && echo "ARGS_OK"
             # idempotent: a second wrap must not insert the call twice
             wrap_boot_initramfs "$WD/initramfs" >/dev/null 2>&1
             rm -rf "$WD/out"; mkdir -p "$WD/out"
@@ -235,11 +238,12 @@ Describe 'install.sh'
             echo "GUARD_CALLS=$(grep -c '/sbin/init.aa' "$WD/out/init")"
         }
 
-        It 'injects /sbin/init.aa and calls it before switch_root (idempotently)'
+        It 'injects /sbin/init.aa (with KOPT_root+sysroot args) before switch_root, idempotently'
             command -v cpio >/dev/null 2>&1 || Skip "cpio not available"
             When call wrap_and_inspect
             The output should include "HAS_GUARD_FILE"
             The output should include "ORDER_OK"
+            The output should include "ARGS_OK"
             The output should include "GUARD_CALLS=1"
         End
     End
