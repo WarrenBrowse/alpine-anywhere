@@ -40,6 +40,7 @@ fi
 . "${LIB_DIR}/takeover.sh"
 . "${LIB_DIR}/pivot.sh"
 . "${LIB_DIR}/install.sh"
+. "${LIB_DIR}/init_s6.sh"
 . "${LIB_DIR}/upgrade.sh"
 . "${LIB_DIR}/hardening.sh"
 
@@ -260,6 +261,7 @@ run_local_ab_install() {
         [ -n "$CUSTOM_SCRIPT" ] && sudo_args="$sudo_args --custom-script=$CUSTOM_SCRIPT"
         [ -n "$SSH_HOST_KEY_DIR" ] && sudo_args="$sudo_args --ssh-host-keys=$SSH_HOST_KEY_DIR"
         [ -n "$TARGET_DISK" ] && sudo_args="$sudo_args --disk=$TARGET_DISK"
+        [ -n "$INIT_SYSTEM" ] && sudo_args="$sudo_args --init=$INIT_SYSTEM"
         exec sudo -E sh "$0" $sudo_args
     fi
 

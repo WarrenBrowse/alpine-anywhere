@@ -148,8 +148,32 @@ Describe 'install.sh'
         End
     End
 
+    Describe 'resolve_init_system()'
+        It 'defaults to openrc when not hardened'
+            HARDENED_MODE=false; INIT_SYSTEM=""
+            When call resolve_init_system
+            The variable INIT_SYSTEM should equal openrc
+        End
+        It 'defaults to s6 when hardened'
+            HARDENED_MODE=true; INIT_SYSTEM=""
+            When call resolve_init_system
+            The variable INIT_SYSTEM should equal s6
+        End
+        It 'respects an explicit choice'
+            HARDENED_MODE=true; INIT_SYSTEM=openrc
+            When call resolve_init_system
+            The variable INIT_SYSTEM should equal openrc
+        End
+        It 'rejects an invalid value'
+            INIT_SYSTEM=runit
+            When run resolve_init_system
+            The status should be failure
+            The stderr should include "Invalid --init"
+        End
+    End
+
     Describe 'install_ab_services()'
-        setup() { ROOT=$(mktemp -d); }
+        setup() { ROOT=$(mktemp -d); INIT_SYSTEM=openrc; }
         cleanup() { rm -rf "$ROOT"; }
         Before 'setup'
         After 'cleanup'

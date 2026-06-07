@@ -174,6 +174,7 @@ run_on_remote() {
     [ "$HARDENED_MODE" = "true" ] && remote_cmd="$remote_cmd --hardened"
     [ -n "$OVERLAY_DEVICE" ] && remote_cmd="$remote_cmd --overlay='$OVERLAY_DEVICE'"
     [ -n "$TARGET_DISK" ] && remote_cmd="$remote_cmd --disk='$TARGET_DISK'"
+    [ -n "$INIT_SYSTEM" ] && remote_cmd="$remote_cmd --init='$INIT_SYSTEM'"
     [ -n "$remote_custom_script" ] && remote_cmd="$remote_cmd --custom-script='$remote_custom_script'"
     [ -n "$remote_host_key_dir" ] && remote_cmd="$remote_cmd --ssh-host-keys='$remote_host_key_dir'"
     [ "$KEEP_EXISTING" = "true" ] && remote_cmd="$remote_cmd --keep"

@@ -372,10 +372,22 @@ EOF
 
 # Build Alpine rootfs and create squashfs image
 # Output: /tmp/system.squashfs + kernel/initramfs in $BUILD_DIR/boot/
+# Resolve INIT_SYSTEM default (s6 when hardened, else openrc) and validate it.
+resolve_init_system() {
+    if [ -z "$INIT_SYSTEM" ]; then
+        if [ "$HARDENED_MODE" = "true" ]; then INIT_SYSTEM="s6"; else INIT_SYSTEM="openrc"; fi
+    fi
+    case "$INIT_SYSTEM" in
+        openrc|s6) ;;
+        *) die "Invalid --init '$INIT_SYSTEM' (expected: openrc or s6)" ;;
+    esac
+}
+
 generate_system_squashfs() {
     local squashfs_output="$1"
 
-    log_step "Building Alpine system image..."
+    resolve_init_system
+    log_step "Building Alpine system image (init: ${INIT_SYSTEM})..."
 
     local build_dir
     build_dir=$(mktemp -d)
@@ -425,10 +437,16 @@ EOF
         ssh_pkg="dropbear dropbear-openrc dropbear-convert"
     fi
 
+    # Init system packages
+    local init_pkg="openrc busybox-openrc"
+    if [ "$INIT_SYSTEM" = "s6" ]; then
+        init_pkg="s6 s6-rc s6-linux-init s6-portable-utils s6-linux-utils execline"
+    fi
+
     # squashfs-tools is needed on the installed system so `alpine-anywhere
     # upgrade` can build the next slot's image in place.
     chroot "$build_dir" /sbin/apk add --no-cache \
-        alpine-base openrc busybox-openrc \
+        alpine-base $init_pkg \
         "$kernel_pkg" linux-firmware-none \
         mkinitfs \
         $ssh_pkg \
@@ -461,6 +479,11 @@ EOF
 
     # Bake the management CLI + A/B auto-rollback services into the image
     bake_management_tools "$build_dir"
+
+    # s6 init: build s6-rc db + s6-linux-init basedir, make s6 PID 1
+    if [ "$INIT_SYSTEM" = "s6" ]; then
+        setup_s6_init "$build_dir"
+    fi
 
     # Cleanup chroot mounts
     umount "${build_dir}/dev" 2>/dev/null || true
@@ -557,6 +580,8 @@ EOF
 #   aa-verify    (default) - once booted far enough, mark the slot good (reset counter)
 install_ab_services() {
     local root="$1"
+    # OpenRC init scripts; s6 defines aa-bootcount/aa-verify in setup_s6_init.
+    [ "$INIT_SYSTEM" = "openrc" ] || return 0
     mkdir -p "${root}/etc/init.d"
 
     cat > "${root}/etc/init.d/aa-bootcount" << 'EOF'
@@ -630,15 +655,17 @@ EOF
 nameserver ${DETECTED_DNS%% *}
 EOF
 
-    # Enable services
-    chroot "$root" /sbin/rc-update add networking boot
-    if [ "$HARDENED_MODE" = "true" ]; then
-        chroot "$root" /sbin/rc-update add dropbear default
-    else
-        chroot "$root" /sbin/rc-update add sshd default
+    # Enable services (OpenRC only; s6 services are defined in setup_s6_init)
+    if [ "$INIT_SYSTEM" = "openrc" ]; then
+        chroot "$root" /sbin/rc-update add networking boot
+        if [ "$HARDENED_MODE" = "true" ]; then
+            chroot "$root" /sbin/rc-update add dropbear default
+        else
+            chroot "$root" /sbin/rc-update add sshd default
+        fi
+        chroot "$root" /sbin/rc-update add local default
+        chroot "$root" /sbin/rc-update add chronyd default 2>/dev/null || true
     fi
-    chroot "$root" /sbin/rc-update add local default
-    chroot "$root" /sbin/rc-update add chronyd default 2>/dev/null || true
 
     # Create immutable marker
     touch "${root}/etc/alpine-anywhere-immutable"

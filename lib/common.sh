@@ -27,6 +27,7 @@ INSTALL_MODE="${INSTALL_MODE:-false}"     # Install mode (vs live mode)
 INSTALL_CONTINUE="${INSTALL_CONTINUE:-false}"  # Continue installation after pivot
 UPGRADE_MODE="${UPGRADE_MODE:-false}"     # Upgrade mode (A/B switch)
 SLOT_ACTION="${SLOT_ACTION:-}"            # Slot subcommand: status|verify|rollback|bootcount
+INIT_SYSTEM="${INIT_SYSTEM:-}"            # Init system: openrc|s6 (empty = auto: s6 if hardened else openrc)
 KEEP_EXISTING="${KEEP_EXISTING:-false}"   # Keep existing system (dual-boot)
 OVERLAY_DEVICE="${OVERLAY_DEVICE:-}"      # Device for persistent overlay
 TARGET_DISK="${TARGET_DISK:-}"            # Explicit install disk (e.g. /dev/sda); empty = auto-detect
@@ -294,6 +295,10 @@ Image customization:
                                    override). Default: reuse the keys already in use on
                                    the building system so identity is stable across A/B.
 
+Init system:
+  --init SYSTEM                  Init/service manager: openrc or s6
+                                   (default: s6 in --hardened mode, else openrc)
+
 Security options:
   --hardened                     Security hardened mode:
                                    - linux-hardened kernel (KSPP)
@@ -452,6 +457,14 @@ parse_arguments() {
                 ;;
             --hardened)
                 HARDENED_MODE=true
+                shift
+                ;;
+            --init)
+                INIT_SYSTEM="$2"
+                shift 2
+                ;;
+            --init=*)
+                INIT_SYSTEM="${1#*=}"
                 shift
                 ;;
             -h|--help)

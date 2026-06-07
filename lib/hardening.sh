@@ -438,9 +438,12 @@ apply_hardening_to_image() {
     rm -f "${root}/etc/runlevels/default/sshd" 2>/dev/null || true
 
     # 7. Enable hardened services
-    chroot "$root" /sbin/rc-update add dropbear default 2>/dev/null || true
-    chroot "$root" /sbin/rc-update add nftables boot 2>/dev/null || true
-    chroot "$root" /sbin/rc-update add sysctl boot 2>/dev/null || true
+    # Service enablement is OpenRC-specific; s6 enables these via s6-rc (setup_s6_init)
+    if [ "$INIT_SYSTEM" = "openrc" ]; then
+        chroot "$root" /sbin/rc-update add dropbear default 2>/dev/null || true
+        chroot "$root" /sbin/rc-update add nftables boot 2>/dev/null || true
+        chroot "$root" /sbin/rc-update add sysctl boot 2>/dev/null || true
+    fi
 
     # 8. Secure permissions
     log_info "Setting secure permissions..."
