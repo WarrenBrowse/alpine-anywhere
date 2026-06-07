@@ -289,8 +289,8 @@ cache_download() {
 
     log_info "Downloading: $filename"
     if [ "$LOCAL_MODE" = "true" ]; then
-        curl -fSL --progress-bar -o "$cache_file" "$url"
+        http_fetch_file "$url" "$cache_file"
     else
-        run_cmd "curl -fSL --progress-bar -o '$cache_file' '$url'"
+        run_cmd "if command -v curl >/dev/null 2>&1; then curl -fSL --progress-bar -o '$cache_file' '$url'; else wget -O '$cache_file' '$url'; fi"
     fi
 }

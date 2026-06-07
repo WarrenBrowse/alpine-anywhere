@@ -10,24 +10,26 @@ validate_local_commands() {
     log_step "Validating local commands..."
 
     # In local mode we run ON the target, so ssh/scp (control-host tools) are
-    # not needed there; only the download + archive tools are.
+    # not needed there; only the archive tools are. A download tool (curl OR
+    # busybox wget) is required in both modes.
     local required_commands
     if [ "$LOCAL_MODE" = "true" ]; then
-        required_commands="curl tar gzip"
+        required_commands="tar gzip"
     else
-        required_commands="ssh scp curl tar gzip"
+        required_commands="ssh tar gzip"
     fi
     local missing=""
 
     for cmd in $required_commands; do
         if ! command_exists "$cmd"; then
-            if [ -z "$missing" ]; then
-                missing="$cmd"
-            else
-                missing="$missing $cmd"
-            fi
+            missing="${missing:+$missing }$cmd"
         fi
     done
+
+    # Need at least one HTTP download tool
+    if ! command_exists curl && ! command_exists wget; then
+        missing="${missing:+$missing }curl-or-wget"
+    fi
 
     if [ -n "$missing" ]; then
         die "Missing required commands: $missing"

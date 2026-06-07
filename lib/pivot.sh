@@ -705,5 +705,5 @@ download_minirootfs() {
     local url="${ALPINE_MIRROR}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/alpine-minirootfs-${ALPINE_VERSION}.0-${DETECTED_ARCH}.tar.gz"
 
     log_info "Downloading Alpine minirootfs..."
-    curl -fSL --progress-bar -o "${INSTALL_CACHE_DIR}/minirootfs.tar.gz" "$url"
+    http_fetch_file "$url" "${INSTALL_CACHE_DIR}/minirootfs.tar.gz"
 }

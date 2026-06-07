@@ -386,7 +386,7 @@ generate_system_squashfs() {
         tar -xzf "${INSTALL_CACHE_DIR}/minirootfs.tar.gz" -C "$build_dir"
     else
         local minirootfs_url="${ALPINE_MIRROR}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/alpine-minirootfs-${ALPINE_VERSION}.0-${DETECTED_ARCH}.tar.gz"
-        curl -fSL "$minirootfs_url" | tar xz -C "$build_dir"
+        http_fetch_stdout "$minirootfs_url" | tar xz -C "$build_dir"
     fi
 
     # DNS must be set BEFORE apk update
@@ -418,9 +418,7 @@ EOF
     log_info "Installing packages (kernel: $kernel_pkg)..."
     chroot "$build_dir" /sbin/apk update
 
-    # openssh-sftp-server: the image's sshd_config declares an sftp Subsystem;
-    # without this package scp/sftp into the installed system fail.
-    local ssh_pkg="openssh-server openssh-client openssh-sftp-server"
+    local ssh_pkg="openssh-server openssh-client"
     if [ "$HARDENED_MODE" = "true" ]; then
         ssh_pkg="dropbear dropbear-openrc"
     fi
@@ -677,12 +675,13 @@ setup_system_ssh() {
     else
         # Configure OpenSSH
         mkdir -p "${root}/etc/ssh"
+        # No sftp Subsystem: the image ships no openssh-sftp-server, and remote
+        # transfers use tar/cat over ssh instead of scp/sftp.
         cat > "${root}/etc/ssh/sshd_config" << 'EOF'
 Port 22
 PermitRootLogin prohibit-password
 PubkeyAuthentication yes
 PasswordAuthentication no
-Subsystem sftp /usr/lib/ssh/sftp-server
 EOF
     fi
 

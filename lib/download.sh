@@ -32,6 +32,46 @@ build_alpine_file_url() {
 }
 
 # =============================================================================
+# HTTP helpers (curl preferred, busybox wget fallback)
+# =============================================================================
+
+# Fetch a URL to a file. Returns non-zero on failure.
+http_fetch_file() {
+    _url="$1"; _dest="$2"
+    if command_exists curl; then
+        curl -fSL --progress-bar -o "$_dest" "$_url"
+    elif command_exists wget; then
+        wget -O "$_dest" "$_url"
+    else
+        die "Neither curl nor wget is available"
+    fi
+}
+
+# Fetch a URL to stdout. Returns non-zero on failure.
+http_fetch_stdout() {
+    _url="$1"
+    if command_exists curl; then
+        curl -fsSL "$_url"
+    elif command_exists wget; then
+        wget -qO- "$_url"
+    else
+        return 1
+    fi
+}
+
+# Quietly test that a URL is reachable.
+http_check_url() {
+    _url="$1"
+    if command_exists curl; then
+        curl -fsSL --connect-timeout 5 --max-time 10 "$_url" >/dev/null 2>&1
+    elif command_exists wget; then
+        wget -q -T 10 -O /dev/null "$_url" >/dev/null 2>&1
+    else
+        return 1
+    fi
+}
+
+# =============================================================================
 # Download Functions
 # =============================================================================
 
@@ -44,11 +84,11 @@ download_file() {
     log_debug "Downloading: $url -> $dest"
 
     if [ "$DRY_RUN" = "true" ]; then
-        echo "[DRY-RUN] curl -fsSL -o '$dest' '$url'"
+        echo "[DRY-RUN] download '$url' -> '$dest'"
         return 0
     fi
 
-    if ! curl -fSL --progress-bar -o "$dest" "$url"; then
+    if ! http_fetch_file "$url" "$dest"; then
         die "Failed to download: $url"
     fi
 
@@ -124,7 +164,7 @@ test_mirror() {
 
     log_debug "Testing mirror: $mirror"
 
-    if curl -fsSL --connect-timeout 5 --max-time 10 "$test_url" >/dev/null 2>&1; then
+    if http_check_url "$test_url"; then
         return 0
     fi
     return 1
