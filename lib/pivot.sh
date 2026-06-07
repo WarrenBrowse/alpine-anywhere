@@ -433,7 +433,22 @@ PIVOT_DIR="/mnt/alpine"
 OLD_ROOT="/mnt/oldroot"
 
 exec > /dev/console 2>&1
-echo "[takeover-init] === PID 1 takeover (busybox) === pid=$$"
+
+# Persistent breadcrumb log on the FAT boot partition (sda1), so a failed
+# takeover can be diagnosed after the fact (no serial console needed).
+# NOTE: if the takeover SUCCEEDS, run_ab_install later repartitions the disk
+# and this log is overwritten - that's fine, we only need it on failure.
+AA_LOGDEV=$(grep -oE '/dev/[a-z0-9]+1\b' /proc/cmdline 2>/dev/null | head -1)
+[ -n "$AA_LOGDEV" ] || AA_LOGDEV=/dev/sda1
+mkdir -p /aa-log 2>/dev/null
+mount "$AA_LOGDEV" /aa-log 2>/dev/null || mount -t vfat "$AA_LOGDEV" /aa-log 2>/dev/null || true
+tlog() {
+    echo "[takeover-init] $*"
+    echo "[$(cat /proc/uptime 2>/dev/null | cut -d. -f1)] $*" >> /aa-log/takeover.log 2>/dev/null || true
+    sync 2>/dev/null || true
+}
+
+tlog "=== PID 1 takeover (busybox) === pid=$$"
 
 # Release old-root file descriptors
 for fd in /proc/self/fd/*; do
@@ -443,12 +458,16 @@ done
 
 mount --make-rprivate / 2>/dev/null || true
 
-echo "[takeover-init] pivot_root into ${PIVOT_DIR}..."
-cd "$PIVOT_DIR" || { echo "[takeover-init] cd failed"; exec /bin/sh; }
+tlog "pre-pivot: PIVOT_DIR=${PIVOT_DIR} ismount=$(grep -c " ${PIVOT_DIR} " /proc/mounts) sh=$(ls -l /bin/sh 2>/dev/null)"
+tlog "pivot_root into ${PIVOT_DIR}..."
+# On failure: do NOT exec /bin/sh (as PID 1 with no tty it exits -> kernel
+# panic -> reboot). Instead hang so PID 1 survives, the old sshd stays alive,
+# and the failure can be diagnosed over SSH / from /aa-log.
+cd "$PIVOT_DIR" || { tlog "cd failed"; while :; do sleep 5; done; }
 mkdir -p ".${OLD_ROOT}"
 if ! pivot_root . ".${OLD_ROOT}"; then
-    echo "[takeover-init] ERROR: pivot_root failed"
-    exec /bin/sh
+    tlog "ERROR: pivot_root failed rc=$?"
+    while :; do sleep 5; done
 fi
 echo "[takeover-init] pivot_root OK"
 

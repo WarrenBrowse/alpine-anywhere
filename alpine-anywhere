@@ -523,13 +523,13 @@ find_working_mirror_local() {
 
     local test_url="${ALPINE_MIRROR}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/"
 
-    if curl -fsSL --connect-timeout 5 "$test_url" >/dev/null 2>&1; then
+    if http_check_url "$test_url"; then
         log_info "Mirror OK: ${ALPINE_MIRROR}"
     else
         log_warn "Primary mirror failed, trying fallbacks..."
         for mirror in $FALLBACK_MIRRORS; do
             test_url="${mirror}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/"
-            if curl -fsSL --connect-timeout 5 "$test_url" >/dev/null 2>&1; then
+            if http_check_url "$test_url"; then
                 ALPINE_MIRROR="$mirror"
                 log_info "Using fallback mirror: ${ALPINE_MIRROR}"
                 return 0
@@ -570,7 +570,7 @@ download_alpine_rpi_files_local() {
     local tarball_name
 
     # Find tarball name
-    tarball_name=$(curl -fsSL "${releases_url}/" 2>/dev/null | grep -oE 'alpine-rpi-[0-9.]+-aarch64\.tar\.gz' | head -1)
+    tarball_name=$(http_fetch_stdout "${releases_url}/" 2>/dev/null | grep -oE 'alpine-rpi-[0-9.]+-aarch64\.tar\.gz' | head -1)
     if [ -z "$tarball_name" ]; then
         tarball_name="alpine-rpi-${ALPINE_VERSION}.0-aarch64.tar.gz"
     fi
