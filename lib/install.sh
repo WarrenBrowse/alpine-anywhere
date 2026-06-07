@@ -445,6 +445,9 @@ EOF
     # User customization hook (runs inside the chroot, network available)
     run_custom_script "$build_dir"
 
+    # Bake the management CLI + A/B auto-rollback services into the image
+    bake_management_tools "$build_dir"
+
     # Cleanup chroot mounts
     umount "${build_dir}/dev" 2>/dev/null || true
     umount "${build_dir}/sys" 2>/dev/null || true
@@ -496,6 +499,80 @@ run_custom_script() {
     fi
     rm -f "${root}/tmp/aa-custom.sh"
     log_info "Custom build hook completed"
+}
+
+# Bake the alpine-anywhere CLI + A/B services into the image so the installed
+# system can run `alpine-anywhere status|verify|rollback` and auto-rollback at boot.
+bake_management_tools() {
+    local root="$1"
+    local src_cli src_lib
+    local dest="${root}/usr/local/lib/alpine-anywhere"
+
+    if [ -f "${INSTALL_BASE_DIR}/alpine-anywhere" ]; then
+        src_cli="${INSTALL_BASE_DIR}/alpine-anywhere"; src_lib="${INSTALL_BASE_DIR}/lib"
+    elif [ -f "${SCRIPT_DIR}/alpine-anywhere" ]; then
+        src_cli="${SCRIPT_DIR}/alpine-anywhere"; src_lib="${SCRIPT_DIR}/lib"
+    else
+        log_warn "alpine-anywhere CLI source not found; skipping management tools"
+        return 0
+    fi
+
+    log_info "Baking alpine-anywhere management CLI into image..."
+    mkdir -p "${dest}/lib" "${root}/usr/local/sbin"
+    cp "$src_cli" "${dest}/alpine-anywhere"
+    cp "$src_lib"/*.sh "${dest}/lib/"
+    chmod +x "${dest}/alpine-anywhere"
+
+    # PATH wrapper. exec (not symlink): the CLI derives its lib dir from $0,
+    # which a symlink would resolve to the wrong directory.
+    cat > "${root}/usr/local/sbin/alpine-anywhere" << 'EOF'
+#!/bin/sh
+exec /usr/local/lib/alpine-anywhere/alpine-anywhere "$@"
+EOF
+    chmod +x "${root}/usr/local/sbin/alpine-anywhere"
+
+    install_ab_services "$root"
+}
+
+# OpenRC services for A/B auto-rollback:
+#   aa-bootcount (boot)    - count this boot; roll back a slot that keeps failing
+#   aa-verify    (default) - once booted far enough, mark the slot good (reset counter)
+install_ab_services() {
+    local root="$1"
+    mkdir -p "${root}/etc/init.d"
+
+    cat > "${root}/etc/init.d/aa-bootcount" << 'EOF'
+#!/sbin/openrc-run
+description="Alpine Anywhere: record A/B boot attempt (auto-rollback guard)"
+depend() {
+    after localmount
+    before sshd net
+}
+start() {
+    ebegin "Recording A/B boot attempt"
+    # May reboot into the other slot if this one keeps failing to boot.
+    /usr/local/sbin/alpine-anywhere bootcount || true
+    eend 0
+}
+EOF
+    chmod +x "${root}/etc/init.d/aa-bootcount"
+
+    cat > "${root}/etc/init.d/aa-verify" << 'EOF'
+#!/sbin/openrc-run
+description="Alpine Anywhere: mark current A/B slot verified after a healthy boot"
+depend() {
+    after sshd net
+}
+start() {
+    ebegin "Marking A/B slot as verified"
+    /usr/local/sbin/alpine-anywhere verify || true
+    eend 0
+}
+EOF
+    chmod +x "${root}/etc/init.d/aa-verify"
+
+    chroot "$root" /sbin/rc-update add aa-bootcount boot 2>/dev/null || true
+    chroot "$root" /sbin/rc-update add aa-verify default 2>/dev/null || true
 }
 
 # Configure the system image

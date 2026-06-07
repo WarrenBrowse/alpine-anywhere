@@ -26,6 +26,7 @@ LOCAL_MODE="${LOCAL_MODE:-false}"         # Run locally (no SSH)
 INSTALL_MODE="${INSTALL_MODE:-false}"     # Install mode (vs live mode)
 INSTALL_CONTINUE="${INSTALL_CONTINUE:-false}"  # Continue installation after pivot
 UPGRADE_MODE="${UPGRADE_MODE:-false}"     # Upgrade mode (A/B switch)
+SLOT_ACTION="${SLOT_ACTION:-}"            # Slot subcommand: status|verify|rollback|bootcount
 KEEP_EXISTING="${KEEP_EXISTING:-false}"   # Keep existing system (dual-boot)
 OVERLAY_DEVICE="${OVERLAY_DEVICE:-}"      # Device for persistent overlay
 BOOT_SLOT="${BOOT_SLOT:-A}"               # Current boot slot (A/B)
@@ -255,6 +256,11 @@ Modes:
   --install                      Install mode - install Alpine permanently (A/B scheme)
   upgrade                        Upgrade to new version (atomic A/B switch)
 
+A/B slot subcommands (run on an installed device; omit host to act locally):
+  status                         Show active slot and per-slot metadata
+  verify                         Mark the running slot as known-good (stops auto-rollback)
+  rollback                       Switch back to the other slot and reboot
+
 Options:
   -V, --alpine-version VERSION   Alpine version (default: 3.20)
   -m, --mirror URL               Alpine mirror URL
@@ -428,6 +434,10 @@ parse_arguments() {
                 UPGRADE_MODE=true
                 shift
                 ;;
+            status|verify|rollback|bootcount)
+                SLOT_ACTION="$1"
+                shift
+                ;;
             --hardened)
                 HARDENED_MODE=true
                 shift
@@ -452,7 +462,10 @@ parse_arguments() {
     done
 
     if [ "$pos_count" -eq 0 ]; then
-        if [ "$LOCAL_MODE" != "true" ]; then
+        if [ -n "$SLOT_ACTION" ]; then
+            # Slot subcommands with no target run locally on the installed device
+            LOCAL_MODE=true
+        elif [ "$LOCAL_MODE" != "true" ]; then
             show_usage
             die "Missing target host (use --local for local installation)"
         fi

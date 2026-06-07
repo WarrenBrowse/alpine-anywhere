@@ -131,6 +131,48 @@ Describe 'upgrade.sh'
         End
     End
 
+    Describe 'sed_inplace()'
+        setup() {
+            F=$(mktemp)
+            printf 'kernel=vmlinuz-A\nother=1\n' > "$F"
+        }
+        cleanup() { rm -f "$F"; }
+        Before 'setup'
+        After 'cleanup'
+
+        It 'edits a file in place portably'
+            When call sed_inplace "$F" -e 's|vmlinuz-A|vmlinuz-B|'
+            The contents of file "$F" should include "vmlinuz-B"
+        End
+    End
+
+    Describe 'switch_slot()'
+        setup() {
+            get_boot_disk() { echo /dev/sda; }
+            get_part_dev() { echo "/dev/sda$2"; }
+            BOOT_MNT=$(mktemp -d)
+            {
+                echo 'arm_64bit=1'
+                echo '[pi4]'
+                echo 'kernel=vmlinuz-A'
+                echo 'initramfs initramfs-A followkernel'
+            } > "$BOOT_MNT/config.txt"
+            echo 'root=/dev/sda2 rootfstype=squashfs' > "$BOOT_MNT/cmdline.txt"
+        }
+        cleanup() { rm -rf "$BOOT_MNT"; }
+        Before 'setup'
+        After 'cleanup'
+
+        It 'flips the RPi config.txt + cmdline + marker to the new slot'
+            When call switch_slot B
+            The contents of file "$BOOT_MNT/config.txt" should include "kernel=vmlinuz-B"
+            The contents of file "$BOOT_MNT/config.txt" should include "initramfs initramfs-B followkernel"
+            The contents of file "$BOOT_MNT/cmdline.txt" should include "root=/dev/sda3"
+            The contents of file "$BOOT_MNT/current_slot" should include "B"
+            The stderr should be defined
+        End
+    End
+
     Describe 'Upgrade constants'
         It 'defines max boot attempts'
             The variable MAX_BOOT_ATTEMPTS should equal 3

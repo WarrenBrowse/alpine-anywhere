@@ -78,6 +78,14 @@ main() {
     # Parse command line arguments
     parse_arguments "$@"
 
+    # Lightweight A/B slot subcommands (status/verify/rollback/bootcount).
+    # Handled before the banner/work-dir setup so they stay quiet and fast
+    # (bootcount runs at every boot from an OpenRC service).
+    if [ -n "$SLOT_ACTION" ]; then
+        run_slot_action
+        exit $?
+    fi
+
     # Print banner
     print_banner
 
@@ -119,6 +127,29 @@ main() {
             run_remote_installation
         fi
     fi
+}
+
+# =============================================================================
+# A/B slot subcommands (status / verify / rollback / bootcount)
+# =============================================================================
+
+run_slot_action() {
+    # Remote target given -> run the subcommand on the device over SSH.
+    if [ -n "$TARGET_HOST" ] && [ "$TARGET_HOST" != "localhost" ] && [ "$LOCAL_MODE" != "true" ]; then
+        setup_ssh_multiplexing
+        test_ssh_connection
+        run_on_remote "$SLOT_ACTION"
+        return $?
+    fi
+
+    # Local: operate on this installed device.
+    case "$SLOT_ACTION" in
+        status)    show_status ;;
+        verify)    verify_current_slot ;;
+        rollback)  rollback_slot ;;
+        bootcount) increment_boot_counter ;;
+        *)         die "Unknown slot action: $SLOT_ACTION" ;;
+    esac
 }
 
 # =============================================================================

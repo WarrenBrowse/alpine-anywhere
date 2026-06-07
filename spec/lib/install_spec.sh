@@ -118,6 +118,45 @@ Describe 'install.sh'
         End
     End
 
+    Describe 'install_ab_services()'
+        setup() { ROOT=$(mktemp -d); }
+        cleanup() { rm -rf "$ROOT"; }
+        Before 'setup'
+        After 'cleanup'
+
+        It 'writes the aa-bootcount boot service'
+            When call install_ab_services "$ROOT"
+            The path "$ROOT/etc/init.d/aa-bootcount" should be exist
+            The contents of file "$ROOT/etc/init.d/aa-bootcount" should include "bootcount"
+            The stderr should be defined
+        End
+
+        It 'writes the aa-verify service'
+            When call install_ab_services "$ROOT"
+            The path "$ROOT/etc/init.d/aa-verify" should be exist
+            The contents of file "$ROOT/etc/init.d/aa-verify" should include "verify"
+            The stderr should be defined
+        End
+    End
+
+    Describe 'bake_management_tools()'
+        setup() {
+            ROOT=$(mktemp -d)
+            INSTALL_BASE_DIR="$PWD"
+        }
+        cleanup() { rm -rf "$ROOT"; }
+        Before 'setup'
+        After 'cleanup'
+
+        It 'installs a PATH wrapper that execs the libdir CLI'
+            When call bake_management_tools "$ROOT"
+            The path "$ROOT/usr/local/sbin/alpine-anywhere" should be exist
+            The contents of file "$ROOT/usr/local/sbin/alpine-anywhere" should include "/usr/local/lib/alpine-anywhere/alpine-anywhere"
+            The path "$ROOT/usr/local/lib/alpine-anywhere/lib/upgrade.sh" should be exist
+            The stderr should be defined
+        End
+    End
+
     Describe 'persist_host_keys()'
         setup() {
             HARDENED_MODE=false

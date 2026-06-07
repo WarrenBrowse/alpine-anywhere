@@ -51,20 +51,25 @@ get_boot_disk() {
     strip_partition "$rootdev"
 }
 
+# Is $BOOT_MNT currently a mountpoint? (busybox-safe, no `mountpoint` dependency)
+boot_is_mounted() {
+    grep -q " ${BOOT_MNT} " /proc/mounts 2>/dev/null
+}
+
 # Mount the FAT boot partition (partition 1) at $BOOT_MNT
 mount_boot() {
     local disk part1
     disk=$(get_boot_disk)
     part1=$(get_part_dev "$disk" 1)
     mkdir -p "$BOOT_MNT"
-    if ! mountpoint -q "$BOOT_MNT" 2>/dev/null; then
+    if ! boot_is_mounted; then
         mount "$part1" "$BOOT_MNT" || die "Cannot mount boot partition $part1"
     fi
 }
 
 umount_boot() {
     sync
-    mountpoint -q "$BOOT_MNT" 2>/dev/null && umount "$BOOT_MNT" || true
+    if boot_is_mounted; then umount "$BOOT_MNT" || true; fi
 }
 
 # =============================================================================
@@ -154,17 +159,39 @@ install_to_slot() {
     log_info "Slot $target_slot ready (Alpine $version)"
 }
 
-# Point the bootloader at a slot (rewrites config.txt/cmdline.txt or extlinux)
+# Point the bootloader at a slot by editing the EXISTING boot config in place.
+# Runs on the installed device, so it must not depend on build-time vars like
+# DETECTED_PLATFORM — it detects the bootloader from the files actually present.
 switch_slot() {
     local new_slot="$1"
-    local disk
+    local disk slot_dev partnum
     disk=$(get_boot_disk)
+    partnum=$(slot_to_partnum "$new_slot")
+    slot_dev=$(get_part_dev "$disk" "$partnum")
 
     log_step "Switching boot to slot $new_slot..."
-    install_boot_config "$BOOT_MNT" "$disk" "$new_slot"
+    if [ -f "${BOOT_MNT}/config.txt" ]; then
+        # Raspberry Pi: select the slot's kernel/initramfs + root device
+        sed_inplace "${BOOT_MNT}/config.txt" \
+            -e "s|^kernel=vmlinuz-.*|kernel=vmlinuz-${new_slot}|" \
+            -e "s|^initramfs initramfs-.*|initramfs initramfs-${new_slot} followkernel|"
+        echo "root=${slot_dev} ${SLOT_KERNEL_OPTS}" > "${BOOT_MNT}/cmdline.txt"
+    elif [ -f "${BOOT_MNT}/extlinux/extlinux.conf" ]; then
+        sed_inplace "${BOOT_MNT}/extlinux/extlinux.conf" \
+            -e "s|^DEFAULT alpine-.*|DEFAULT alpine-${new_slot}|"
+    else
+        die "No known bootloader config on ${BOOT_MNT} (config.txt / extlinux.conf)"
+    fi
     echo "$new_slot" > "${BOOT_MNT}/current_slot"
     sync
     log_info "Boot slot switched to $new_slot (reboot to activate)"
+}
+
+# Portable in-place sed: sed_inplace FILE -e EXPR [-e EXPR ...]
+# Avoids `sed -i` which differs between GNU, BSD and busybox.
+sed_inplace() {
+    local f="$1"; shift
+    sed "$@" "$f" > "${f}.aatmp" && mv "${f}.aatmp" "$f"
 }
 
 # =============================================================================
