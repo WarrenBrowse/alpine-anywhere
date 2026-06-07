@@ -79,9 +79,10 @@ detect_init_system() {
 setup_pivot_environment() {
     log_step "Setting up pivot environment..."
 
-    # Create tmpfs mount point
+    # Create tmpfs mount point (2G: room for tools + kernel modules + an
+    # installer initramfs image; the box has several GB of RAM)
     run_privileged mkdir -p "${PIVOT_DIR}"
-    run_privileged mount -t tmpfs -o size=512M,mode=755 tmpfs "${PIVOT_DIR}"
+    run_privileged mount -t tmpfs -o size=2G,mode=755 tmpfs "${PIVOT_DIR}"
 
     # Extract Alpine minirootfs
     log_info "Extracting Alpine minirootfs..."
@@ -613,6 +614,135 @@ pivot_busybox() {
     run_privileged kill -QUIT 1   # busybox init: run `restart` action -> exec takeover-init as PID 1
 }
 
+# Strategy: reboot into a RAM installer (no runtime PID 1 takeover).
+# Used when the running init can't be re-exec'd at runtime (e.g. busybox init).
+# We turn the already-built pivot env (${PIVOT_DIR}: install tools + scripts +
+# cache + config) into an initramfs, add the running kernel's modules, write it
+# next to the existing vmlinuz on the boot partition, and reboot. The RPi
+# firmware then boots that initramfs entirely in RAM (the disk is free), its
+# /init runs the A/B install onto the disk, and reboots into the new system.
+pivot_reboot_installer() {
+    log_info "Using reboot-into-RAM-installer strategy..."
+
+    local kver
+    kver=$(uname -r)
+
+    # 1. Kernel modules matching the on-disk vmlinuz (same running kernel)
+    if [ -d "/lib/modules/${kver}" ]; then
+        log_info "Bundling kernel modules ${kver}..."
+        run_privileged mkdir -p "${PIVOT_DIR}/lib/modules"
+        run_privileged cp -a "/lib/modules/${kver}" "${PIVOT_DIR}/lib/modules/"
+    else
+        log_warn "No /lib/modules/${kver}; installer may not see the disk"
+    fi
+
+    # 2. Installer /init (PID 1 of the initramfs; disk is free, no pivot needed)
+    run_privileged tee "${PIVOT_DIR}/init" > /dev/null << 'INSTALLERINIT'
+#!/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+exec > /dev/console 2>&1
+echo "[ram-installer] === PID 1 (initramfs) ==="
+
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mkdir -p /dev/pts && mount -t devpts devpts /dev/pts 2>/dev/null
+mkdir -p /run /tmp
+
+echo "[ram-installer] loading storage/fs modules..."
+for m in dwc2 phy-generic xhci-pci-renesas xhci-pci xhci-hcd \
+         usb-storage uas scsi_mod sd_mod \
+         nvme ext4 vfat nls_cp437 nls_iso8859-1 squashfs loop crc32c; do
+    modprobe "$m" 2>/dev/null || true
+done
+# Let USB enumerate
+sleep 5
+mdev -s 2>/dev/null || true
+
+echo "[ram-installer] block devices:"; ls -l /dev/sd* /dev/nvme* /dev/mmcblk* 2>/dev/null
+
+[ -f /etc/alpine-anywhere/config.env ] && . /etc/alpine-anywhere/config.env
+
+echo "[ram-installer] networking..."
+ifconfig lo 127.0.0.1 up 2>/dev/null || true
+if [ -n "$NETWORK_INTERFACE" ]; then
+    if [ "$NETWORK_DHCP" = "true" ]; then
+        udhcpc -i "$NETWORK_INTERFACE" -b -q 2>/dev/null &
+        sleep 4
+    else
+        ifconfig "$NETWORK_INTERFACE" "$NETWORK_IP" netmask "$NETWORK_NETMASK" up 2>/dev/null || true
+        route add default gw "$NETWORK_GATEWAY" 2>/dev/null || true
+    fi
+fi
+
+# Optional SSH for live monitoring/rescue
+mkdir -p /run/sshd
+/usr/sbin/sshd 2>/dev/null || true
+
+echo "[ram-installer] starting A/B install onto disk..."
+INSTALL_CMD="sh /root/.local/share/alpine-anywhere/alpine-anywhere --local --install-continue"
+[ "$VERBOSE" = "true" ] && INSTALL_CMD="$INSTALL_CMD -v"
+[ "$FORCE" = "true" ] && INSTALL_CMD="$INSTALL_CMD -f"
+[ -n "$ALPINE_VERSION" ] && INSTALL_CMD="$INSTALL_CMD -V $ALPINE_VERSION"
+[ -n "$ALPINE_MIRROR" ] && INSTALL_CMD="$INSTALL_CMD -m $ALPINE_MIRROR"
+echo "[ram-installer] $INSTALL_CMD"
+$INSTALL_CMD 2>&1 | tee /dev/console
+rc=$?
+echo "[ram-installer] install finished rc=$rc"
+sync
+if [ "$rc" -eq 0 ]; then
+    echo "[ram-installer] rebooting into installed system in 5s..."
+    sleep 5
+    reboot -f
+else
+    echo "[ram-installer] INSTALL FAILED rc=$rc - dropping to shell, system left as-is"
+    exec /bin/sh
+fi
+INSTALLERINIT
+    run_privileged chmod +x "${PIVOT_DIR}/init"
+
+    # 3. Unmount the virtual filesystems inside PIVOT_DIR so the cpio doesn't
+    #    archive a live /proc /sys /dev (the initramfs /init remounts them).
+    for vfs in dev/pts dev sys proc; do
+        run_privileged umount "${PIVOT_DIR}/${vfs}" 2>/dev/null || true
+    done
+
+    # 4. Package the env as a gzip cpio initramfs onto the boot partition
+    local boot_mnt="/mnt/aa-bootstage" disk part1
+    disk=$(strip_partition "$(get_root_device)")
+    part1=$(get_part_dev "$disk" 1)
+    run_privileged mkdir -p "$boot_mnt"
+    run_privileged mount "$part1" "$boot_mnt" || die "cannot mount boot partition $part1"
+
+    log_info "Building installer initramfs onto ${part1}..."
+    ( cd "$PIVOT_DIR" && run_privileged sh -c "find . -path ./old_root -prune -o -print0 | cpio -0 -o -H newc 2>/dev/null | gzip -1 > '${boot_mnt}/installer.img'" )
+    log_info "installer.img: $(run_privileged du -h "${boot_mnt}/installer.img" | cut -f1)"
+
+    # 4. Point config.txt at vmlinuz + installer.img for the next boot
+    #    (back up the current boot config so a failed install can be recovered)
+    run_privileged cp "${boot_mnt}/config.txt" "${boot_mnt}/config.txt.preinstall" 2>/dev/null || true
+    run_privileged cp "${boot_mnt}/cmdline.txt" "${boot_mnt}/cmdline.txt.preinstall" 2>/dev/null || true
+    local kimg
+    kimg=$(ls "${boot_mnt}"/vmlinuz* 2>/dev/null | head -1)
+    kimg=$(basename "${kimg:-vmlinuz}")
+    run_privileged tee "${boot_mnt}/config.txt" > /dev/null << EOF
+arm_64bit=1
+enable_uart=1
+[pi4]
+kernel=${kimg}
+initramfs installer.img followkernel
+[all]
+EOF
+    echo "console=tty1" | run_privileged tee "${boot_mnt}/cmdline.txt" > /dev/null
+    run_privileged sync
+    run_privileged umount "$boot_mnt" || true
+
+    log_warn "Rebooting into the RAM installer now..."
+    log_warn "Reconnect after install completes: ssh root@${DETECTED_IP_ADDRESS}"
+    run_privileged reboot -f || run_privileged reboot
+}
+
 # Strategy for runit
 pivot_runit() {
     log_info "Using runit strategy..."
@@ -679,14 +809,15 @@ execute_pivot() {
             pivot_sysvinit
             ;;
         busybox)
-            pivot_busybox
+            # busybox init can't be re-exec'd at runtime -> reboot into a RAM installer
+            pivot_reboot_installer
             ;;
         runit)
             pivot_runit
             ;;
         openrc)
             # Alpine's OpenRC runs on top of busybox init (PID 1)
-            pivot_busybox
+            pivot_reboot_installer
             ;;
         *)
             log_warn "Unknown init system, trying direct approach"
