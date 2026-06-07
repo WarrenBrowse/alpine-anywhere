@@ -549,36 +549,36 @@ _aa_cli_src() {
     else return 1; fi
 }
 
-# Install the management CLI into $root as the `aa` command:
-#   /usr/local/lib/aa/{aa,lib/*.sh} + /usr/local/sbin/aa wrapper.
-# exec wrapper (not symlink): the CLI derives its libdir from $0.
+# Install the full alpine-anywhere tool into $root, exposed as the `aa` command.
+#   /usr/local/share/alpine-anywhere/{alpine-anywhere,lib/*.sh} - a complete copy
+#     so the installed host can itself act as a control host and install other
+#     remotes (e.g. `aa --install user@other`).
+#   /usr/local/bin/aa - exec wrapper for the command (no system dirs touched).
+AA_TOOL_DIR="/usr/local/share/alpine-anywhere"
 install_aa_cli() {
     local root="$1" srcbase dest
     srcbase=$(_aa_cli_src) || return 1
-    dest="${root}/usr/local/lib/aa"
-    mkdir -p "${dest}/lib" "${root}/usr/local/sbin"
-    cp "${srcbase}/alpine-anywhere" "${dest}/aa"
+    dest="${root}${AA_TOOL_DIR}"
+    mkdir -p "${dest}/lib" "${root}/usr/local/bin"
+    cp "${srcbase}/alpine-anywhere" "${dest}/alpine-anywhere"
     cp "${srcbase}"/lib/*.sh "${dest}/lib/"
-    chmod +x "${dest}/aa"
-    cat > "${root}/usr/local/sbin/aa" << 'EOF'
+    chmod +x "${dest}/alpine-anywhere"
+    cat > "${root}/usr/local/bin/aa" << EOF
 #!/bin/sh
-exec /usr/local/lib/aa/aa "$@"
+exec ${AA_TOOL_DIR}/alpine-anywhere "\$@"
 EOF
-    chmod +x "${root}/usr/local/sbin/aa"
+    chmod +x "${root}/usr/local/bin/aa"
 }
 
-# Bake the `aa` management CLI + A/B services into the image so the installed
-# system can run `aa status|verify|rollback` and auto-rollback at boot.
+# Bake the `aa` command + A/B services into the image so the installed system can
+# run `aa status|verify|rollback`, auto-rollback at boot, and install other hosts.
 bake_management_tools() {
     local root="$1"
     if ! install_aa_cli "$root"; then
         log_warn "aa CLI source not found; skipping management tools"
         return 0
     fi
-    log_info "Baking 'aa' management CLI into image..."
-    # dropbear's non-interactive PATH lacks /usr/local/sbin -> also expose on /usr/sbin
-    mkdir -p "${root}/usr/sbin"
-    ln -sf /usr/local/sbin/aa "${root}/usr/sbin/aa"
+    log_info "Baking 'aa' command + alpine-anywhere tool into image..."
     install_ab_services "$root"
 }
 
@@ -603,7 +603,7 @@ wrap_boot_initramfs() {
     cat > "$tmp/init.aa" << 'EOF'
 #!/bin/sh
 # A/B boot-guard (best-effort) -> hand off to the original Alpine init at /init.
-export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH=/usr/local/bin:/usr/bin:/sbin:/bin
 mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sysfs /sys 2>/dev/null
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
@@ -613,13 +613,13 @@ done
 root=$(sed -n 's/.*root=\([^ ]*\).*/\1/p' /proc/cmdline)
 i=0; while [ -n "$root" ] && [ ! -b "$root" ] && [ "$i" -lt 10 ]; do sleep 1; i=$((i+1)); done
 if [ -n "$root" ] && [ -b "$root" ]; then
-    aa bootcount 2>/dev/null || true       # rolls back after too many unverified boots
+    /usr/local/bin/aa bootcount 2>/dev/null || true   # rolls back after too many unverified boots
     mkdir -p /aa-test
     if mount -t squashfs -o ro "$root" /aa-test 2>/dev/null; then
         umount /aa-test 2>/dev/null
     else
         echo "[boot-guard] $root squashfs unmountable -> rolling back" > /dev/console 2>&1
-        aa rollback 2>/dev/null
+        /usr/local/bin/aa rollback 2>/dev/null
         sleep 3; reboot -f
     fi
 fi
@@ -650,7 +650,7 @@ depend() {
 }
 start() {
     ebegin "Marking A/B slot as verified"
-    /usr/local/sbin/aa verify || true
+    /usr/local/bin/aa verify || true
     eend 0
 }
 EOF

@@ -64,7 +64,7 @@ EOF
 
     cat > "${hd}/verify" << 'EOF'
 #!/bin/sh
-/usr/local/sbin/aa verify || true
+/usr/local/bin/aa verify || true
 EOF
     cat > "${hd}/nftables-up" << 'EOF'
 #!/bin/sh

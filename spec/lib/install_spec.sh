@@ -195,12 +195,12 @@ Describe 'install.sh'
         Before 'setup'
         After 'cleanup'
 
-        It 'installs the aa command (PATH wrapper execs the libdir CLI)'
+        It 'installs aa in /usr/local/bin and the full tool in /usr/local/share'
             When call bake_management_tools "$ROOT"
-            The path "$ROOT/usr/local/sbin/aa" should be exist
-            The contents of file "$ROOT/usr/local/sbin/aa" should include "/usr/local/lib/aa/aa"
-            The path "$ROOT/usr/local/lib/aa/lib/upgrade.sh" should be exist
-            The path "$ROOT/usr/sbin/aa" should be symlink
+            The path "$ROOT/usr/local/bin/aa" should be exist
+            The contents of file "$ROOT/usr/local/bin/aa" should include "/usr/local/share/alpine-anywhere/alpine-anywhere"
+            The path "$ROOT/usr/local/share/alpine-anywhere/alpine-anywhere" should be exist
+            The path "$ROOT/usr/local/share/alpine-anywhere/lib/upgrade.sh" should be exist
             The stderr should be defined
         End
 
@@ -224,7 +224,7 @@ Describe 'install.sh'
             The stderr should be defined
             The value "$(gzip -dc "$WORKD/initramfs" | cpio -t 2>/dev/null)" should include "init.aa"
             The value "$(gzip -dc "$WORKD/initramfs" | cpio -t 2>/dev/null)" should include "./init"
-            The value "$(gzip -dc "$WORKD/initramfs" | cpio -t 2>/dev/null)" should include "usr/local/sbin/aa"
+            The value "$(gzip -dc "$WORKD/initramfs" | cpio -t 2>/dev/null)" should include "usr/local/bin/aa"
         End
     End
 
