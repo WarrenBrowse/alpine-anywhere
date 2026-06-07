@@ -190,6 +190,7 @@ Describe 'install.sh'
     Describe 'persist_host_keys()'
         setup() {
             HARDENED_MODE=false
+            SSH_HOST_KEY_DIR=""
             KEYSRC=$(mktemp -d)
             ROOT=$(mktemp -d)
             printf 'PRIV' > "$KEYSRC/ssh_host_ed25519_key"
@@ -199,12 +200,30 @@ Describe 'install.sh'
         Before 'setup'
             After 'cleanup'
 
-        It 'bakes control-host keys into the image when --ssh-host-keys is given'
+        It 'reuses the provided OpenSSH host identity for an OpenSSH image'
             SSH_HOST_KEY_DIR="$KEYSRC"
             When call persist_host_keys "$ROOT"
             The path "$ROOT/etc/ssh/ssh_host_ed25519_key" should be exist
             The path "$ROOT/etc/ssh/ssh_host_ed25519_key.pub" should be exist
-            The stderr should include "control-host"
+            The stderr should include "reusing OpenSSH host keys"
+        End
+    End
+
+    Describe 'capture_host_identity()'
+        setup() {
+            DEST=$(mktemp -d)
+            FAKE_SSH=$(mktemp -d)   # stand-in we point at via a tiny wrapper
+        }
+        cleanup() { rm -rf "$DEST" "$FAKE_SSH"; }
+        Before 'setup'
+            After 'cleanup'
+
+        It 'returns non-zero when the source has no host keys'
+            # /etc/ssh and /etc/dropbear have no ssh_host_*/dropbear_* on the CI box
+            ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1 && Skip "host has OpenSSH keys"
+            When call capture_host_identity "$DEST"
+            The status should be failure
+            The stderr should be defined
         End
     End
 End

@@ -294,6 +294,15 @@ run_local_ab_install() {
     log_step "Step 5/6: Downloading Alpine files"
     download_minirootfs
 
+    # Preserve the existing server's SSH host identity (unless explicitly
+    # provided). Captured now, before the disk is wiped; staged into the
+    # installer by generate_pivot_init.
+    if [ -z "$SSH_HOST_KEY_DIR" ]; then
+        if capture_host_identity /tmp/aa-captured-keys; then
+            SSH_HOST_KEY_DIR=/tmp/aa-captured-keys
+        fi
+    fi
+
     # Step 6: Pivot to Alpine
     log_step "Step 6/6: Pivot to Alpine environment"
 
@@ -372,6 +381,14 @@ run_local_upgrade() {
     # Populate DETECTED_* (arch/platform/hostname/network) — the image build in
     # the upgrade needs them just like a fresh install does.
     detect_local_network
+
+    # Preserve SSH host identity across the upgrade (handles dropbear<->openssh
+    # transitions; for same-format, persist_host_keys reads live /etc/ssh anyway).
+    if [ -z "$SSH_HOST_KEY_DIR" ]; then
+        if capture_host_identity /tmp/aa-captured-keys; then
+            SSH_HOST_KEY_DIR=/tmp/aa-captured-keys
+        fi
+    fi
 
     # Run upgrade (mounts the boot partition itself, derived from root=)
     run_upgrade "$ALPINE_VERSION"

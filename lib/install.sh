@@ -420,7 +420,9 @@ EOF
 
     local ssh_pkg="openssh-server openssh-client"
     if [ "$HARDENED_MODE" = "true" ]; then
-        ssh_pkg="dropbear dropbear-openrc"
+        # dropbear-convert provides dropbearconvert, needed to preserve an
+        # existing OpenSSH host identity as dropbear keys (and vice versa).
+        ssh_pkg="dropbear dropbear-openrc dropbear-convert"
     fi
 
     # squashfs-tools is needed on the installed system so `alpine-anywhere
@@ -695,46 +697,92 @@ EOF
     persist_host_keys "$root"
 }
 
-# Bake persistent SSH host keys into the image so the server identity is stable
-# across reboots AND A/B upgrades (each new slot reuses the same host keys).
-# Priority:
-#   1. --ssh-host-keys DIR        (control-host override / chosen identity)
-#   2. keys already in use on the building system (so building B reuses A's keys)
-#   3. generate fresh (only on a truly first install with no prior identity)
-persist_host_keys() {
-    local root="$1"
-    local dest pattern live_dir
-
-    if [ "$HARDENED_MODE" = "true" ]; then
-        dest="${root}/etc/dropbear"
-        pattern="dropbear_*_host_key"
-        live_dir="/etc/dropbear"
-    else
-        dest="${root}/etc/ssh"
-        pattern="ssh_host_*_key*"
-        live_dir="/etc/ssh"
-    fi
+# Capture the SOURCE host's existing SSH identity into $dest as canonical
+# OpenSSH-format keys, regardless of whether the source runs OpenSSH or dropbear.
+# Runs on the source system (before any wipe). Returns 0 if keys were captured.
+# This is what lets an existing server keep its SSH identity after install.
+capture_host_identity() {
+    local dest="$1"
     mkdir -p "$dest"
 
-    if [ -n "$SSH_HOST_KEY_DIR" ] && ls "$SSH_HOST_KEY_DIR"/$pattern >/dev/null 2>&1; then
-        log_info "SSH host keys: using control-host keys from $SSH_HOST_KEY_DIR"
-        cp "$SSH_HOST_KEY_DIR"/$pattern "$dest"/
-    elif ls "$live_dir"/$pattern >/dev/null 2>&1; then
-        log_info "SSH host keys: reusing keys in use on the build system ($live_dir)"
-        cp "$live_dir"/$pattern "$dest"/
-    else
-        log_info "SSH host keys: none found, generating a fresh identity"
-        if [ "$HARDENED_MODE" = "true" ]; then
-            chroot "$root" dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key >/dev/null 2>&1 || true
-            chroot "$root" dropbearkey -t rsa     -f /etc/dropbear/dropbear_rsa_host_key     >/dev/null 2>&1 || true
-        else
-            chroot "$root" ssh-keygen -A >/dev/null 2>&1 || true
-        fi
+    if ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1; then
+        cp /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub "$dest"/ 2>/dev/null
+        log_info "Captured existing OpenSSH host identity"
+        return 0
     fi
 
-    # Lock down permissions on private keys
-    chmod 600 "$dest"/*_key 2>/dev/null || true
-    chmod 644 "$dest"/*_key.pub 2>/dev/null || true
+    if ls /etc/dropbear/dropbear_*_host_key >/dev/null 2>&1; then
+        if ! command_exists dropbearconvert; then
+            log_warn "dropbear host keys present but dropbearconvert missing; cannot preserve identity"
+            return 1
+        fi
+        local dbk t
+        for dbk in /etc/dropbear/dropbear_*_host_key; do
+            t=$(basename "$dbk" | sed 's/^dropbear_\(.*\)_host_key$/\1/')
+            if dropbearconvert dropbear openssh "$dbk" "${dest}/ssh_host_${t}_key" 2>/dev/null; then
+                chmod 600 "${dest}/ssh_host_${t}_key"
+                ssh-keygen -y -f "${dest}/ssh_host_${t}_key" > "${dest}/ssh_host_${t}_key.pub" 2>/dev/null || true
+            fi
+        done
+        log_info "Captured + converted existing dropbear host identity"
+        return 0
+    fi
+
+    return 1
+}
+
+# Bake persistent SSH host keys into the image so the server identity is stable
+# across reboots AND A/B upgrades, and is PRESERVED when installing over an
+# existing server — independent of OpenSSH vs dropbear on either side.
+#
+# Source of truth is always canonical OpenSSH-format keys (from --ssh-host-keys,
+# an auto-captured dir, or the building system's /etc/ssh). They are emitted in
+# the target's format: copied for OpenSSH, converted via dropbearconvert for
+# dropbear (the hardened build chroot ships dropbearconvert). Missing key types
+# are generated fresh.
+persist_host_keys() {
+    local root="$1"
+    local srcdir="" ossh t
+
+    # Locate canonical OpenSSH-format source keys
+    if [ -n "$SSH_HOST_KEY_DIR" ] && ls "$SSH_HOST_KEY_DIR"/ssh_host_*_key >/dev/null 2>&1; then
+        srcdir="$SSH_HOST_KEY_DIR"
+    elif ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1; then
+        srcdir="/etc/ssh"   # e.g. A/B upgrade building on the running OpenSSH system
+    fi
+
+    if [ "$HARDENED_MODE" = "true" ]; then
+        mkdir -p "${root}/etc/dropbear"
+        if [ -n "$srcdir" ]; then
+            log_info "SSH identity: converting OpenSSH host keys -> dropbear (from $srcdir)"
+            for ossh in "$srcdir"/ssh_host_*_key; do
+                [ -f "$ossh" ] || continue
+                t=$(basename "$ossh" | sed 's/^ssh_host_\(.*\)_key$/\1/')
+                case "$t" in rsa|ed25519|ecdsa) ;; *) continue ;; esac  # dropbear-supported
+                cp "$ossh" "${root}/tmp/aa_ih_${t}"
+                chroot "$root" dropbearconvert openssh dropbear \
+                    "/tmp/aa_ih_${t}" "/etc/dropbear/dropbear_${t}_host_key" >/dev/null 2>&1 || true
+                rm -f "${root}/tmp/aa_ih_${t}"
+            done
+        fi
+        # Generate any dropbear key types still missing
+        [ -f "${root}/etc/dropbear/dropbear_ed25519_host_key" ] || \
+            chroot "$root" dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key >/dev/null 2>&1 || true
+        [ -f "${root}/etc/dropbear/dropbear_rsa_host_key" ] || \
+            chroot "$root" dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key >/dev/null 2>&1 || true
+        chmod 600 "${root}"/etc/dropbear/dropbear_*_host_key 2>/dev/null || true
+    else
+        mkdir -p "${root}/etc/ssh"
+        if [ -n "$srcdir" ]; then
+            log_info "SSH identity: reusing OpenSSH host keys (from $srcdir)"
+            cp "$srcdir"/ssh_host_*_key "$srcdir"/ssh_host_*_key.pub "${root}/etc/ssh/" 2>/dev/null
+        else
+            log_info "SSH identity: none found, generating fresh OpenSSH host keys"
+            chroot "$root" ssh-keygen -A >/dev/null 2>&1 || true
+        fi
+        chmod 600 "${root}"/etc/ssh/ssh_host_*_key 2>/dev/null || true
+        chmod 644 "${root}"/etc/ssh/ssh_host_*_key.pub 2>/dev/null || true
+    fi
 }
 
 
