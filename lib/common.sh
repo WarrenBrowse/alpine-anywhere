@@ -16,6 +16,8 @@ DRY_RUN="${DRY_RUN:-false}"
 VERBOSE="${VERBOSE:-false}"
 FORCE="${FORCE:-false}"
 EXTRA_PACKAGES="${EXTRA_PACKAGES:-}"
+CUSTOM_SCRIPT="${CUSTOM_SCRIPT:-}"        # User script run inside the image chroot at build
+SSH_HOST_KEY_DIR="${SSH_HOST_KEY_DIR:-}"  # Control-host dir holding SSH host keys to bake in
 REBOOT_DELAY="${REBOOT_DELAY:-5}"
 TARGET_HOST="${TARGET_HOST:-}"
 TARGET_USER="${TARGET_USER:-}"
@@ -271,6 +273,17 @@ Install options:
   --keep                         Keep existing system (dual-boot)
   --overlay DEVICE               Device/partition for persistent data overlay
 
+Image customization:
+  --extra-packages PKGS          Additional apk packages (comma-separated)
+  --custom-script FILE           Shell script run inside the image chroot at build
+                                   time (network available). Use to install extra
+                                   software or fetch a project, e.g.:
+                                     wget -O- https://github.com/aya/myos/...tar.gz \\
+                                       | tar -xz -C /usr/local/share
+  --ssh-host-keys DIR            Bake these SSH host keys into the image (control-host
+                                   override). Default: reuse the keys already in use on
+                                   the building system so identity is stable across A/B.
+
 Security options:
   --hardened                     Security hardened mode:
                                    - linux-hardened kernel (KSPP)
@@ -350,6 +363,26 @@ parse_arguments() {
             --extra-packages)
                 EXTRA_PACKAGES="$2"
                 shift 2
+                ;;
+            --extra-packages=*)
+                EXTRA_PACKAGES="${1#*=}"
+                shift
+                ;;
+            --custom-script)
+                CUSTOM_SCRIPT="$2"
+                shift 2
+                ;;
+            --custom-script=*)
+                CUSTOM_SCRIPT="${1#*=}"
+                shift
+                ;;
+            --ssh-host-keys)
+                SSH_HOST_KEY_DIR="$2"
+                shift 2
+                ;;
+            --ssh-host-keys=*)
+                SSH_HOST_KEY_DIR="${1#*=}"
+                shift
                 ;;
             --method)
                 INSTALL_METHOD="$2"

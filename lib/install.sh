@@ -442,6 +442,9 @@ EOF
         apply_hardening_to_image "$build_dir" 2>/dev/null || true
     fi
 
+    # User customization hook (runs inside the chroot, network available)
+    run_custom_script "$build_dir"
+
     # Cleanup chroot mounts
     umount "${build_dir}/dev" 2>/dev/null || true
     umount "${build_dir}/sys" 2>/dev/null || true
@@ -460,12 +463,39 @@ EOF
 
     # Create squashfs
     log_info "Creating squashfs image..."
+    # NOTE: gzip (not zstd) — the Alpine linux-rpi4 kernel builds squashfs
+    # without CONFIG_SQUASHFS_ZSTD, so a zstd image fails to mount (EINVAL)
+    # at boot. gzip/xz/lz4/lzo are the supported decompressors.
     mksquashfs "$build_dir" "$squashfs_output" \
-        -comp zstd -noappend -no-progress
+        -comp gzip -noappend -no-progress
 
     rm -rf "$build_dir"
 
     log_info "System image: $(du -h "$squashfs_output" | cut -f1)"
+}
+
+# Run a user-provided customization script inside the image chroot.
+# The script runs as root with the image mounted at /, with working network
+# (resolv.conf + /proc /sys /dev are bind-mounted), so it can `apk add`,
+# `wget`/`curl` projects into /usr/local/share, drop config files, etc.
+# Example custom-script.sh:
+#   #!/bin/sh
+#   apk add --no-cache git
+#   git clone --depth 1 https://github.com/aya/myos /usr/local/share/myos
+run_custom_script() {
+    local root="$1"
+    [ -n "$CUSTOM_SCRIPT" ] || return 0
+    [ -f "$CUSTOM_SCRIPT" ] || die "Custom script not found: $CUSTOM_SCRIPT"
+
+    log_info "Running custom build hook: $CUSTOM_SCRIPT"
+    cp "$CUSTOM_SCRIPT" "${root}/tmp/aa-custom.sh"
+    chmod +x "${root}/tmp/aa-custom.sh"
+    if ! chroot "$root" /bin/sh /tmp/aa-custom.sh; then
+        rm -f "${root}/tmp/aa-custom.sh"
+        die "Custom script failed: $CUSTOM_SCRIPT"
+    fi
+    rm -f "${root}/tmp/aa-custom.sh"
+    log_info "Custom build hook completed"
 }
 
 # Configure the system image
@@ -566,146 +596,53 @@ PasswordAuthentication no
 Subsystem sftp /usr/lib/ssh/sftp-server
 EOF
     fi
+
+    # Bake persistent SSH host keys so identity survives A/B upgrades
+    persist_host_keys "$root"
 }
 
-# =============================================================================
-# Bootloader Configuration
-# =============================================================================
+# Bake persistent SSH host keys into the image so the server identity is stable
+# across reboots AND A/B upgrades (each new slot reuses the same host keys).
+# Priority:
+#   1. --ssh-host-keys DIR        (control-host override / chosen identity)
+#   2. keys already in use on the building system (so building B reuses A's keys)
+#   3. generate fresh (only on a truly first install with no prior identity)
+persist_host_keys() {
+    local root="$1"
+    local dest pattern live_dir
 
-# Setup bootloader for A/B scheme
-setup_bootloader() {
-    local esp_mount="$1"
-    local boot_mount="$2"
-    local arch="$3"
-
-    log_step "Setting up bootloader..."
-
-    case "$arch" in
-        x86_64)
-            setup_bootloader_x86 "$esp_mount" "$boot_mount"
-            ;;
-        aarch64)
-            setup_bootloader_arm64 "$esp_mount" "$boot_mount"
-            ;;
-        *)
-            die "Unsupported architecture for bootloader: $arch"
-            ;;
-    esac
-}
-
-# Setup GRUB for x86_64
-setup_bootloader_x86() {
-    local esp_mount="$1"
-    local boot_mount="$2"
-
-    log_info "Installing GRUB for x86_64..."
-
-    # Install GRUB EFI
-    mkdir -p "${esp_mount}/EFI/BOOT"
-
-    # Create GRUB config
-    cat > "${boot_mount}/bootloader/grub.cfg" << 'EOF'
-set timeout=3
-set default=0
-
-# Load current slot
-if [ -f /current_slot ]; then
-    . /current_slot
-else
-    set slot=A
-fi
-
-menuentry "Alpine Linux (Slot ${slot})" {
-    linux /slots/${slot}/vmlinuz root=live:LABEL=ALPINE_BOOT rd.live.dir=/slots/${slot} rd.live.squashimg=system.squashfs ro quiet
-    initrd /slots/${slot}/initramfs
-}
-
-menuentry "Alpine Linux (Slot A)" {
-    linux /slots/A/vmlinuz root=live:LABEL=ALPINE_BOOT rd.live.dir=/slots/A rd.live.squashimg=system.squashfs ro quiet
-    initrd /slots/A/initramfs
-}
-
-menuentry "Alpine Linux (Slot B)" {
-    linux /slots/B/vmlinuz root=live:LABEL=ALPINE_BOOT rd.live.dir=/slots/B rd.live.squashimg=system.squashfs ro quiet
-    initrd /slots/B/initramfs
-}
-EOF
-}
-
-# Setup extlinux for ARM64 (Raspberry Pi, etc.)
-setup_bootloader_arm64() {
-    local esp_mount="$1"
-    local boot_mount="$2"
-
-    log_info "Setting up extlinux for ARM64..."
-
-    mkdir -p "${boot_mount}/bootloader"
-
-    # Create extlinux config
-    mkdir -p "${boot_mount}/extlinux"
-    cat > "${boot_mount}/extlinux/extlinux.conf" << EOF
-DEFAULT alpine
-TIMEOUT 30
-PROMPT 1
-
-LABEL alpine
-    MENU LABEL Alpine Linux (Current Slot)
-    LINUX /slots/A/vmlinuz
-    INITRD /slots/A/initramfs
-    APPEND root=live:LABEL=ALPINE_BOOT rd.live.dir=/slots/A rd.live.squashimg=system.squashfs ro quiet
-
-LABEL alpine-a
-    MENU LABEL Alpine Linux (Slot A)
-    LINUX /slots/A/vmlinuz
-    INITRD /slots/A/initramfs
-    APPEND root=live:LABEL=ALPINE_BOOT rd.live.dir=/slots/A rd.live.squashimg=system.squashfs ro quiet
-
-LABEL alpine-b
-    MENU LABEL Alpine Linux (Slot B)
-    LINUX /slots/B/vmlinuz
-    INITRD /slots/B/initramfs
-    APPEND root=live:LABEL=ALPINE_BOOT rd.live.dir=/slots/B rd.live.squashimg=system.squashfs ro quiet
-EOF
-
-    # For Raspberry Pi, also create config.txt
-    if [ "$DETECTED_PLATFORM" = "rpi" ]; then
-        setup_rpi_boot "$boot_mount"
+    if [ "$HARDENED_MODE" = "true" ]; then
+        dest="${root}/etc/dropbear"
+        pattern="dropbear_*_host_key"
+        live_dir="/etc/dropbear"
+    else
+        dest="${root}/etc/ssh"
+        pattern="ssh_host_*_key*"
+        live_dir="/etc/ssh"
     fi
-}
+    mkdir -p "$dest"
 
-# Setup Raspberry Pi specific boot files
-setup_rpi_boot() {
-    local boot_mount="$1"
-
-    log_info "Configuring Raspberry Pi boot..."
-
-    # Copy RPi firmware files
-    if [ -f "${INSTALL_CACHE_DIR}/alpine-rpi-${ALPINE_VERSION}.0-${DETECTED_ARCH}.tar.gz" ]; then
-        tar -xzf "${INSTALL_CACHE_DIR}/alpine-rpi-${ALPINE_VERSION}.0-${DETECTED_ARCH}.tar.gz" \
-            -C "$boot_mount" \
-            --strip-components=1 \
-            '*.bin' '*.elf' '*.dat' 'overlays' 2>/dev/null || true
+    if [ -n "$SSH_HOST_KEY_DIR" ] && ls "$SSH_HOST_KEY_DIR"/$pattern >/dev/null 2>&1; then
+        log_info "SSH host keys: using control-host keys from $SSH_HOST_KEY_DIR"
+        cp "$SSH_HOST_KEY_DIR"/$pattern "$dest"/
+    elif ls "$live_dir"/$pattern >/dev/null 2>&1; then
+        log_info "SSH host keys: reusing keys in use on the build system ($live_dir)"
+        cp "$live_dir"/$pattern "$dest"/
+    else
+        log_info "SSH host keys: none found, generating a fresh identity"
+        if [ "$HARDENED_MODE" = "true" ]; then
+            chroot "$root" dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key >/dev/null 2>&1 || true
+            chroot "$root" dropbearkey -t rsa     -f /etc/dropbear/dropbear_rsa_host_key     >/dev/null 2>&1 || true
+        else
+            chroot "$root" ssh-keygen -A >/dev/null 2>&1 || true
+        fi
     fi
 
-    # Create config.txt
-    cat > "${boot_mount}/config.txt" << 'EOF'
-# Alpine Anywhere - Raspberry Pi Configuration
-disable_overscan=1
-dtparam=audio=on
-
-# Boot from extlinux
-enable_uart=1
-
-[pi4]
-max_framebuffers=2
-arm_boost=1
-
-[all]
-EOF
-
-    # Create cmdline.txt
-    echo "root=live:LABEL=ALPINE_BOOT rd.live.dir=/slots/A rd.live.squashimg=system.squashfs ro quiet" > "${boot_mount}/cmdline.txt"
+    # Lock down permissions on private keys
+    chmod 600 "$dest"/*_key 2>/dev/null || true
+    chmod 644 "$dest"/*_key.pub 2>/dev/null || true
 }
+
 
 # =============================================================================
 # Data Partition Setup (Overlay)
@@ -782,9 +719,12 @@ run_ab_install() {
     mount "$boot_dev" "$boot_mnt"
 
     log_step "Installing boot files..."
-    # Copy kernel, initramfs, dtbs, firmware from build
-    cp /tmp/boot-files/* "$boot_mnt/" 2>/dev/null || true
+    # Shared boot files: firmware, DTBs, overlays (identical for both slots)
+    cp /tmp/boot-files/*.elf /tmp/boot-files/*.dat /tmp/boot-files/*.bin "$boot_mnt/" 2>/dev/null || true
+    cp /tmp/boot-files/*.dtb "$boot_mnt/" 2>/dev/null || true
     cp -r /tmp/boot-files/overlays "$boot_mnt/" 2>/dev/null || true
+    # Per-slot kernel: slot A gets vmlinuz-A / initramfs-A
+    place_slot_kernel "$boot_mnt" "A" "/tmp/boot-files/vmlinuz" "/tmp/boot-files/initramfs"
 
     # Step 5: Configure bootloader
     install_boot_config "$boot_mnt" "$disk"
@@ -812,14 +752,20 @@ run_ab_install() {
     rm -f "$squashfs"
     rm -rf /tmp/boot-files
 
-    # Create slot metadata on boot partition
+    # Create slot metadata on boot partition.
+    # current_slot: single-line slot letter (A/B), read by upgrade.sh.
+    # slots.meta:   KEY=VALUE per-slot metadata (version/date/verified/boot count).
     mount "$boot_dev" "$boot_mnt"
-    cat > "${boot_mnt}/current_slot" << EOF
-CURRENT_SLOT=A
+    echo "A" > "${boot_mnt}/current_slot"
+    cat > "${boot_mnt}/slots.meta" << EOF
 SLOT_A_VERSION=${ALPINE_VERSION}
 SLOT_A_DATE=$(date -Iseconds)
+SLOT_A_VERIFIED=true
+SLOT_A_BOOT_COUNT=0
 SLOT_B_VERSION=
 SLOT_B_DATE=
+SLOT_B_VERIFIED=false
+SLOT_B_BOOT_COUNT=0
 EOF
     umount "$boot_mnt"
 
@@ -830,60 +776,91 @@ EOF
     log_info "==================================="
 }
 
+# =============================================================================
+# Slot / Boot helpers (shared by install.sh and upgrade.sh)
+# =============================================================================
+
+# Map a slot letter to its GPT partition number (A=2, B=3)
+slot_to_partnum() {
+    case "$1" in
+        A) echo 2 ;;
+        B) echo 3 ;;
+        *) die "Invalid slot: $1" ;;
+    esac
+}
+
+# Kernel cmdline shared by both slots (root= is appended per-slot)
+SLOT_KERNEL_OPTS="rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs console=tty1 quiet"
+
+# Place a slot's kernel + initramfs on the boot partition as vmlinuz-<slot>/initramfs-<slot>
+place_slot_kernel() {
+    local boot_mnt="$1" slot="$2" src_vmlinuz="$3" src_initramfs="$4"
+    cp "$src_vmlinuz"   "${boot_mnt}/vmlinuz-${slot}"
+    cp "$src_initramfs" "${boot_mnt}/initramfs-${slot}"
+}
+
 # Install boot configuration (config.txt, cmdline.txt for RPi, extlinux for others)
+# Configures the boot partition to boot the given slot (default A).
 install_boot_config() {
     local boot_mnt="$1"
     local disk="$2"
+    local slot="${3:-A}"
 
-    local slota_dev slotb_dev
-    slota_dev=$(get_part_dev "$disk" 2)
-    slotb_dev=$(get_part_dev "$disk" 3)
+    local slot_dev partnum
+    partnum=$(slot_to_partnum "$slot")
+    slot_dev=$(get_part_dev "$disk" "$partnum")
 
     if [ "$DETECTED_PLATFORM" = "rpi" ]; then
-        log_info "Configuring Raspberry Pi boot..."
+        log_info "Configuring Raspberry Pi boot (slot $slot)..."
 
-        cat > "${boot_mnt}/config.txt" << 'EOF'
+        # NOTE: arm_64bit=1 is REQUIRED — the linux-rpi4 kernel is a 64-bit
+        # ARM64 Image; without this the firmware loads a multicolour screen
+        # and never starts the kernel.
+        cat > "${boot_mnt}/config.txt" << EOF
 # Alpine Anywhere - Raspberry Pi
+arm_64bit=1
 disable_overscan=1
 arm_boost=1
 enable_uart=1
 
 [pi4]
-kernel=vmlinuz
-initramfs initramfs followkernel
+kernel=vmlinuz-${slot}
+initramfs initramfs-${slot} followkernel
 max_framebuffers=2
 
 [pi5]
-kernel=vmlinuz
-initramfs initramfs followkernel
+kernel=vmlinuz-${slot}
+initramfs initramfs-${slot} followkernel
 
 [all]
 EOF
 
-        # cmdline.txt points to slot A
-        echo "root=${slota_dev} rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs console=tty1 quiet" \
-            > "${boot_mnt}/cmdline.txt"
+        echo "root=${slot_dev} ${SLOT_KERNEL_OPTS}" > "${boot_mnt}/cmdline.txt"
 
-        log_info "Boot config: root=${slota_dev} (squashfs + tmpfs overlay)"
+        log_info "Boot config: slot $slot, kernel vmlinuz-${slot}, root=${slot_dev}"
     else
-        # x86_64 / generic: use extlinux or GRUB
+        # x86_64 / generic: extlinux with per-slot kernels
+        local slota_dev slotb_dev
+        slota_dev=$(get_part_dev "$disk" 2)
+        slotb_dev=$(get_part_dev "$disk" 3)
         mkdir -p "${boot_mnt}/extlinux"
         cat > "${boot_mnt}/extlinux/extlinux.conf" << EOF
-DEFAULT alpine-a
+DEFAULT alpine-${slot}
 TIMEOUT 30
 PROMPT 1
 
-LABEL alpine-a
+LABEL alpine-A
     MENU LABEL Alpine Linux (Slot A)
-    LINUX /vmlinuz
-    INITRD /initramfs
-    APPEND root=${slota_dev} rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs quiet
+    LINUX /vmlinuz-A
+    INITRD /initramfs-A
+    APPEND root=${slota_dev} ${SLOT_KERNEL_OPTS}
 
-LABEL alpine-b
+LABEL alpine-B
     MENU LABEL Alpine Linux (Slot B)
-    LINUX /vmlinuz
-    INITRD /initramfs
-    APPEND root=${slotb_dev} rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs quiet
+    LINUX /vmlinuz-B
+    INITRD /initramfs-B
+    APPEND root=${slotb_dev} ${SLOT_KERNEL_OPTS}
 EOF
+        log_info "Boot config: extlinux default slot $slot"
     fi
 }

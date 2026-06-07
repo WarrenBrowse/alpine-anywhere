@@ -76,4 +76,66 @@ Describe 'install.sh'
             The value "$(type -t detect_disk_layout)" should equal "function"
         End
     End
+
+    Describe 'slot helpers'
+        It 'slot_to_partnum maps A->2'
+            When call slot_to_partnum A
+            The output should equal 2
+        End
+        It 'slot_to_partnum maps B->3'
+            When call slot_to_partnum B
+            The output should equal 3
+        End
+        Context 'place_slot_kernel'
+            setup() {
+                BD=$(mktemp -d)
+                printf 'KERNEL'  > "$BD/vmlinuz"
+                printf 'INITRD'  > "$BD/initramfs"
+            }
+            cleanup() { rm -rf "$BD"; }
+            Before 'setup'
+            After 'cleanup'
+
+            It 'writes per-slot kernel + initramfs'
+                When call place_slot_kernel "$BD" A "$BD/vmlinuz" "$BD/initramfs"
+                The path "$BD/vmlinuz-A" should be exist
+                The path "$BD/initramfs-A" should be exist
+            End
+        End
+    End
+
+    Describe 'run_custom_script()'
+        It 'is a no-op when CUSTOM_SCRIPT is unset'
+            CUSTOM_SCRIPT=""
+            When call run_custom_script /tmp
+            The status should be success
+        End
+        It 'fails when CUSTOM_SCRIPT points to a missing file'
+            CUSTOM_SCRIPT="/nonexistent/aa-custom.sh"
+            When run run_custom_script /tmp
+            The status should be failure
+            The stderr should include "not found"
+        End
+    End
+
+    Describe 'persist_host_keys()'
+        setup() {
+            HARDENED_MODE=false
+            KEYSRC=$(mktemp -d)
+            ROOT=$(mktemp -d)
+            printf 'PRIV' > "$KEYSRC/ssh_host_ed25519_key"
+            printf 'PUB'  > "$KEYSRC/ssh_host_ed25519_key.pub"
+        }
+        cleanup() { rm -rf "$KEYSRC" "$ROOT"; }
+        Before 'setup'
+            After 'cleanup'
+
+        It 'bakes control-host keys into the image when --ssh-host-keys is given'
+            SSH_HOST_KEY_DIR="$KEYSRC"
+            When call persist_host_keys "$ROOT"
+            The path "$ROOT/etc/ssh/ssh_host_ed25519_key" should be exist
+            The path "$ROOT/etc/ssh/ssh_host_ed25519_key.pub" should be exist
+            The stderr should include "control-host"
+        End
+    End
 End

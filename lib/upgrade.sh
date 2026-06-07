@@ -1,220 +1,224 @@
 #!/bin/sh
 # upgrade.sh - A/B upgrade management for alpine-anywhere
 #
-# Handles atomic upgrades with automatic rollback support
+# Atomic upgrades for the raw-partition squashfs A/B layout:
+#   sda1  FAT boot   - config.txt, cmdline.txt, vmlinuz-A/B, initramfs-A/B,
+#                      current_slot, slots.meta, firmware, dtbs, overlays
+#   sda2  slot A     - raw squashfs root image
+#   sda3  slot B     - raw squashfs root image
+#   sda4  data       - persistent overlay (phase 3)
+#
+# Upgrade flow: build new image -> write to the INACTIVE slot -> point the
+# bootloader at it -> reboot. The previous slot is preserved for rollback.
+#
+# Depends on functions from install.sh (sourced before this file):
+#   slot_to_partnum, get_part_dev, place_slot_kernel, install_boot_config,
+#   generate_system_squashfs, DETECTED_PLATFORM
 
 # =============================================================================
 # Constants
 # =============================================================================
 
-BOOT_MOUNT="/boot"
+BOOT_MNT="/mnt/aa-boot"
 MAX_BOOT_ATTEMPTS=3
+
+# =============================================================================
+# Disk / boot partition discovery
+# =============================================================================
+
+# Strip the partition suffix from a device path:
+#   /dev/sda3 -> /dev/sda   /dev/nvme0n1p3 -> /dev/nvme0n1   /dev/mmcblk0p3 -> /dev/mmcblk0
+strip_partition() {
+    case "$1" in
+        *p[0-9])      echo "${1%p[0-9]}" ;;
+        *p[0-9][0-9]) echo "${1%p[0-9][0-9]}" ;;
+        *[0-9])       echo "$1" | sed 's/[0-9]*$//' ;;
+        *)            echo "$1" ;;
+    esac
+}
+
+# Device the running system was booted from (root=... in the kernel cmdline)
+get_root_device() {
+    sed -n 's/.*root=\([^ ]*\).*/\1/p' /proc/cmdline
+}
+
+# Whole disk that holds the install (derived from the running root device)
+get_boot_disk() {
+    local rootdev
+    rootdev=$(get_root_device)
+    [ -n "$rootdev" ] || rootdev=$(findmnt -no SOURCE /media/root-ro 2>/dev/null)
+    [ -n "$rootdev" ] || die "Cannot determine root device from cmdline"
+    strip_partition "$rootdev"
+}
+
+# Mount the FAT boot partition (partition 1) at $BOOT_MNT
+mount_boot() {
+    local disk part1
+    disk=$(get_boot_disk)
+    part1=$(get_part_dev "$disk" 1)
+    mkdir -p "$BOOT_MNT"
+    if ! mountpoint -q "$BOOT_MNT" 2>/dev/null; then
+        mount "$part1" "$BOOT_MNT" || die "Cannot mount boot partition $part1"
+    fi
+}
+
+umount_boot() {
+    sync
+    mountpoint -q "$BOOT_MNT" 2>/dev/null && umount "$BOOT_MNT" || true
+}
 
 # =============================================================================
 # Slot Management
 # =============================================================================
 
-# Get current boot slot
+# Currently active slot. The running root device is authoritative; the
+# current_slot marker file is only a fallback (e.g. when run off-device).
 get_current_slot() {
-    if [ -f "${BOOT_MOUNT}/current_slot" ]; then
-        cat "${BOOT_MOUNT}/current_slot"
-    else
-        echo "A"
+    local disk root
+    disk=$(get_boot_disk 2>/dev/null) || disk=""
+    root=$(get_root_device)
+
+    if [ -n "$disk" ] && [ -n "$root" ]; then
+        if [ "$root" = "$(get_part_dev "$disk" 2)" ]; then echo A; return; fi
+        if [ "$root" = "$(get_part_dev "$disk" 3)" ]; then echo B; return; fi
     fi
+    cat "${BOOT_MNT}/current_slot" 2>/dev/null || echo A
 }
 
-# Get inactive slot
 get_inactive_slot() {
-    current=$(get_current_slot)
-    if [ "$current" = "A" ]; then
-        echo "B"
-    else
-        echo "A"
-    fi
+    if [ "$(get_current_slot)" = "A" ]; then echo B; else echo A; fi
 }
 
-# Get slot directory
-get_slot_dir() {
-    slot="$1"
-    echo "${BOOT_MOUNT}/slots/${slot}"
-}
+# =============================================================================
+# Slot metadata (KEY=VALUE in $BOOT_MNT/slots.meta, keys SLOT_<slot>_<NAME>)
+# =============================================================================
 
-# Read slot metadata
 get_slot_meta() {
-    slot="$1"
-    key="$2"
-    meta_file="$(get_slot_dir "$slot")/meta.conf"
-
-    if [ -f "$meta_file" ]; then
-        grep "^${key}=" "$meta_file" | cut -d= -f2
-    fi
+    local slot="$1" key="$2"
+    grep "^SLOT_${slot}_${key}=" "${BOOT_MNT}/slots.meta" 2>/dev/null | cut -d= -f2-
 }
 
-# Update slot metadata
 set_slot_meta() {
-    slot="$1"
-    key="$2"
-    value="$3"
-    meta_file="$(get_slot_dir "$slot")/meta.conf"
-
-    if grep -q "^${key}=" "$meta_file" 2>/dev/null; then
-        sed -i "s|^${key}=.*|${key}=${value}|" "$meta_file"
-    else
-        echo "${key}=${value}" >> "$meta_file"
+    local slot="$1" key="$2" value="$3"
+    local meta="${BOOT_MNT}/slots.meta"
+    local full="SLOT_${slot}_${key}"
+    touch "$meta"
+    # Rewrite via temp file (portable; avoids GNU/BSD `sed -i` differences)
+    if grep -q "^${full}=" "$meta" 2>/dev/null; then
+        # `|| true`: grep -v exits 1 when it removes the only line (not an error here)
+        grep -v "^${full}=" "$meta" > "${meta}.tmp" || true
+        mv "${meta}.tmp" "$meta"
     fi
+    echo "${full}=${value}" >> "$meta"
 }
 
 # =============================================================================
 # Upgrade Process
 # =============================================================================
 
-# Download new system image
-download_new_version() {
-    target_slot="$1"
-    version="${2:-$ALPINE_VERSION}"
-
-    log_step "Downloading Alpine $version..."
-
-    slot_dir=$(get_slot_dir "$target_slot")
-
-    # Download minirootfs
-    minirootfs_url="${ALPINE_MIRROR}/v${version}/releases/${DETECTED_ARCH}/alpine-minirootfs-${version}.0-${DETECTED_ARCH}.tar.gz"
-
-    log_info "Downloading minirootfs..."
-    curl -fSL --progress-bar -o "${INSTALL_CACHE_DIR}/minirootfs-${version}.tar.gz" "$minirootfs_url"
-
-    # Store version info
-    set_slot_meta "$target_slot" "VERSION" "$version"
-    set_slot_meta "$target_slot" "DOWNLOADED" "$(date -Iseconds)"
-}
-
-# Install new version to inactive slot
+# Build a fresh system image and write it to the given (inactive) slot,
+# including that slot's kernel + initramfs on the boot partition.
 install_to_slot() {
-    target_slot="$1"
-    version="${2:-$ALPINE_VERSION}"
+    local target_slot="$1"
+    local version="${2:-$ALPINE_VERSION}"
 
-    log_step "Installing to slot $target_slot..."
+    local disk partnum slot_dev
+    disk=$(get_boot_disk)
+    partnum=$(slot_to_partnum "$target_slot")
+    slot_dev=$(get_part_dev "$disk" "$partnum")
 
-    slot_dir=$(get_slot_dir "$target_slot")
+    log_step "Building Alpine $version for slot $target_slot..."
 
-    # Clear old files
-    rm -f "${slot_dir}/system.squashfs"
-    rm -f "${slot_dir}/vmlinuz"
-    rm -f "${slot_dir}/initramfs"
+    # generate_system_squashfs writes the image and stashes the matching
+    # kernel/initramfs under /tmp/boot-files (applies all customization hooks).
+    local squashfs="/tmp/system-${target_slot}.squashfs"
+    generate_system_squashfs "$squashfs"
 
-    # Generate new system image
-    # Use the install.sh function
-    INSTALL_CACHE_DIR="${INSTALL_CACHE_DIR:-/var/cache/alpine-anywhere}"
-    mkdir -p "$INSTALL_CACHE_DIR"
+    log_step "Writing image to slot $target_slot ($slot_dev)..."
+    dd if="$squashfs" of="$slot_dev" bs=1M conv=fsync 2>/dev/null
+    sync
+    log_info "Slot $target_slot written: $(du -h "$squashfs" | cut -f1)"
 
-    # Download if not cached
-    if [ ! -f "${INSTALL_CACHE_DIR}/minirootfs-${version}.tar.gz" ]; then
-        download_new_version "$target_slot" "$version"
-    fi
+    # Per-slot kernel on the boot partition (rollback-safe: kernel + userspace
+    # stay paired even if the kernel version differs between slots).
+    place_slot_kernel "$BOOT_MNT" "$target_slot" \
+        "/tmp/boot-files/vmlinuz" "/tmp/boot-files/initramfs"
 
-    # Link for generation
-    ln -sf "minirootfs-${version}.tar.gz" "${INSTALL_CACHE_DIR}/minirootfs.tar.gz"
-
-    # Generate squashfs
-    generate_system_squashfs "$slot_dir" "$target_slot"
-
-    # Copy kernel
-    copy_kernel_files "$slot_dir"
-
-    # Update metadata
+    set_slot_meta "$target_slot" "VERSION" "$version"
     set_slot_meta "$target_slot" "INSTALLED" "$(date -Iseconds)"
     set_slot_meta "$target_slot" "BOOT_COUNT" "0"
     set_slot_meta "$target_slot" "VERIFIED" "false"
 
-    log_info "Slot $target_slot updated to version $version"
+    rm -f "$squashfs"
+    rm -rf /tmp/boot-files
+    log_info "Slot $target_slot ready (Alpine $version)"
 }
 
-# Switch to new slot
+# Point the bootloader at a slot (rewrites config.txt/cmdline.txt or extlinux)
 switch_slot() {
-    new_slot="$1"
+    local new_slot="$1"
+    local disk
+    disk=$(get_boot_disk)
 
-    log_step "Switching to slot $new_slot..."
-
-    # Update current slot marker
-    echo "$new_slot" > "${BOOT_MOUNT}/current_slot"
-
-    # Update bootloader
-    update_bootloader_slot "$new_slot"
-
-    log_info "Boot slot switched to $new_slot"
-    log_warn "Reboot to activate new system"
-}
-
-# Update bootloader to point to new slot
-update_bootloader_slot() {
-    slot="$1"
-
-    # Update extlinux if present
-    if [ -f "${BOOT_MOUNT}/extlinux/extlinux.conf" ]; then
-        sed -i "s|/slots/[AB]/|/slots/${slot}/|g" "${BOOT_MOUNT}/extlinux/extlinux.conf"
-    fi
-
-    # Update cmdline.txt for RPi
-    if [ -f "${BOOT_MOUNT}/cmdline.txt" ]; then
-        sed -i "s|/slots/[AB]/|/slots/${slot}/|g" "${BOOT_MOUNT}/cmdline.txt"
-    fi
-
-    # Update GRUB if present
-    if [ -f "${BOOT_MOUNT}/bootloader/grub.cfg" ]; then
-        echo "set slot=${slot}" > "${BOOT_MOUNT}/current_slot.cfg"
-    fi
+    log_step "Switching boot to slot $new_slot..."
+    install_boot_config "$BOOT_MNT" "$disk" "$new_slot"
+    echo "$new_slot" > "${BOOT_MNT}/current_slot"
+    sync
+    log_info "Boot slot switched to $new_slot (reboot to activate)"
 }
 
 # =============================================================================
 # Rollback Support
 # =============================================================================
 
-# Mark current slot as verified (called after successful boot)
+# Mark the running slot as known-good (call after a successful boot)
 verify_current_slot() {
+    mount_boot
+    local current
     current=$(get_current_slot)
-
     set_slot_meta "$current" "VERIFIED" "true"
-    log_info "Slot $current verified as working"
+    set_slot_meta "$current" "BOOT_COUNT" "0"
+    umount_boot
+    log_info "Slot $current marked verified"
 }
 
-# Increment boot counter (called at boot)
+# Increment the boot counter for the running slot; roll back if it keeps
+# failing without being verified. Intended to run from an early boot service.
 increment_boot_counter() {
+    mount_boot
+    local current count verified
     current=$(get_current_slot)
-
     count=$(get_slot_meta "$current" "BOOT_COUNT")
-    count=$((count + 1))
-
+    count=$((${count:-0} + 1))
     set_slot_meta "$current" "BOOT_COUNT" "$count"
+    verified=$(get_slot_meta "$current" "VERIFIED")
 
-    # Check if we've exceeded max attempts
-    if [ "$count" -gt "$MAX_BOOT_ATTEMPTS" ]; then
-        verified=$(get_slot_meta "$current" "VERIFIED")
-        if [ "$verified" != "true" ]; then
-            log_warn "Boot count exceeded, triggering rollback..."
-            rollback_slot
-        fi
+    if [ "$count" -gt "$MAX_BOOT_ATTEMPTS" ] && [ "$verified" != "true" ]; then
+        log_warn "Slot $current failed $count boots without verify; rolling back"
+        rollback_slot
+        return
     fi
+    umount_boot
 }
 
-# Rollback to previous slot
+# Switch back to the other slot and reboot
 rollback_slot() {
+    mount_boot
+    local current previous prev_ver
     current=$(get_current_slot)
-
     previous=$(get_inactive_slot)
 
-    log_warn "Rolling back from $current to $previous..."
-
-    # Check if previous slot is valid
-    prev_version=$(get_slot_meta "$previous" "VERSION")
-    if [ -z "$prev_version" ]; then
-        log_error "Cannot rollback: previous slot has no valid version"
+    prev_ver=$(get_slot_meta "$previous" "VERSION")
+    if [ -z "$prev_ver" ]; then
+        umount_boot
+        log_error "Cannot roll back: slot $previous has no installed image"
         return 1
     fi
 
-    # Switch
+    log_warn "Rolling back: $current -> $previous"
     switch_slot "$previous"
-
-    log_info "Rollback complete. Rebooting..."
+    umount_boot
+    log_info "Rolled back to slot $previous. Rebooting..."
     reboot
 }
 
@@ -222,63 +226,46 @@ rollback_slot() {
 # Upgrade Command
 # =============================================================================
 
-# Run upgrade process
 run_upgrade() {
-    version="${1:-$ALPINE_VERSION}"
+    local version="${1:-$ALPINE_VERSION}"
+    local current target
 
-    log_step "Starting upgrade to Alpine $version..."
-
+    mount_boot
     current=$(get_current_slot)
-
     target=$(get_inactive_slot)
 
-    log_info "Current slot: $current"
-    log_info "Target slot: $target"
+    log_step "Upgrading to Alpine $version"
+    log_info "Active slot:  $current ($(get_slot_meta "$current" VERSION || echo unknown))"
+    log_info "Target slot:  $target"
 
-    # Show current version
-    current_version=$(get_slot_meta "$current" "VERSION")
-    log_info "Current version: ${current_version:-unknown}"
-    log_info "Target version: $version"
+    if [ "$DRY_RUN" = "true" ]; then
+        log_info "[DRY-RUN] Would build $version into slot $target and switch to it"
+        umount_boot
+        return 0
+    fi
 
-    # Confirm
-    if [ "$DRY_RUN" != "true" ] && [ "$FORCE" != "true" ]; then
+    if [ "$FORCE" != "true" ]; then
         echo ""
-        echo "This will:"
-        echo "  1. Download Alpine $version"
-        echo "  2. Install to slot $target"
-        echo "  3. Switch boot to slot $target"
-        echo ""
-        echo "Current slot $current will be preserved for rollback."
+        echo "This will build Alpine $version into slot $target and switch boot to it."
+        echo "Slot $current is preserved for rollback."
         echo ""
         confirm_action "Proceed with upgrade?"
     fi
 
-    if [ "$DRY_RUN" = "true" ]; then
-        log_info "[DRY-RUN] Would upgrade to $version in slot $target"
-        return 0
-    fi
-
-    # Install to inactive slot
     install_to_slot "$target" "$version"
-
-    # Switch slot
     switch_slot "$target"
+    umount_boot
 
     echo ""
     echo "=========================================="
     echo "         UPGRADE COMPLETE"
     echo "=========================================="
     echo ""
-    echo "Alpine $version installed to slot $target"
+    echo "Alpine $version installed to slot $target."
+    echo "Reboot to activate:  reboot"
     echo ""
-    echo "To activate:"
-    echo "  sudo reboot"
-    echo ""
-    echo "If the new version fails to boot $MAX_BOOT_ATTEMPTS times,"
-    echo "automatic rollback to slot $current will occur."
-    echo ""
-    echo "After successful boot, run:"
-    echo "  alpine-anywhere verify"
+    echo "After a successful boot, confirm it:  alpine-anywhere verify"
+    echo "If slot $target fails to boot ${MAX_BOOT_ATTEMPTS}x, it auto-rolls back to slot $current."
     echo ""
 }
 
@@ -286,33 +273,31 @@ run_upgrade() {
 # Status Command
 # =============================================================================
 
-# Show current status
 show_status() {
+    mount_boot
+    local current
+    current=$(get_current_slot)
+
     echo "Alpine Anywhere A/B Status"
     echo "=========================="
     echo ""
-
-    current=$(get_current_slot)
-    echo "Current slot: $current"
+    echo "Disk:         $(get_boot_disk)"
+    echo "Active slot:  $current"
     echo ""
 
     for slot in A B; do
-        slot_dir=$(get_slot_dir "$slot")
-
         echo "Slot $slot:"
-        if [ -f "${slot_dir}/meta.conf" ]; then
-            echo "  Version:    $(get_slot_meta "$slot" "VERSION")"
-            echo "  Installed:  $(get_slot_meta "$slot" "INSTALLED")"
-            echo "  Boot count: $(get_slot_meta "$slot" "BOOT_COUNT")"
-            echo "  Verified:   $(get_slot_meta "$slot" "VERIFIED")"
+        local ver
+        ver=$(get_slot_meta "$slot" "VERSION")
+        if [ -n "$ver" ]; then
+            echo "  Version:    $ver"
+            echo "  Installed:  $(get_slot_meta "$slot" INSTALLED)"
+            echo "  Boot count: $(get_slot_meta "$slot" BOOT_COUNT)"
+            echo "  Verified:   $(get_slot_meta "$slot" VERIFIED)"
         else
             echo "  (empty)"
         fi
-
-        if [ -f "${slot_dir}/system.squashfs" ]; then
-            size=$(du -h "${slot_dir}/system.squashfs" | cut -f1)
-            echo "  Image size: $size"
-        fi
         echo ""
     done
+    umount_boot
 }

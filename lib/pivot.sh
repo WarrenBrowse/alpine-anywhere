@@ -226,6 +226,26 @@ EOF
         run_privileged cp "${INSTALL_CACHE_DIR}/"*.apkovl.tar.gz "${aa_dest}/cache/" 2>/dev/null || true
     fi
 
+    # Transfer image-customization inputs (control-host paths -> pivoted paths).
+    # The build runs after pivot, so these files must travel into the pivot env.
+    local pivot_aa="/root/.local/share/alpine-anywhere"
+    local custom_dest="" hostkeys_dest=""
+    if [ -n "$CUSTOM_SCRIPT" ] && [ -f "$CUSTOM_SCRIPT" ]; then
+        run_privileged cp "$CUSTOM_SCRIPT" "${aa_dest}/custom-script.sh"
+        custom_dest="${pivot_aa}/custom-script.sh"
+        log_info "Custom script staged for pivoted build"
+    fi
+    if [ -n "$SSH_HOST_KEY_DIR" ] && [ -d "$SSH_HOST_KEY_DIR" ]; then
+        run_privileged mkdir -p "${aa_dest}/host-keys"
+        run_privileged cp "$SSH_HOST_KEY_DIR"/* "${aa_dest}/host-keys/" 2>/dev/null || true
+        hostkeys_dest="${pivot_aa}/host-keys"
+        log_info "SSH host keys staged for pivoted build"
+    fi
+    run_privileged tee -a "${PIVOT_DIR}/etc/alpine-anywhere/config.env" > /dev/null << EOF
+CUSTOM_SCRIPT="${custom_dest}"
+SSH_HOST_KEY_DIR="${hostkeys_dest}"
+EOF
+
     # === FAKEINIT (marcan approach) ===
     # This script replaces the real init/systemd binary via bind mount.
     # When systemd re-execs (telinit u), it loads THIS instead of the real binary.

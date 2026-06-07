@@ -226,6 +226,8 @@ run_local_ab_install() {
         [ "$HARDENED_MODE" = "true" ] && sudo_args="$sudo_args --hardened"
         [ -n "$OVERLAY_DEVICE" ] && sudo_args="$sudo_args --overlay=$OVERLAY_DEVICE"
         [ -n "$EXTRA_PACKAGES" ] && sudo_args="$sudo_args --extra-packages=$EXTRA_PACKAGES"
+        [ -n "$CUSTOM_SCRIPT" ] && sudo_args="$sudo_args --custom-script=$CUSTOM_SCRIPT"
+        [ -n "$SSH_HOST_KEY_DIR" ] && sudo_args="$sudo_args --ssh-host-keys=$SSH_HOST_KEY_DIR"
         exec sudo -E sh "$0" $sudo_args
     fi
 
@@ -326,12 +328,12 @@ run_local_upgrade() {
     # Setup directories
     setup_install_dirs "$HOME"
 
-    # Check we're running on an A/B installed system
-    if [ ! -f "/boot/current_slot" ]; then
-        die "This system does not appear to have an A/B installation"
+    # Check we're running on an A/B installed system (immutable squashfs root)
+    if ! mount 2>/dev/null | grep -q '/media/root-ro'; then
+        die "This system does not appear to have an A/B installation (no squashfs root)"
     fi
 
-    # Run upgrade
+    # Run upgrade (mounts the boot partition itself, derived from root=)
     run_upgrade "$ALPINE_VERSION"
 }
 
