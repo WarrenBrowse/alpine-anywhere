@@ -676,9 +676,13 @@ if [ -n "$NETWORK_INTERFACE" ]; then
     fi
 fi
 
-# Optional SSH for live monitoring/rescue
-mkdir -p /run/sshd
-/usr/sbin/sshd 2>/dev/null || true
+# Optional SSH for live monitoring/rescue (dropbear in hardened mode)
+if [ "$HARDENED_MODE" = "true" ]; then
+    /usr/sbin/dropbear -R -p 22 2>/dev/null || true
+else
+    mkdir -p /run/sshd
+    /usr/sbin/sshd 2>/dev/null || true
+fi
 
 echo "[ram-installer] starting A/B install onto disk..."
 INSTALL_CMD="sh /root/.local/share/alpine-anywhere/alpine-anywhere --local --install-continue"

@@ -387,6 +387,12 @@ apply_hardening_to_image() {
 
     log_info "Applying security hardening..."
 
+    # 0. Install hardening runtime dependencies into the image (the configs
+    #    below are useless — or dangerous — without them).
+    log_info "Installing hardening packages (nftables, hardened-malloc)..."
+    chroot "$root" /sbin/apk add --no-cache nftables hardened-malloc \
+        || log_warn "Some hardening packages unavailable"
+
     # 1. Sysctl hardening
     log_info "Configuring sysctl hardening..."
     mkdir -p "${root}/etc/sysctl.d"
@@ -397,9 +403,18 @@ apply_hardening_to_image() {
     mkdir -p "${root}/etc/conf.d"
     generate_dropbear_confd > "${root}/etc/conf.d/dropbear"
 
-    # 3. hardened_malloc
-    log_info "Enabling hardened_malloc..."
-    generate_hardened_malloc_config > "${root}/etc/ld.so.preload"
+    # 3. hardened_malloc — ONLY preload if the library is actually present,
+    #    using its real path. A dangling /etc/ld.so.preload entry can make
+    #    every exec fail (effectively bricking the system).
+    local malloc_lib
+    malloc_lib=$(chroot "$root" sh -c 'ls /usr/lib/libhardened_malloc*.so 2>/dev/null | head -1')
+    if [ -n "$malloc_lib" ]; then
+        log_info "Enabling hardened_malloc (${malloc_lib})..."
+        echo "$malloc_lib" > "${root}/etc/ld.so.preload"
+    else
+        log_warn "hardened-malloc not installed; skipping ld.so.preload"
+        rm -f "${root}/etc/ld.so.preload"
+    fi
 
     # 4. Firewall rules
     log_info "Configuring firewall..."
