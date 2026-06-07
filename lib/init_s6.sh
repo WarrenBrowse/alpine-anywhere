@@ -136,14 +136,46 @@ EOF
     # --- customise the s6-linux-init skel to drive s6-rc -------------------
     local skel="${root}/etc/s6-linux-init/skel"
     mkdir -p "$skel"
+    # rc.init: NOT `set -e` (a failing s6-rc must not abort the whole init).
+    # Logs breadcrumbs to the FAT boot partition (sda1) so a failed s6 boot can
+    # be diagnosed offline, and brings up an emergency network+dropbear so the
+    # box stays reachable even if the s6-rc services fail to come up.
     cat > "${skel}/rc.init" << 'EOF'
-#!/bin/sh -e
+#!/bin/sh
 rl="$1"; shift
-s6-rc-init -c /etc/s6-rc/compiled -l /run/s6-rc /run/service
-exec /run/s6-linux-init/scripts/runlevel "$rl"
+exec >/dev/console 2>&1
+
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+
+bootdev=$(sed -n 's|.*root=/dev/\([a-z0-9]*\)[0-9].*|/dev/\11|p' /proc/cmdline)
+[ -n "$bootdev" ] || bootdev=/dev/sda1
+mkdir -p /aa-log
+mount "$bootdev" /aa-log 2>/dev/null
+slog() { echo "[s6-rc.init] $*"; echo "[$(cat /proc/uptime 2>/dev/null|cut -d. -f1)] $*" >> /aa-log/s6-boot.log 2>/dev/null; sync 2>/dev/null; }
+
+slog "rc.init start rl=$rl"
+if s6-rc-init -c /etc/s6-rc/compiled -l /run/s6-rc /run/service; then
+    slog "s6-rc-init OK"
+else
+    slog "s6-rc-init FAILED rc=$?"
+fi
+if s6-rc -v2 -l /run/s6-rc -up change "$rl"; then
+    slog "s6-rc up '$rl' OK"
+else
+    slog "s6-rc up '$rl' FAILED rc=$?"
+fi
+
+# Emergency reachability (DEBUG): ensure SSH works even if services failed.
+( /usr/local/libexec/aa-s6/network-up 2>/dev/null
+  if [ -x /usr/sbin/dropbear ]; then /usr/sbin/dropbear -R -p 22 2>/dev/null
+  else mkdir -p /run/sshd; /usr/sbin/sshd 2>/dev/null; fi ) &
+
+slog "rc.init done"
+umount /aa-log 2>/dev/null
 EOF
     cat > "${skel}/runlevel" << 'EOF'
-#!/bin/sh -e
+#!/bin/sh
 exec s6-rc -v2 -l /run/s6-rc -up change "$1"
 EOF
     chmod +x "${skel}/rc.init" "${skel}/runlevel"
