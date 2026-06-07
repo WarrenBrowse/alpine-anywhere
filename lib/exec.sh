@@ -142,7 +142,7 @@ run_on_remote() {
         remote_aa="${INSTALL_BASE_DIR}/alpine-anywhere"
         stage_dir="$INSTALL_BASE_DIR"
     else
-        remote_aa="alpine-anywhere"   # baked at /usr/local/sbin (on PATH)
+        remote_aa="aa"   # baked management CLI at /usr/local/sbin/aa (on PATH)
         stage_dir="/tmp"
     fi
 

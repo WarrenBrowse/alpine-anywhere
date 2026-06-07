@@ -5,34 +5,6 @@ Describe 'hardening.sh'
     Include lib/common.sh
     Include lib/hardening.sh
 
-    Describe 'HARDENED_PACKAGES array'
-        It 'contains linux-hardened'
-            The value "${HARDENED_PACKAGES[*]}" should include 'linux-hardened'
-        End
-
-        It 'contains dropbear'
-            The value "${HARDENED_PACKAGES[*]}" should include 'dropbear'
-        End
-
-        It 'contains hardened-malloc'
-            The value "${HARDENED_PACKAGES[*]}" should include 'hardened-malloc'
-        End
-
-        It 'contains nftables'
-            The value "${HARDENED_PACKAGES[*]}" should include 'nftables'
-        End
-    End
-
-    Describe 'HARDENED_EXCLUDE_PACKAGES array'
-        It 'excludes openssh-server'
-            The value "${HARDENED_EXCLUDE_PACKAGES[*]}" should include 'openssh-server'
-        End
-
-        It 'excludes linux-lts'
-            The value "${HARDENED_EXCLUDE_PACKAGES[*]}" should include 'linux-lts'
-        End
-    End
-
     Describe 'generate_hardened_cmdline()'
         It 'includes lockdown=integrity'
             When call generate_hardened_cmdline
@@ -119,13 +91,6 @@ Describe 'hardening.sh'
         End
     End
 
-    Describe 'generate_hardened_malloc_config()'
-        It 'configures libhardened_malloc preload'
-            When call generate_hardened_malloc_config
-            The output should include '/usr/lib/libhardened_malloc.so'
-        End
-    End
-
     Describe 'generate_nftables_config()'
         It 'sets default input policy to drop'
             When call generate_nftables_config
@@ -177,21 +142,6 @@ Describe 'hardening.sh'
         It 'checks open ports'
             When call generate_security_audit
             The output should include 'ss -tlnp'
-        End
-    End
-
-    Describe 'get_hardened_packages()'
-        It 'returns space-separated package list'
-            When call get_hardened_packages
-            The output should include 'linux-hardened'
-            The output should include 'dropbear'
-        End
-    End
-
-    Describe 'get_hardened_kernel()'
-        It 'returns linux-hardened'
-            When call get_hardened_kernel
-            The output should equal 'linux-hardened'
         End
     End
 End

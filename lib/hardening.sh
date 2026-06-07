@@ -15,12 +15,6 @@
 
 HARDENED_MODE="${HARDENED_MODE:-false}"
 
-# Packages for hardened mode (space-separated string)
-HARDENED_PACKAGES="linux-hardened dropbear dropbear-openrc hardened-malloc iptables ip6tables nftables chrony ca-certificates"
-
-# Packages to explicitly NOT install in hardened mode (space-separated string)
-HARDENED_EXCLUDE_PACKAGES="openssh-server openssh-client sudo linux-lts linux-virt"
-
 # =============================================================================
 # Kernel Hardening (linux-hardened features)
 # =============================================================================
@@ -208,40 +202,6 @@ EOF
 # Dropbear Configuration
 # =============================================================================
 
-generate_dropbear_config() {
-    # Dropbear uses command-line options, not config file
-    # We create a wrapper script
-    cat << 'EOF'
-#!/bin/sh
-# Dropbear startup configuration
-
-DROPBEAR_OPTS=""
-
-# Disable password authentication (key only)
-DROPBEAR_OPTS="$DROPBEAR_OPTS -s"
-
-# Disable root password login (key only)
-DROPBEAR_OPTS="$DROPBEAR_OPTS -g"
-
-# Use specific port
-DROPBEAR_OPTS="$DROPBEAR_OPTS -p 22"
-
-# Disable local port forwarding
-# DROPBEAR_OPTS="$DROPBEAR_OPTS -j"
-
-# Disable remote port forwarding
-# DROPBEAR_OPTS="$DROPBEAR_OPTS -k"
-
-# Idle timeout (5 minutes)
-DROPBEAR_OPTS="$DROPBEAR_OPTS -I 300"
-
-# Max auth attempts
-DROPBEAR_OPTS="$DROPBEAR_OPTS -T 3"
-
-exec /usr/sbin/dropbear $DROPBEAR_OPTS -F
-EOF
-}
-
 # Generate dropbear OpenRC config
 generate_dropbear_confd() {
     cat << 'EOF'
@@ -258,30 +218,6 @@ DROPBEAR_IDLE_TIMEOUT="300"
 
 # Max auth attempts
 DROPBEAR_MAX_AUTH_ATTEMPTS="3"
-EOF
-}
-
-# =============================================================================
-# hardened_malloc Configuration
-# =============================================================================
-
-generate_hardened_malloc_config() {
-    cat << 'EOF'
-# hardened_malloc configuration
-# Preload hardened_malloc for all processes
-
-# Enable globally via /etc/ld.so.preload
-/usr/lib/libhardened_malloc.so
-EOF
-}
-
-# Alternative: per-service configuration
-generate_malloc_wrapper() {
-    cat << 'EOF'
-#!/bin/sh
-# Wrapper to run command with hardened_malloc
-export LD_PRELOAD=/usr/lib/libhardened_malloc.so
-exec "$@"
 EOF
 }
 
@@ -457,15 +393,4 @@ apply_hardening_to_image() {
     log_info "Hardening applied"
 }
 
-# =============================================================================
-# Get Hardened Packages List
-# =============================================================================
-
-get_hardened_packages() {
-    echo "$HARDENED_PACKAGES"
-}
-
-get_hardened_kernel() {
-    echo "linux-hardened"
-}
 

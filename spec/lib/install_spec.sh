@@ -195,11 +195,12 @@ Describe 'install.sh'
         Before 'setup'
         After 'cleanup'
 
-        It 'installs a PATH wrapper that execs the libdir CLI'
+        It 'installs the aa command (PATH wrapper execs the libdir CLI)'
             When call bake_management_tools "$ROOT"
-            The path "$ROOT/usr/local/sbin/alpine-anywhere" should be exist
-            The contents of file "$ROOT/usr/local/sbin/alpine-anywhere" should include "/usr/local/lib/alpine-anywhere/alpine-anywhere"
-            The path "$ROOT/usr/local/lib/alpine-anywhere/lib/upgrade.sh" should be exist
+            The path "$ROOT/usr/local/sbin/aa" should be exist
+            The contents of file "$ROOT/usr/local/sbin/aa" should include "/usr/local/lib/aa/aa"
+            The path "$ROOT/usr/local/lib/aa/lib/upgrade.sh" should be exist
+            The path "$ROOT/usr/sbin/aa" should be symlink
             The stderr should be defined
         End
 
@@ -218,11 +219,12 @@ Describe 'install.sh'
         Before 'setup'
         After 'cleanup'
 
-        It 'injects the boot-guard and preserves the original init as init.alpine'
+        It 'adds /init.aa, keeps the original /init, and stages the aa CLI'
             When call wrap_boot_initramfs "$WORKD/initramfs"
             The stderr should be defined
-            The value "$(gzip -dc "$WORKD/initramfs" | cpio -t 2>/dev/null)" should include "init.alpine"
-            The value "$(gzip -dc "$WORKD/initramfs" | cpio -t 2>/dev/null)" should include "alpine-anywhere"
+            The value "$(gzip -dc "$WORKD/initramfs" | cpio -t 2>/dev/null)" should include "init.aa"
+            The value "$(gzip -dc "$WORKD/initramfs" | cpio -t 2>/dev/null)" should include "./init"
+            The value "$(gzip -dc "$WORKD/initramfs" | cpio -t 2>/dev/null)" should include "usr/local/sbin/aa"
         End
     End
 

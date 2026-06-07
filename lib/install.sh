@@ -542,80 +542,67 @@ run_custom_script() {
     log_info "Custom build hook completed"
 }
 
-# Bake the alpine-anywhere CLI + A/B services into the image so the installed
-# system can run `alpine-anywhere status|verify|rollback` and auto-rollback at boot.
+# Locate the alpine-anywhere CLI source base dir (control-host deploy or repo).
+_aa_cli_src() {
+    if [ -f "${INSTALL_BASE_DIR}/alpine-anywhere" ]; then echo "${INSTALL_BASE_DIR}"
+    elif [ -f "${SCRIPT_DIR}/alpine-anywhere" ]; then echo "${SCRIPT_DIR}"
+    else return 1; fi
+}
+
+# Install the management CLI into $root as the `aa` command:
+#   /usr/local/lib/aa/{aa,lib/*.sh} + /usr/local/sbin/aa wrapper.
+# exec wrapper (not symlink): the CLI derives its libdir from $0.
+install_aa_cli() {
+    local root="$1" srcbase dest
+    srcbase=$(_aa_cli_src) || return 1
+    dest="${root}/usr/local/lib/aa"
+    mkdir -p "${dest}/lib" "${root}/usr/local/sbin"
+    cp "${srcbase}/alpine-anywhere" "${dest}/aa"
+    cp "${srcbase}"/lib/*.sh "${dest}/lib/"
+    chmod +x "${dest}/aa"
+    cat > "${root}/usr/local/sbin/aa" << 'EOF'
+#!/bin/sh
+exec /usr/local/lib/aa/aa "$@"
+EOF
+    chmod +x "${root}/usr/local/sbin/aa"
+}
+
+# Bake the `aa` management CLI + A/B services into the image so the installed
+# system can run `aa status|verify|rollback` and auto-rollback at boot.
 bake_management_tools() {
     local root="$1"
-    local src_cli src_lib
-    local dest="${root}/usr/local/lib/alpine-anywhere"
-
-    if [ -f "${INSTALL_BASE_DIR}/alpine-anywhere" ]; then
-        src_cli="${INSTALL_BASE_DIR}/alpine-anywhere"; src_lib="${INSTALL_BASE_DIR}/lib"
-    elif [ -f "${SCRIPT_DIR}/alpine-anywhere" ]; then
-        src_cli="${SCRIPT_DIR}/alpine-anywhere"; src_lib="${SCRIPT_DIR}/lib"
-    else
-        log_warn "alpine-anywhere CLI source not found; skipping management tools"
+    if ! install_aa_cli "$root"; then
+        log_warn "aa CLI source not found; skipping management tools"
         return 0
     fi
-
-    log_info "Baking alpine-anywhere management CLI into image..."
-    mkdir -p "${dest}/lib" "${root}/usr/local/sbin"
-    cp "$src_cli" "${dest}/alpine-anywhere"
-    cp "$src_lib"/*.sh "${dest}/lib/"
-    chmod +x "${dest}/alpine-anywhere"
-
-    # PATH wrapper. exec (not symlink): the CLI derives its lib dir from $0,
-    # which a symlink would resolve to the wrong directory.
-    cat > "${root}/usr/local/sbin/alpine-anywhere" << 'EOF'
-#!/bin/sh
-exec /usr/local/lib/alpine-anywhere/alpine-anywhere "$@"
-EOF
-    chmod +x "${root}/usr/local/sbin/alpine-anywhere"
-    # Also expose on /usr/sbin: dropbear's non-interactive PATH does not include
-    # /usr/local/sbin, so `alpine-anywhere ...` would be "not found" otherwise.
+    log_info "Baking 'aa' management CLI into image..."
+    # dropbear's non-interactive PATH lacks /usr/local/sbin -> also expose on /usr/sbin
     mkdir -p "${root}/usr/sbin"
-    ln -sf /usr/local/sbin/alpine-anywhere "${root}/usr/sbin/alpine-anywhere"
-
+    ln -sf /usr/local/sbin/aa "${root}/usr/sbin/aa"
     install_ab_services "$root"
 }
 
 # Wrap an Alpine mkinitfs initramfs with an A/B boot-guard, in place.
-# The guard runs BEFORE the real init: it counts the boot attempt (rolling back
-# after too many unverified tries) and, crucially, rolls back immediately if the
-# slot's squashfs won't mount at all — then hands off to the original Alpine init
-# for the real root setup. Best-effort: any guard failure falls through to a
-# normal boot (exec /init.alpine), so a bug here cannot brick the boot.
+# Keeps the original Alpine init at /init and adds our guard as /init.aa; the
+# kernel runs it via rdinit=/init.aa. The guard counts the boot attempt and, if
+# the slot's squashfs won't mount, rolls back immediately, then hands off to the
+# original /init. Best-effort: any failure falls through to `exec /init`, so a
+# bug here cannot brick the boot (Alpine's proven init still mounts the root).
 wrap_boot_initramfs() {
     local img="$1"        # initramfs image to wrap (modified in place)
-    local src_cli src_lib
-    if [ -f "${INSTALL_BASE_DIR}/alpine-anywhere" ]; then
-        src_cli="${INSTALL_BASE_DIR}/alpine-anywhere"; src_lib="${INSTALL_BASE_DIR}/lib"
-    elif [ -f "${SCRIPT_DIR}/alpine-anywhere" ]; then
-        src_cli="${SCRIPT_DIR}/alpine-anywhere"; src_lib="${SCRIPT_DIR}/lib"
-    else
-        log_warn "CLI source not found; skipping initramfs boot-guard"
-        return 0
-    fi
+    _aa_cli_src >/dev/null || { log_warn "CLI source not found; skipping initramfs boot-guard"; return 0; }
 
-    log_info "Wrapping initramfs with A/B boot-guard..."
+    log_info "Wrapping initramfs with A/B boot-guard (/init.aa)..."
     local tmp; tmp=$(mktemp -d)
     ( cd "$tmp" && gzip -dc "$img" 2>/dev/null | cpio -idm 2>/dev/null ) || {
         log_warn "Could not unpack initramfs; skipping boot-guard"; rm -rf "$tmp"; return 0; }
     [ -f "$tmp/init" ] || { log_warn "initramfs has no /init; skipping"; rm -rf "$tmp"; return 0; }
 
-    mv "$tmp/init" "$tmp/init.alpine"
-    mkdir -p "$tmp/usr/local/lib/alpine-anywhere/lib" "$tmp/usr/local/sbin"
-    cp "$src_cli" "$tmp/usr/local/lib/alpine-anywhere/alpine-anywhere"
-    cp "$src_lib"/*.sh "$tmp/usr/local/lib/alpine-anywhere/lib/"
-    cat > "$tmp/usr/local/sbin/alpine-anywhere" << 'EOF'
-#!/bin/sh
-exec /usr/local/lib/alpine-anywhere/alpine-anywhere "$@"
-EOF
-    chmod +x "$tmp/usr/local/sbin/alpine-anywhere" "$tmp/usr/local/lib/alpine-anywhere/alpine-anywhere"
+    install_aa_cli "$tmp" || { log_warn "could not stage aa in initramfs"; rm -rf "$tmp"; return 0; }
 
-    cat > "$tmp/init" << 'EOF'
+    cat > "$tmp/init.aa" << 'EOF'
 #!/bin/sh
-# A/B boot-guard (best-effort) -> hand off to the real Alpine init.
+# A/B boot-guard (best-effort) -> hand off to the original Alpine init at /init.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sysfs /sys 2>/dev/null
@@ -626,21 +613,19 @@ done
 root=$(sed -n 's/.*root=\([^ ]*\).*/\1/p' /proc/cmdline)
 i=0; while [ -n "$root" ] && [ ! -b "$root" ] && [ "$i" -lt 10 ]; do sleep 1; i=$((i+1)); done
 if [ -n "$root" ] && [ -b "$root" ]; then
-    # count this attempt (rolls back after too many unverified boots)
-    /usr/local/sbin/alpine-anywhere bootcount 2>/dev/null || true
-    # unmountable-slot guard: a slot whose squashfs won't mount is bad now
+    aa bootcount 2>/dev/null || true       # rolls back after too many unverified boots
     mkdir -p /aa-test
     if mount -t squashfs -o ro "$root" /aa-test 2>/dev/null; then
         umount /aa-test 2>/dev/null
     else
         echo "[boot-guard] $root squashfs unmountable -> rolling back" > /dev/console 2>&1
-        /usr/local/sbin/alpine-anywhere rollback 2>/dev/null
+        aa rollback 2>/dev/null
         sleep 3; reboot -f
     fi
 fi
-exec /init.alpine
+exec /init
 EOF
-    chmod +x "$tmp/init"
+    chmod +x "$tmp/init.aa"
 
     ( cd "$tmp" && find . | cpio -o -H newc 2>/dev/null | gzip ) > "$img" \
         || log_warn "Could not repack initramfs boot-guard"
@@ -665,7 +650,7 @@ depend() {
 }
 start() {
     ebegin "Marking A/B slot as verified"
-    /usr/local/sbin/alpine-anywhere verify || true
+    /usr/local/sbin/aa verify || true
     eend 0
 }
 EOF
@@ -1028,7 +1013,7 @@ slot_to_partnum() {
 # immediately if the slot's squashfs won't even mount.
 # - panic=10: a dying init (PID 1 exit -> kernel panic) reboots after 10s so a
 #   broken-but-mountable slot also accumulates failed boots toward rollback.
-SLOT_KERNEL_OPTS="rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs panic=10 console=tty1 quiet"
+SLOT_KERNEL_OPTS="rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs rdinit=/init.aa panic=10 console=tty1 quiet"
 
 # Place a slot's kernel + initramfs on the boot partition as vmlinuz-<slot>/initramfs-<slot>
 place_slot_kernel() {

@@ -1033,10 +1033,10 @@ show_install_completion_message() {
     echo "To activate:"
     echo "  sudo reboot"
     echo ""
-    echo "After reboot, verify with:"
-    echo "  alpine-anywhere status"
+    echo "After reboot, on the target check status with:"
+    echo "  aa status"
     echo ""
-    echo "To upgrade in the future:"
+    echo "To upgrade in the future (from this control host):"
     echo "  alpine-anywhere upgrade root@${TARGET_HOST}"
     echo ""
 }
@@ -1056,8 +1056,8 @@ show_upgrade_completion_message() {
     echo "Automatic rollback will occur if boot fails"
     echo "${MAX_BOOT_ATTEMPTS:-3} times."
     echo ""
-    echo "After successful boot, confirm with:"
-    echo "  alpine-anywhere verify"
+    echo "After successful boot, confirm on the target with:"
+    echo "  aa verify"
     echo ""
 }
 

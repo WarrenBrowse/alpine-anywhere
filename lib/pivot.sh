@@ -588,33 +588,6 @@ pivot_sysvinit() {
     run_privileged telinit u
 }
 
-# Strategy for busybox init (Alpine / OpenRC source)
-# busybox init has no `telinit u`; instead it re-execs the program from an
-# inittab `restart` action when it receives SIGQUIT. We point that action at our
-# POSIX-sh takeover-init in the tmpfs, reload inittab, then signal.
-pivot_busybox() {
-    log_info "Using busybox-init strategy (inittab restart + SIGQUIT)..."
-
-    local takeover="${PIVOT_DIR}/sbin/takeover-init"
-    if [ ! -x "$takeover" ]; then
-        log_error "takeover-init missing at $takeover; falling back to direct"
-        pivot_direct
-        return
-    fi
-
-    local restart_line="::restart:${takeover}"
-    if ! grep -qF "$restart_line" /etc/inittab 2>/dev/null; then
-        # /etc/inittab is writable via the tmpfs overlay on the running system
-        echo "$restart_line" | run_privileged tee -a /etc/inittab >/dev/null
-    fi
-
-    log_warn "Reloading inittab, then re-execing PID 1 into takeover-init..."
-    log_warn "Connection WILL be lost. Reconnect via: ssh root@${DETECTED_IP_ADDRESS}"
-    run_privileged kill -HUP 1    # busybox init: re-read /etc/inittab
-    sleep 1
-    run_privileged kill -QUIT 1   # busybox init: run `restart` action -> exec takeover-init as PID 1
-}
-
 # Strategy: reboot into a RAM installer (no runtime PID 1 takeover).
 # Used when the running init can't be re-exec'd at runtime (e.g. busybox init).
 # We turn the already-built pivot env (${PIVOT_DIR}: install tools + scripts +

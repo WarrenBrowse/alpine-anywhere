@@ -64,7 +64,7 @@ EOF
 
     cat > "${hd}/verify" << 'EOF'
 #!/bin/sh
-/usr/local/sbin/alpine-anywhere verify || true
+/usr/local/sbin/aa verify || true
 EOF
     cat > "${hd}/nftables-up" << 'EOF'
 #!/bin/sh

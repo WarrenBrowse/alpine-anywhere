@@ -293,7 +293,7 @@ run_upgrade() {
     echo "Alpine $version installed to slot $target."
     echo "Reboot to activate:  reboot"
     echo ""
-    echo "After a successful boot, confirm it:  alpine-anywhere verify"
+    echo "After a successful boot, confirm it:  aa verify"
     echo "If slot $target fails to boot ${MAX_BOOT_ATTEMPTS}x, it auto-rolls back to slot $current."
     echo ""
 }
