@@ -500,8 +500,12 @@ EOF
     cp "${build_dir}"/boot/start*.elf /tmp/boot-files/ 2>/dev/null || true
     cp "${build_dir}"/boot/fixup*.dat /tmp/boot-files/ 2>/dev/null || true
     cp "${build_dir}"/boot/bootcode.bin /tmp/boot-files/ 2>/dev/null || true
-    # NB: the A/B boot-guard is a PID 1 shim baked into the squashfs
-    # (/sbin/aa-boot-init, selected by init=); the stock initramfs is used as-is.
+
+    # A/B boot-guard: patch this slot's initramfs so a failed/unverified boot
+    # rolls back to the other slot. Runs in the initramfs right before
+    # switch_root (modules loaded, busybox ready, disk accessible) — the one
+    # environment where rdinit=/init=/early-/init all failed before.
+    wrap_boot_initramfs /tmp/boot-files/initramfs
 
     # Create squashfs
     log_info "Creating squashfs image..."
@@ -577,60 +581,95 @@ bake_management_tools() {
         return 0
     fi
     log_info "Baking 'aa' command + alpine-anywhere tool into image..."
-    # NOTE: the boot-guard (wrap_boot_initramfs / init.aa) is NOT wired in yet —
-    # it is WIP for the next session. Installs currently produce clean, vanilla
-    # OpenRC slots that boot reliably (stock initramfs, panic=10, no init=/rdinit).
+    # The A/B boot-guard itself (init.aa) is injected into the initramfs by
+    # wrap_boot_initramfs (called from generate_system_squashfs); here we only
+    # install the userspace aa-verify service that COMMITS a healthy boot
+    # (resets the boot counter), which is what stops init.aa from rolling back.
     install_ab_services "$root"
 }
 
 # Wrap the Alpine mkinitfs initramfs with the A/B boot-guard, in place.
 # Instead of changing the init (rdinit/init= both failed on the RPi), we PATCH
-# the Alpine init to call /sbin/init.aa right before its `exec switch_root`.
+# the Alpine init to call /sbin/init.aa right before its `exec ... switch_root`.
 # At that point modules are loaded, busybox is set up and the disk is accessible
 # (the root was just mounted) — a reliable environment — yet we're still in the
 # initramfs, so the guard can roll back before handing off to the real init.
 wrap_boot_initramfs() {
     local img="$1"
+    [ -f "$img" ] || { log_warn "initramfs $img missing; skipping boot-guard"; return 0; }
     log_info "Wrapping initramfs with A/B boot-guard (init.aa before switch_root)..."
     local tmp; tmp=$(mktemp -d)
     ( cd "$tmp" && gzip -dc "$img" 2>/dev/null | cpio -idm 2>/dev/null ) || {
         log_warn "Could not unpack initramfs; skipping boot-guard"; rm -rf "$tmp"; return 0; }
     [ -f "$tmp/init" ] || { log_warn "initramfs has no /init; skipping boot-guard"; rm -rf "$tmp"; return 0; }
-    grep -q 'exec switch_root' "$tmp/init" || { log_warn "no 'exec switch_root' in init; skipping boot-guard"; rm -rf "$tmp"; return 0; }
+    grep -q 'exec .*switch_root' "$tmp/init" || { log_warn "no 'exec ... switch_root' in init; skipping boot-guard"; rm -rf "$tmp"; return 0; }
 
     mkdir -p "$tmp/sbin"
     cat > "$tmp/sbin/init.aa" << 'EOF'
 #!/bin/sh
 # A/B boot-guard: invoked by the patched Alpine init just before switch_root,
 # in the initramfs with modules loaded + busybox ready + disk accessible.
-# Counts this boot attempt; rolls back to the other slot after too many
-# unverified boots. Best-effort: never blocks the boot (always exits 0 unless
-# it deliberately reboots for a rollback).
-root=$(sed -n 's/.*root=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null)
-case "$root" in *2) slot=A ;; *3) slot=B ;; *) exit 0 ;; esac
-disk=$(echo "$root" | sed -E 's/p?[0-9]+$//')
-case "$root" in *p[0-9]) boot="${disk}p1" ;; *) boot="${disk}1" ;; esac
-mkdir -p /aa-boot
-mount -t vfat "$boot" /aa-boot 2>/dev/null || mount "$boot" /aa-boot 2>/dev/null || exit 0
+# Counts this boot attempt; rolls back to the other slot after one unverified
+# boot. Best-effort: never blocks the boot (always exits 0 unless it
+# deliberately reboots for a rollback). Logs to console AND <boot>/init-aa.log.
+say() { echo "init.aa: $*"; echo "[$(cut -d. -f1 /proc/uptime 2>/dev/null)s] $*" >> /aa-boot/init-aa.log 2>/dev/null; }
+
+root=$(cat /proc/cmdline 2>/dev/null | tr ' ' '\n' | sed -n 's/^root=//p' | head -n1)
+case "$root" in
+    *2) slot=A; opart=2 ;;
+    *3) slot=B; opart=3 ;;
+    *) echo "init.aa: root='$root' is not an A/B slot; skip"; exit 0 ;;
+esac
+# Derive the base disk + partition prefix (p for nvme/mmc, none for sd) from root=.
+case "$root" in
+    *mmcblk*|*nvme*) pfx="p" ;;
+    *) pfx="" ;;
+esac
+disk=${root%${pfx}[0-9]}
+boot="${disk}${pfx}1"
+
+mkdir -p /aa-boot 2>/dev/null
+# vfat is needed to read the FAT boot partition; load it if not already present.
+modprobe vfat 2>/dev/null || true
+modprobe nls_cp437 2>/dev/null || true
+if ! mount -t vfat "$boot" /aa-boot 2>/dev/null && ! mount "$boot" /aa-boot 2>/dev/null; then
+    echo "init.aa: cannot mount boot $boot; skip (boot continues)"
+    exit 0
+fi
 meta=/aa-boot/slots.meta
-glog() { echo "[$(cut -d. -f1 /proc/uptime 2>/dev/null)s] init.aa: $*" >> /aa-boot/init-aa.log 2>/dev/null; sync 2>/dev/null; }
-glog "start slot=$slot root=$root boot=$boot"
-[ -f "$meta" ] || { glog "no slots.meta; skip"; umount /aa-boot 2>/dev/null; exit 0; }
-cnt=$(sed -n "s/^SLOT_${slot}_BOOT_COUNT=//p" "$meta"); cnt=$((${cnt:-0}+1))
-ver=$(sed -n "s/^SLOT_${slot}_VERIFIED=//p" "$meta")
-grep -v "^SLOT_${slot}_BOOT_COUNT=" "$meta" > "$meta.t" 2>/dev/null; echo "SLOT_${slot}_BOOT_COUNT=$cnt" >> "$meta.t"; mv "$meta.t" "$meta"; sync
-glog "count=$cnt verified=$ver (max=1)"
+say "start slot=$slot root=$root boot=$boot"
+if [ ! -f "$meta" ]; then say "no slots.meta; skip"; umount /aa-boot 2>/dev/null; exit 0; fi
+
+# Increment this slot's boot counter (persisted on the FAT boot partition).
+cnt=$(sed -n "s/^SLOT_${slot}_BOOT_COUNT=//p" "$meta" | head -n1); cnt=$((${cnt:-0}+1))
+ver=$(sed -n "s/^SLOT_${slot}_VERIFIED=//p" "$meta" | head -n1)
+grep -v "^SLOT_${slot}_BOOT_COUNT=" "$meta" > "$meta.t" 2>/dev/null
+echo "SLOT_${slot}_BOOT_COUNT=$cnt" >> "$meta.t"
+mv "$meta.t" "$meta"; sync
+say "count=$cnt verified=$ver (rollback when count>1 && !verified)"
+
+# One unverified retry then roll back: the first boot sets count=1 (the slot's
+# own aa-verify resets it to 0 on a healthy boot); if it failed and rebooted,
+# count reaches 2 while still unverified -> switch to the other slot.
 if [ "$cnt" -gt 1 ] && [ "$ver" != "true" ]; then
-    other=A; opart=2; [ "$slot" = A ] && { other=B; opart=3; }
+    other=B; [ "$slot" = B ] && other=A
+    opart_other=3; [ "$other" = A ] && opart_other=2
     if grep -q "^SLOT_${other}_VERSION=." "$meta"; then
-        odev="${disk}${opart}"; case "$disk" in *mmcblk*|*nvme*) odev="${disk}p${opart}" ;; esac
+        odev="${disk}${pfx}${opart_other}"
+        # config.txt: select the other slot's kernel + initramfs (RPi).
         sed -i "s|^kernel=vmlinuz-.*|kernel=vmlinuz-${other}|; s|^initramfs initramfs-.*|initramfs initramfs-${other} followkernel|" /aa-boot/config.txt 2>/dev/null
-        echo "root=${odev} rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs panic=10 console=tty1 quiet" > /aa-boot/cmdline.txt
+        # cmdline.txt: swap only root=, preserving the rest of the options.
+        sed -i "s|root=[^ ]*|root=${odev}|" /aa-boot/cmdline.txt 2>/dev/null
+        # extlinux fallback (non-RPi): point DEFAULT at the other slot.
+        [ -f /aa-boot/extlinux/extlinux.conf ] && sed -i "s|^DEFAULT .*|DEFAULT alpine-${other}|" /aa-boot/extlinux/extlinux.conf 2>/dev/null
         echo "$other" > /aa-boot/current_slot
-        glog "ROLLBACK $slot -> $other (root=$odev); rebooting"
-        sync; umount /aa-boot 2>/dev/null; reboot -f
+        say "ROLLBACK $slot -> $other (root=$odev); rebooting now"
+        sync; umount /aa-boot 2>/dev/null; sync
+        reboot -f
+        # If reboot -f is unavailable, fall through to a kernel reboot.
+        echo b > /proc/sysrq-trigger 2>/dev/null
     else
-        glog "no $other image; cannot roll back"
+        say "no bootable $other image (no SLOT_${other}_VERSION); cannot roll back"
     fi
 fi
 umount /aa-boot 2>/dev/null
@@ -638,9 +677,18 @@ exit 0
 EOF
     chmod +x "$tmp/sbin/init.aa"
 
-    # Insert the guard call on the line before `exec switch_root` (once).
+    # Insert the guard call on the line(s) before `exec ... switch_root`, once,
+    # preserving indentation. awk (not `sed -i ...\n...`) so it's portable and
+    # doesn't depend on GNU-sed newline-in-replacement behaviour.
     if ! grep -q '/sbin/init.aa' "$tmp/init"; then
-        sed -i 's|^\([[:space:]]*\)\(exec switch_root.*\)$|\1/sbin/init.aa 2>/dev/null \|\| true\n\1\2|' "$tmp/init"
+        awk '
+            /^[[:space:]]*exec .*switch_root/ {
+                match($0, /^[[:space:]]*/)
+                printf "%s/sbin/init.aa 2>/dev/null || true\n", substr($0, 1, RLENGTH)
+            }
+            { print }
+        ' "$tmp/init" > "$tmp/init.aa.new" && mv "$tmp/init.aa.new" "$tmp/init"
+        chmod +x "$tmp/init"
     fi
 
     ( cd "$tmp" && find . | cpio -o -H newc 2>/dev/null | gzip ) > "$img" \

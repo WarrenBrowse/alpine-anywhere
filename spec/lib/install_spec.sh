@@ -206,8 +206,43 @@ Describe 'install.sh'
 
     End
 
-    # NOTE: boot-guard (wrap_boot_initramfs / init.aa) is WIP for next session,
-    # not wired into installs yet — see MEMORY.md. No test until it's validated.
+    Describe 'wrap_boot_initramfs()'
+        setup() {
+            WD=$(mktemp -d)
+            SRC="$WD/src"
+            mkdir -p "$SRC/bin" "$SRC/sbin"
+            # Minimal Alpine-like initramfs init ending in an exec switch_root.
+            printf '#!/bin/sh\nmount -t proc proc /proc\nexec switch_root "$sysroot" /sbin/init "$@"\n' > "$SRC/init"
+            chmod +x "$SRC/init"
+            ( cd "$SRC" && find . | cpio -o -H newc 2>/dev/null | gzip ) > "$WD/initramfs"
+        }
+        cleanup() { rm -rf "$WD"; }
+        Before 'setup'
+        After 'cleanup'
+
+        # wrap, repack, then unpack and report what we find
+        wrap_and_inspect() {
+            wrap_boot_initramfs "$WD/initramfs" >/dev/null 2>&1
+            mkdir -p "$WD/out"
+            ( cd "$WD/out" && gzip -dc "$WD/initramfs" | cpio -idm 2>/dev/null )
+            [ -x "$WD/out/sbin/init.aa" ] && echo "HAS_GUARD_FILE"
+            # guard call must appear BEFORE the switch_root line
+            awk '/\/sbin\/init\.aa/{g=NR} /exec .*switch_root/{s=NR} END{ if (g>0 && s>0 && g<s) print "ORDER_OK" }' "$WD/out/init"
+            # idempotent: a second wrap must not insert the call twice
+            wrap_boot_initramfs "$WD/initramfs" >/dev/null 2>&1
+            rm -rf "$WD/out"; mkdir -p "$WD/out"
+            ( cd "$WD/out" && gzip -dc "$WD/initramfs" | cpio -idm 2>/dev/null )
+            echo "GUARD_CALLS=$(grep -c '/sbin/init.aa' "$WD/out/init")"
+        }
+
+        It 'injects /sbin/init.aa and calls it before switch_root (idempotently)'
+            command -v cpio >/dev/null 2>&1 || Skip "cpio not available"
+            When call wrap_and_inspect
+            The output should include "HAS_GUARD_FILE"
+            The output should include "ORDER_OK"
+            The output should include "GUARD_CALLS=1"
+        End
+    End
 
     Describe 'persist_host_keys()'
         setup() {
