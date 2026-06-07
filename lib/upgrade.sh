@@ -246,7 +246,9 @@ rollback_slot() {
     switch_slot "$previous"
     umount_boot
     log_info "Rolled back to slot $previous. Rebooting..."
-    reboot
+    # -f: rollback can run from the PID 1 boot-guard shim (before the real init),
+    # where signalling a normal reboot would have nothing to handle it.
+    reboot -f 2>/dev/null || reboot
 }
 
 # =============================================================================

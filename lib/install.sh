@@ -572,33 +572,36 @@ EOF
     mkdir -p "${root}/usr/sbin"
     ln -sf /usr/local/sbin/alpine-anywhere "${root}/usr/sbin/alpine-anywhere"
 
+    # PID 1 boot-guard shim (set as init= on the kernel cmdline). Runs before
+    # the real init: counts this boot attempt (rolling back to the other slot
+    # if a slot fails to verify too many times), then hands off to the real
+    # init. If the real init can't even exec, force a reboot so the failed
+    # attempt still counts toward rollback (rather than hanging).
+    mkdir -p "${root}/sbin"
+    cat > "${root}/sbin/aa-boot-init" << 'EOF'
+#!/bin/sh
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+mount -t proc proc /proc 2>/dev/null || true
+/usr/local/sbin/alpine-anywhere bootcount || true
+exec /sbin/init "$@"
+# Reached only if the real init failed to exec — count this as a failed boot.
+sleep 5
+exec /sbin/reboot -f 2>/dev/null || reboot -f
+EOF
+    chmod +x "${root}/sbin/aa-boot-init"
+
     install_ab_services "$root"
 }
 
-# OpenRC services for A/B auto-rollback:
-#   aa-bootcount (boot)    - count this boot; roll back a slot that keeps failing
-#   aa-verify    (default) - once booted far enough, mark the slot good (reset counter)
+# OpenRC service for A/B auto-rollback:
+#   aa-verify (default) - once booted far enough, mark the slot good (reset counter)
+# NOTE: the boot-attempt COUNT happens earlier, in the PID 1 boot-guard shim
+# (/sbin/aa-boot-init), so it works even when the init system itself is broken.
 install_ab_services() {
     local root="$1"
-    # OpenRC init scripts; s6 defines aa-bootcount/aa-verify in setup_s6_init.
+    # OpenRC init script; s6 defines aa-verify in setup_s6_init.
     [ "$INIT_SYSTEM" = "openrc" ] || return 0
     mkdir -p "${root}/etc/init.d"
-
-    cat > "${root}/etc/init.d/aa-bootcount" << 'EOF'
-#!/sbin/openrc-run
-description="Alpine Anywhere: record A/B boot attempt (auto-rollback guard)"
-depend() {
-    after localmount
-    before sshd net
-}
-start() {
-    ebegin "Recording A/B boot attempt"
-    # May reboot into the other slot if this one keeps failing to boot.
-    /usr/local/sbin/alpine-anywhere bootcount || true
-    eend 0
-}
-EOF
-    chmod +x "${root}/etc/init.d/aa-bootcount"
 
     cat > "${root}/etc/init.d/aa-verify" << 'EOF'
 #!/sbin/openrc-run
@@ -614,7 +617,6 @@ start() {
 EOF
     chmod +x "${root}/etc/init.d/aa-verify"
 
-    chroot "$root" /sbin/rc-update add aa-bootcount boot 2>/dev/null || true
     chroot "$root" /sbin/rc-update add aa-verify default 2>/dev/null || true
 }
 
@@ -966,8 +968,13 @@ slot_to_partnum() {
     esac
 }
 
-# Kernel cmdline shared by both slots (root= is appended per-slot)
-SLOT_KERNEL_OPTS="rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs console=tty1 quiet"
+# Kernel cmdline shared by both slots (root= is appended per-slot).
+# - init=/sbin/aa-boot-init: PID 1 boot-guard shim that counts boot attempts
+#   BEFORE the real init runs, and rolls back to the other slot after too many
+#   unverified attempts (catches a slot whose init is broken, e.g. s6).
+# - panic=10: a dying init (PID 1 exit -> kernel panic) reboots after 10s so
+#   the attempt counts toward rollback instead of hanging forever.
+SLOT_KERNEL_OPTS="rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs init=/sbin/aa-boot-init panic=10 console=tty1 quiet"
 
 # Place a slot's kernel + initramfs on the boot partition as vmlinuz-<slot>/initramfs-<slot>
 place_slot_kernel() {

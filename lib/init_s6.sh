@@ -62,10 +62,6 @@ route add default gw "${DETECTED_GATEWAY}" 2>/dev/null || true
 EOF
     fi
 
-    cat > "${hd}/bootcount" << 'EOF'
-#!/bin/sh
-/usr/local/sbin/alpine-anywhere bootcount || true
-EOF
     cat > "${hd}/verify" << 'EOF'
 #!/bin/sh
 /usr/local/sbin/alpine-anywhere verify || true
@@ -83,16 +79,15 @@ EOF
     chmod +x "${hd}"/*
 
     # --- s6-rc source services --------------------------------------------
-    _s6_oneshot "$src" mounts      "/usr/local/libexec/aa-s6/mounts-up"
-    _s6_oneshot "$src" network     "/usr/local/libexec/aa-s6/network-up"
-    _s6_oneshot "$src" aa-bootcount "/usr/local/libexec/aa-s6/bootcount"
-    _s6_oneshot "$src" aa-verify   "/usr/local/libexec/aa-s6/verify"
+    # NOTE: boot-attempt counting is done by the PID 1 shim (/sbin/aa-boot-init),
+    # not an s6 service, so it works even if s6 itself fails to come up.
+    _s6_oneshot "$src" mounts    "/usr/local/libexec/aa-s6/mounts-up"
+    _s6_oneshot "$src" network   "/usr/local/libexec/aa-s6/network-up"
+    _s6_oneshot "$src" aa-verify "/usr/local/libexec/aa-s6/verify"
 
     _s6_dep "$src" network mounts
-    # bootcount runs as early as possible (before network/ssh) — depends on mounts only
-    _s6_dep "$src" aa-bootcount mounts
 
-    local contents="mounts network aa-bootcount aa-verify"
+    local contents="mounts network aa-verify"
 
     # SSH daemon (supervised longrun)
     if [ "$HARDENED_MODE" = "true" ]; then

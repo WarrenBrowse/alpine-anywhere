@@ -178,13 +178,6 @@ Describe 'install.sh'
         Before 'setup'
         After 'cleanup'
 
-        It 'writes the aa-bootcount boot service'
-            When call install_ab_services "$ROOT"
-            The path "$ROOT/etc/init.d/aa-bootcount" should be exist
-            The contents of file "$ROOT/etc/init.d/aa-bootcount" should include "bootcount"
-            The stderr should be defined
-        End
-
         It 'writes the aa-verify service'
             When call install_ab_services "$ROOT"
             The path "$ROOT/etc/init.d/aa-verify" should be exist
@@ -207,6 +200,14 @@ Describe 'install.sh'
             The path "$ROOT/usr/local/sbin/alpine-anywhere" should be exist
             The contents of file "$ROOT/usr/local/sbin/alpine-anywhere" should include "/usr/local/lib/alpine-anywhere/alpine-anywhere"
             The path "$ROOT/usr/local/lib/alpine-anywhere/lib/upgrade.sh" should be exist
+            The stderr should be defined
+        End
+
+        It 'bakes the PID 1 boot-guard shim'
+            When call bake_management_tools "$ROOT"
+            The path "$ROOT/sbin/aa-boot-init" should be exist
+            The contents of file "$ROOT/sbin/aa-boot-init" should include "bootcount"
+            The contents of file "$ROOT/sbin/aa-boot-init" should include "exec /sbin/init"
             The stderr should be defined
         End
     End
