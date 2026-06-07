@@ -215,10 +215,10 @@ create_partition_layout() {
     parted -s "$disk" set 1 boot on
 
     log_info "Creating slot A partition (${PART_SLOT_SIZE_MB}MB)..."
-    parted -s "$disk" mkpart slot_a ext4 "${PART_BOOT_SIZE_MB}MiB" "$((PART_BOOT_SIZE_MB + PART_SLOT_SIZE_MB))MiB"
+    parted -s "$disk" mkpart slota ext4 "${PART_BOOT_SIZE_MB}MiB" "$((PART_BOOT_SIZE_MB + PART_SLOT_SIZE_MB))MiB"
 
     log_info "Creating slot B partition (${PART_SLOT_SIZE_MB}MB)..."
-    parted -s "$disk" mkpart slot_b ext4 "$((PART_BOOT_SIZE_MB + PART_SLOT_SIZE_MB))MiB" "${slot_end_mb}MiB"
+    parted -s "$disk" mkpart slotb ext4 "$((PART_BOOT_SIZE_MB + PART_SLOT_SIZE_MB))MiB" "${slot_end_mb}MiB"
 
     if [ "$with_data" = "true" ]; then
         log_info "Creating data partition (remaining space)..."
