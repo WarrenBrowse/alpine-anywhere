@@ -178,8 +178,11 @@ EOF
     # --- build the basedir + install as PID 1 ------------------------------
     log_info "Building s6-linux-init basedir..."
     rm -rf "${root}/etc/s6-linux-init/current"
+    # NOTE: no -d /dev — the Alpine initramfs already mounted devtmpfs on /dev;
+    # having s6-linux-init mount a second devtmpfs over it can kill stage 1
+    # (PID 1) before rc.init runs (observed: empty /s6-boot.log, unreachable).
     chroot "$root" /bin/sh -c \
-        's6-linux-init-maker -c /run/s6-linux-init -p "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" -m 0022 -d /dev -1 -f /etc/s6-linux-init/skel /etc/s6-linux-init/current' \
+        's6-linux-init-maker -c /run/s6-linux-init -p "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" -m 0022 -1 -f /etc/s6-linux-init/skel /etc/s6-linux-init/current' \
         || die "s6-linux-init-maker failed"
 
     ln -sf /etc/s6-linux-init/current/bin/init "${root}/sbin/init"

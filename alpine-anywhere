@@ -305,6 +305,18 @@ run_local_ab_install() {
         fi
     fi
 
+    # If the target disk is NOT the disk we're booted from, no pivot is needed:
+    # partition + install directly (e.g. a Debian/Armbian SD installing onto an
+    # attached USB/SSD). The pivot only exists to free the disk you run from.
+    local root_disk=""
+    root_disk=$(strip_partition "$(findmnt -n -o SOURCE / 2>/dev/null)" 2>/dev/null)
+    if [ -n "$TARGET_DISK" ] && [ -n "$root_disk" ] && [ "$TARGET_DISK" != "$root_disk" ]; then
+        log_info "Target $TARGET_DISK differs from boot disk $root_disk -> installing without pivot"
+        run_ab_install
+        show_install_completion_message
+        return 0
+    fi
+
     # Step 6: Pivot to Alpine
     log_step "Step 6/6: Pivot to Alpine environment"
 
