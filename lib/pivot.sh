@@ -33,17 +33,28 @@ detect_init_system() {
     local init_comm
     init_comm=$(cat /proc/1/comm 2>/dev/null)
 
+    # The real PID 1 binary disambiguates busybox init from sysvinit (both have
+    # comm="init"); they need completely different re-exec mechanisms.
+    local init_exe
+    init_exe=$(readlink -f /proc/1/exe 2>/dev/null)
+
     case "$init_comm" in
         systemd)
             echo "systemd"
             ;;
         init)
-            # Could be sysvinit or busybox init
-            if [ -f /etc/inittab ]; then
-                echo "sysvinit"
-            else
-                echo "unknown"
-            fi
+            case "$init_exe" in
+                */busybox)
+                    echo "busybox"
+                    ;;
+                *)
+                    if [ -f /etc/inittab ]; then
+                        echo "sysvinit"
+                    else
+                        echo "unknown"
+                    fi
+                    ;;
+            esac
             ;;
         runit)
             echo "runit"
@@ -68,9 +79,10 @@ detect_init_system() {
 setup_pivot_environment() {
     log_step "Setting up pivot environment..."
 
-    # Create tmpfs mount point
+    # Create tmpfs mount point (2G: room for tools + kernel modules + an
+    # installer initramfs image; the box has several GB of RAM)
     run_privileged mkdir -p "${PIVOT_DIR}"
-    run_privileged mount -t tmpfs -o size=512M,mode=755 tmpfs "${PIVOT_DIR}"
+    run_privileged mount -t tmpfs -o size=2G,mode=755 tmpfs "${PIVOT_DIR}"
 
     # Extract Alpine minirootfs
     log_info "Extracting Alpine minirootfs..."
@@ -204,6 +216,7 @@ ALPINE_VERSION="${ALPINE_VERSION}"
 ALPINE_MIRROR="${ALPINE_MIRROR}"
 KERNEL_FLAVOR="${KERNEL_FLAVOR}"
 OVERLAY_DEVICE="${OVERLAY_DEVICE}"
+TARGET_DISK="${TARGET_DISK}"
 EXTRA_PACKAGES="${EXTRA_PACKAGES}"
 FORCE="${FORCE}"
 VERBOSE="${VERBOSE}"
@@ -225,6 +238,26 @@ EOF
         run_privileged cp "${INSTALL_CACHE_DIR}/minirootfs.tar.gz" "${aa_dest}/cache/" 2>/dev/null || true
         run_privileged cp "${INSTALL_CACHE_DIR}/"*.apkovl.tar.gz "${aa_dest}/cache/" 2>/dev/null || true
     fi
+
+    # Transfer image-customization inputs (control-host paths -> pivoted paths).
+    # The build runs after pivot, so these files must travel into the pivot env.
+    local pivot_aa="/root/.local/share/alpine-anywhere"
+    local custom_dest="" hostkeys_dest=""
+    if [ -n "$CUSTOM_SCRIPT" ] && [ -f "$CUSTOM_SCRIPT" ]; then
+        run_privileged cp "$CUSTOM_SCRIPT" "${aa_dest}/custom-script.sh"
+        custom_dest="${pivot_aa}/custom-script.sh"
+        log_info "Custom script staged for pivoted build"
+    fi
+    if [ -n "$SSH_HOST_KEY_DIR" ] && [ -d "$SSH_HOST_KEY_DIR" ]; then
+        run_privileged mkdir -p "${aa_dest}/host-keys"
+        run_privileged cp "$SSH_HOST_KEY_DIR"/* "${aa_dest}/host-keys/" 2>/dev/null || true
+        hostkeys_dest="${pivot_aa}/host-keys"
+        log_info "SSH host keys staged for pivoted build"
+    fi
+    run_privileged tee -a "${PIVOT_DIR}/etc/alpine-anywhere/config.env" > /dev/null << EOF
+CUSTOM_SCRIPT="${custom_dest}"
+SSH_HOST_KEY_DIR="${hostkeys_dest}"
+EOF
 
     # === FAKEINIT (marcan approach) ===
     # This script replaces the real init/systemd binary via bind mount.
@@ -388,6 +421,127 @@ done
 FAKEINIT
 
     run_privileged chmod +x "${PIVOT_DIR}/sbin/fakeinit"
+
+    # === TAKEOVER-INIT (busybox/OpenRC source) ===
+    # busybox init re-execs this (as PID 1) via an inittab `restart` action on
+    # SIGQUIT. It runs FIRST on the OLD root, whose userland is a minimal Alpine
+    # with no bash — so this MUST be POSIX sh (/bin/sh = busybox), unlike the
+    # bash fakeinit used for systemd sources.
+    run_privileged tee "${PIVOT_DIR}/sbin/takeover-init" > /dev/null << 'TAKEOVERINIT'
+#!/bin/sh
+# takeover-init - PID 1 after busybox init re-execs (Alpine/busybox source)
+PIVOT_DIR="/mnt/alpine"
+OLD_ROOT="/mnt/oldroot"
+
+exec > /dev/console 2>&1
+
+# Persistent breadcrumb log on the FAT boot partition (sda1), so a failed
+# takeover can be diagnosed after the fact (no serial console needed).
+# NOTE: if the takeover SUCCEEDS, run_ab_install later repartitions the disk
+# and this log is overwritten - that's fine, we only need it on failure.
+AA_LOGDEV=$(grep -oE '/dev/[a-z0-9]+1\b' /proc/cmdline 2>/dev/null | head -1)
+[ -n "$AA_LOGDEV" ] || AA_LOGDEV=/dev/sda1
+mkdir -p /aa-log 2>/dev/null
+mount "$AA_LOGDEV" /aa-log 2>/dev/null || mount -t vfat "$AA_LOGDEV" /aa-log 2>/dev/null || true
+tlog() {
+    echo "[takeover-init] $*"
+    echo "[$(cat /proc/uptime 2>/dev/null | cut -d. -f1)] $*" >> /aa-log/takeover.log 2>/dev/null || true
+    sync 2>/dev/null || true
+}
+
+tlog "=== PID 1 takeover (busybox) === pid=$$"
+
+# Release old-root file descriptors
+for fd in /proc/self/fd/*; do
+    n=${fd##*/}
+    [ "$n" -gt 2 ] 2>/dev/null && eval "exec ${n}>&-" 2>/dev/null || true
+done
+
+mount --make-rprivate / 2>/dev/null || true
+
+tlog "pre-pivot: PIVOT_DIR=${PIVOT_DIR} ismount=$(grep -c " ${PIVOT_DIR} " /proc/mounts) sh=$(ls -l /bin/sh 2>/dev/null)"
+tlog "pivot_root into ${PIVOT_DIR}..."
+# On failure: do NOT exec /bin/sh (as PID 1 with no tty it exits -> kernel
+# panic -> reboot). Instead hang so PID 1 survives, the old sshd stays alive,
+# and the failure can be diagnosed over SSH / from /aa-log.
+cd "$PIVOT_DIR" || { tlog "cd failed"; while :; do sleep 5; done; }
+mkdir -p ".${OLD_ROOT}"
+if ! pivot_root . ".${OLD_ROOT}"; then
+    tlog "ERROR: pivot_root failed rc=$?"
+    while :; do sleep 5; done
+fi
+echo "[takeover-init] pivot_root OK"
+
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+mount -t proc proc /proc 2>/dev/null || true
+
+# Kill every process still on the old root (frees the install disk)
+echo "[takeover-init] killing old-root processes..."
+for sig in TERM KILL; do
+    for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$' | sort -n); do
+        [ "$pid" = "1" ] && continue
+        [ "$pid" = "$$" ] && continue
+        kill -"$sig" "$pid" 2>/dev/null || true
+    done
+    [ "$sig" = "TERM" ] && sleep 3
+done
+sleep 2
+
+echo "[takeover-init] unmounting old root (frees the disk)..."
+for mnt in $(awk '{print $2}' /proc/mounts | grep "^${OLD_ROOT}" | sort -r); do
+    umount -l "$mnt" 2>/dev/null || true
+done
+umount -l "${OLD_ROOT}" 2>/dev/null || true
+
+mount -t sysfs sysfs /sys 2>/dev/null || true
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+mkdir -p /dev/pts && mount -t devpts devpts /dev/pts 2>/dev/null || true
+mkdir -p /run
+
+[ -f /etc/alpine-anywhere/config.env ] && . /etc/alpine-anywhere/config.env
+
+echo "[takeover-init] networking..."
+/sbin/ifconfig lo 127.0.0.1 up 2>/dev/null || true
+if [ -n "$NETWORK_INTERFACE" ]; then
+    if [ "$NETWORK_DHCP" = "true" ]; then
+        /sbin/udhcpc -i "$NETWORK_INTERFACE" -b -q 2>/dev/null &
+        sleep 3
+    else
+        /sbin/ifconfig "$NETWORK_INTERFACE" "$NETWORK_IP" netmask "$NETWORK_NETMASK" up 2>/dev/null || true
+        /sbin/route add default gw "$NETWORK_GATEWAY" 2>/dev/null || true
+    fi
+fi
+
+echo "[takeover-init] sshd..."
+if [ "$HARDENED_MODE" = "true" ]; then
+    /usr/sbin/dropbear -R -p 22 -E 2>/dev/null &
+else
+    mkdir -p /run/sshd
+    /usr/sbin/sshd 2>/dev/null || true
+fi
+
+if [ -f /root/.local/share/alpine-anywhere/alpine-anywhere ]; then
+    echo "[takeover-init] starting A/B install (--install-continue)..."
+    INSTALL_CMD="sh /root/.local/share/alpine-anywhere/alpine-anywhere --local --install-continue"
+    [ "$VERBOSE" = "true" ] && INSTALL_CMD="$INSTALL_CMD -v"
+    [ "$FORCE" = "true" ] && INSTALL_CMD="$INSTALL_CMD -f"
+    [ -n "$ALPINE_VERSION" ] && INSTALL_CMD="$INSTALL_CMD -V $ALPINE_VERSION"
+    [ -n "$ALPINE_MIRROR" ] && INSTALL_CMD="$INSTALL_CMD -m $ALPINE_MIRROR"
+    # --disk / --custom-script / --ssh-host-keys come from config.env (sourced
+    # by --install-continue), so they don't need to be on the command line.
+    echo "[takeover-init] $INSTALL_CMD"
+    $INSTALL_CMD > /var/log/alpine-install.log 2>&1 &
+    echo "[takeover-init] monitor: tail -f /var/log/alpine-install.log"
+fi
+
+echo "[takeover-init] entering PID 1 reaper loop"
+while :; do
+    wait 2>/dev/null
+    sleep 1
+done
+TAKEOVERINIT
+
+    run_privileged chmod +x "${PIVOT_DIR}/sbin/takeover-init"
 }
 
 # =============================================================================
@@ -431,6 +585,162 @@ pivot_sysvinit() {
     # Tell init to re-exec
     log_warn "Triggering init re-exec..."
     run_privileged telinit u
+}
+
+# Strategy for busybox init (Alpine / OpenRC source)
+# busybox init has no `telinit u`; instead it re-execs the program from an
+# inittab `restart` action when it receives SIGQUIT. We point that action at our
+# POSIX-sh takeover-init in the tmpfs, reload inittab, then signal.
+pivot_busybox() {
+    log_info "Using busybox-init strategy (inittab restart + SIGQUIT)..."
+
+    local takeover="${PIVOT_DIR}/sbin/takeover-init"
+    if [ ! -x "$takeover" ]; then
+        log_error "takeover-init missing at $takeover; falling back to direct"
+        pivot_direct
+        return
+    fi
+
+    local restart_line="::restart:${takeover}"
+    if ! grep -qF "$restart_line" /etc/inittab 2>/dev/null; then
+        # /etc/inittab is writable via the tmpfs overlay on the running system
+        echo "$restart_line" | run_privileged tee -a /etc/inittab >/dev/null
+    fi
+
+    log_warn "Reloading inittab, then re-execing PID 1 into takeover-init..."
+    log_warn "Connection WILL be lost. Reconnect via: ssh root@${DETECTED_IP_ADDRESS}"
+    run_privileged kill -HUP 1    # busybox init: re-read /etc/inittab
+    sleep 1
+    run_privileged kill -QUIT 1   # busybox init: run `restart` action -> exec takeover-init as PID 1
+}
+
+# Strategy: reboot into a RAM installer (no runtime PID 1 takeover).
+# Used when the running init can't be re-exec'd at runtime (e.g. busybox init).
+# We turn the already-built pivot env (${PIVOT_DIR}: install tools + scripts +
+# cache + config) into an initramfs, add the running kernel's modules, write it
+# next to the existing vmlinuz on the boot partition, and reboot. The RPi
+# firmware then boots that initramfs entirely in RAM (the disk is free), its
+# /init runs the A/B install onto the disk, and reboots into the new system.
+pivot_reboot_installer() {
+    log_info "Using reboot-into-RAM-installer strategy..."
+
+    local kver
+    kver=$(uname -r)
+
+    # 1. Kernel modules matching the on-disk vmlinuz (same running kernel)
+    if [ -d "/lib/modules/${kver}" ]; then
+        log_info "Bundling kernel modules ${kver}..."
+        run_privileged mkdir -p "${PIVOT_DIR}/lib/modules"
+        run_privileged cp -a "/lib/modules/${kver}" "${PIVOT_DIR}/lib/modules/"
+    else
+        log_warn "No /lib/modules/${kver}; installer may not see the disk"
+    fi
+
+    # 2. Installer /init (PID 1 of the initramfs; disk is free, no pivot needed)
+    run_privileged tee "${PIVOT_DIR}/init" > /dev/null << 'INSTALLERINIT'
+#!/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+exec > /dev/console 2>&1
+echo "[ram-installer] === PID 1 (initramfs) ==="
+
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mkdir -p /dev/pts && mount -t devpts devpts /dev/pts 2>/dev/null
+mkdir -p /run /tmp
+
+echo "[ram-installer] loading storage/fs modules..."
+for m in dwc2 phy-generic xhci-pci-renesas xhci-pci xhci-hcd \
+         usb-storage uas scsi_mod sd_mod \
+         nvme ext4 vfat nls_cp437 nls_iso8859-1 squashfs loop crc32c; do
+    modprobe "$m" 2>/dev/null || true
+done
+# Let USB enumerate
+sleep 5
+mdev -s 2>/dev/null || true
+
+echo "[ram-installer] block devices:"; ls -l /dev/sd* /dev/nvme* /dev/mmcblk* 2>/dev/null
+
+[ -f /etc/alpine-anywhere/config.env ] && . /etc/alpine-anywhere/config.env
+
+echo "[ram-installer] networking..."
+ifconfig lo 127.0.0.1 up 2>/dev/null || true
+if [ -n "$NETWORK_INTERFACE" ]; then
+    if [ "$NETWORK_DHCP" = "true" ]; then
+        udhcpc -i "$NETWORK_INTERFACE" -b -q 2>/dev/null &
+        sleep 4
+    else
+        ifconfig "$NETWORK_INTERFACE" "$NETWORK_IP" netmask "$NETWORK_NETMASK" up 2>/dev/null || true
+        route add default gw "$NETWORK_GATEWAY" 2>/dev/null || true
+    fi
+fi
+
+# Optional SSH for live monitoring/rescue
+mkdir -p /run/sshd
+/usr/sbin/sshd 2>/dev/null || true
+
+echo "[ram-installer] starting A/B install onto disk..."
+INSTALL_CMD="sh /root/.local/share/alpine-anywhere/alpine-anywhere --local --install-continue"
+[ "$VERBOSE" = "true" ] && INSTALL_CMD="$INSTALL_CMD -v"
+[ "$FORCE" = "true" ] && INSTALL_CMD="$INSTALL_CMD -f"
+[ -n "$ALPINE_VERSION" ] && INSTALL_CMD="$INSTALL_CMD -V $ALPINE_VERSION"
+[ -n "$ALPINE_MIRROR" ] && INSTALL_CMD="$INSTALL_CMD -m $ALPINE_MIRROR"
+echo "[ram-installer] $INSTALL_CMD"
+$INSTALL_CMD 2>&1 | tee /dev/console
+rc=$?
+echo "[ram-installer] install finished rc=$rc"
+sync
+if [ "$rc" -eq 0 ]; then
+    echo "[ram-installer] rebooting into installed system in 5s..."
+    sleep 5
+    reboot -f
+else
+    echo "[ram-installer] INSTALL FAILED rc=$rc - dropping to shell, system left as-is"
+    exec /bin/sh
+fi
+INSTALLERINIT
+    run_privileged chmod +x "${PIVOT_DIR}/init"
+
+    # 3. Unmount the virtual filesystems inside PIVOT_DIR so the cpio doesn't
+    #    archive a live /proc /sys /dev (the initramfs /init remounts them).
+    for vfs in dev/pts dev sys proc; do
+        run_privileged umount "${PIVOT_DIR}/${vfs}" 2>/dev/null || true
+    done
+
+    # 4. Package the env as a gzip cpio initramfs onto the boot partition
+    local boot_mnt="/mnt/aa-bootstage" disk part1
+    disk=$(strip_partition "$(get_root_device)")
+    part1=$(get_part_dev "$disk" 1)
+    run_privileged mkdir -p "$boot_mnt"
+    run_privileged mount "$part1" "$boot_mnt" || die "cannot mount boot partition $part1"
+
+    log_info "Building installer initramfs onto ${part1}..."
+    ( cd "$PIVOT_DIR" && run_privileged sh -c "find . -path ./old_root -prune -o -print0 | cpio -0 -o -H newc 2>/dev/null | gzip -1 > '${boot_mnt}/installer.img'" )
+    log_info "installer.img: $(run_privileged du -h "${boot_mnt}/installer.img" | cut -f1)"
+
+    # 4. Point config.txt at vmlinuz + installer.img for the next boot
+    #    (back up the current boot config so a failed install can be recovered)
+    run_privileged cp "${boot_mnt}/config.txt" "${boot_mnt}/config.txt.preinstall" 2>/dev/null || true
+    run_privileged cp "${boot_mnt}/cmdline.txt" "${boot_mnt}/cmdline.txt.preinstall" 2>/dev/null || true
+    local kimg
+    kimg=$(ls "${boot_mnt}"/vmlinuz* 2>/dev/null | head -1)
+    kimg=$(basename "${kimg:-vmlinuz}")
+    run_privileged tee "${boot_mnt}/config.txt" > /dev/null << EOF
+arm_64bit=1
+enable_uart=1
+[pi4]
+kernel=${kimg}
+initramfs installer.img followkernel
+[all]
+EOF
+    echo "console=tty1" | run_privileged tee "${boot_mnt}/cmdline.txt" > /dev/null
+    run_privileged sync
+    run_privileged umount "$boot_mnt" || true
+
+    log_warn "Rebooting into the RAM installer now..."
+    log_warn "Reconnect after install completes: ssh root@${DETECTED_IP_ADDRESS}"
+    run_privileged reboot -f || run_privileged reboot
 }
 
 # Strategy for runit
@@ -498,11 +808,16 @@ execute_pivot() {
         sysvinit)
             pivot_sysvinit
             ;;
+        busybox)
+            # busybox init can't be re-exec'd at runtime -> reboot into a RAM installer
+            pivot_reboot_installer
+            ;;
         runit)
             pivot_runit
             ;;
         openrc)
-            pivot_sysvinit  # OpenRC uses similar mechanism
+            # Alpine's OpenRC runs on top of busybox init (PID 1)
+            pivot_reboot_installer
             ;;
         *)
             log_warn "Unknown init system, trying direct approach"
@@ -540,5 +855,5 @@ download_minirootfs() {
     local url="${ALPINE_MIRROR}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/alpine-minirootfs-${ALPINE_VERSION}.0-${DETECTED_ARCH}.tar.gz"
 
     log_info "Downloading Alpine minirootfs..."
-    curl -fSL --progress-bar -o "${INSTALL_CACHE_DIR}/minirootfs.tar.gz" "$url"
+    http_fetch_file "$url" "${INSTALL_CACHE_DIR}/minirootfs.tar.gz"
 }

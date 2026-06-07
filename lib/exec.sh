@@ -133,8 +133,34 @@ run_on_remote() {
 
     log_step "Executing on remote server..."
 
+    # Where the alpine-anywhere CLI lives on the remote, and where to stage files.
+    # Fresh install/live: scripts were deployed to INSTALL_BASE_DIR. Upgrade/slot
+    # ops on an already-installed system: no deploy, use the baked CLI on PATH and
+    # stage into /tmp.
+    local remote_aa stage_dir
+    if [ -n "$INSTALL_BASE_DIR" ]; then
+        remote_aa="${INSTALL_BASE_DIR}/alpine-anywhere"
+        stage_dir="$INSTALL_BASE_DIR"
+    else
+        remote_aa="alpine-anywhere"   # baked at /usr/local/sbin (on PATH)
+        stage_dir="/tmp"
+    fi
+
+    # Stage control-host customization inputs onto the remote, then point the
+    # remote CLI at the remote copies.
+    local remote_custom_script="" remote_host_key_dir=""
+    if [ -n "$CUSTOM_SCRIPT" ]; then
+        scp_to_remote "$CUSTOM_SCRIPT" "${stage_dir}/aa-custom-script.sh"
+        remote_custom_script="${stage_dir}/aa-custom-script.sh"
+    fi
+    if [ -n "$SSH_HOST_KEY_DIR" ]; then
+        ssh_exec "mkdir -p '${stage_dir}/aa-host-keys'"
+        scp_dir_to_remote "$SSH_HOST_KEY_DIR" "${stage_dir}/aa-host-keys"
+        remote_host_key_dir="${stage_dir}/aa-host-keys"
+    fi
+
     # Build the command line to pass to remote
-    local remote_cmd="${INSTALL_BASE_DIR}/alpine-anywhere --local"
+    local remote_cmd="${remote_aa} --local"
 
     # Pass through relevant options
     [ "$VERBOSE" = "true" ] && remote_cmd="$remote_cmd -v"
@@ -147,6 +173,9 @@ run_on_remote() {
     [ -n "$EXTRA_PACKAGES" ] && remote_cmd="$remote_cmd --extra-packages='$EXTRA_PACKAGES'"
     [ "$HARDENED_MODE" = "true" ] && remote_cmd="$remote_cmd --hardened"
     [ -n "$OVERLAY_DEVICE" ] && remote_cmd="$remote_cmd --overlay='$OVERLAY_DEVICE'"
+    [ -n "$TARGET_DISK" ] && remote_cmd="$remote_cmd --disk='$TARGET_DISK'"
+    [ -n "$remote_custom_script" ] && remote_cmd="$remote_cmd --custom-script='$remote_custom_script'"
+    [ -n "$remote_host_key_dir" ] && remote_cmd="$remote_cmd --ssh-host-keys='$remote_host_key_dir'"
     [ "$KEEP_EXISTING" = "true" ] && remote_cmd="$remote_cmd --keep"
     [ -n "$extra_args" ] && remote_cmd="$remote_cmd $extra_args"
 
@@ -273,8 +302,8 @@ cache_download() {
 
     log_info "Downloading: $filename"
     if [ "$LOCAL_MODE" = "true" ]; then
-        curl -fSL --progress-bar -o "$cache_file" "$url"
+        http_fetch_file "$url" "$cache_file"
     else
-        run_cmd "curl -fSL --progress-bar -o '$cache_file' '$url'"
+        run_cmd "if command -v curl >/dev/null 2>&1; then curl -fSL --progress-bar -o '$cache_file' '$url'; else wget -O '$cache_file' '$url'; fi"
     fi
 }

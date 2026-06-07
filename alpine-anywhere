@@ -78,6 +78,14 @@ main() {
     # Parse command line arguments
     parse_arguments "$@"
 
+    # Lightweight A/B slot subcommands (status/verify/rollback/bootcount).
+    # Handled before the banner/work-dir setup so they stay quiet and fast
+    # (bootcount runs at every boot from an OpenRC service).
+    if [ -n "$SLOT_ACTION" ]; then
+        run_slot_action
+        exit $?
+    fi
+
     # Print banner
     print_banner
 
@@ -119,6 +127,29 @@ main() {
             run_remote_installation
         fi
     fi
+}
+
+# =============================================================================
+# A/B slot subcommands (status / verify / rollback / bootcount)
+# =============================================================================
+
+run_slot_action() {
+    # Remote target given -> run the subcommand on the device over SSH.
+    if [ -n "$TARGET_HOST" ] && [ "$TARGET_HOST" != "localhost" ] && [ "$LOCAL_MODE" != "true" ]; then
+        setup_ssh_multiplexing
+        test_ssh_connection
+        run_on_remote "$SLOT_ACTION"
+        return $?
+    fi
+
+    # Local: operate on this installed device.
+    case "$SLOT_ACTION" in
+        status)    show_status ;;
+        verify)    verify_current_slot ;;
+        rollback)  rollback_slot ;;
+        bootcount) increment_boot_counter ;;
+        *)         die "Unknown slot action: $SLOT_ACTION" ;;
+    esac
 }
 
 # =============================================================================
@@ -226,6 +257,9 @@ run_local_ab_install() {
         [ "$HARDENED_MODE" = "true" ] && sudo_args="$sudo_args --hardened"
         [ -n "$OVERLAY_DEVICE" ] && sudo_args="$sudo_args --overlay=$OVERLAY_DEVICE"
         [ -n "$EXTRA_PACKAGES" ] && sudo_args="$sudo_args --extra-packages=$EXTRA_PACKAGES"
+        [ -n "$CUSTOM_SCRIPT" ] && sudo_args="$sudo_args --custom-script=$CUSTOM_SCRIPT"
+        [ -n "$SSH_HOST_KEY_DIR" ] && sudo_args="$sudo_args --ssh-host-keys=$SSH_HOST_KEY_DIR"
+        [ -n "$TARGET_DISK" ] && sudo_args="$sudo_args --disk=$TARGET_DISK"
         exec sudo -E sh "$0" $sudo_args
     fi
 
@@ -296,9 +330,13 @@ run_install_continue() {
     INSTALL_CACHE_DIR="${INSTALL_BASE_DIR}/cache"
     mkdir -p "$INSTALL_CACHE_DIR"
 
-    # Detect disk
+    # Detect disk (explicit --disk wins, consistent with run_ab_install)
     local disk
-    disk=$(detect_root_disk)
+    if [ -n "$TARGET_DISK" ]; then
+        disk="$TARGET_DISK"
+    else
+        disk=$(detect_root_disk)
+    fi
     log_info "Target disk: $disk"
 
     # Check disk is unmounted
@@ -326,12 +364,16 @@ run_local_upgrade() {
     # Setup directories
     setup_install_dirs "$HOME"
 
-    # Check we're running on an A/B installed system
-    if [ ! -f "/boot/current_slot" ]; then
-        die "This system does not appear to have an A/B installation"
+    # Check we're running on an A/B installed system (immutable squashfs root)
+    if ! mount 2>/dev/null | grep -q '/media/root-ro'; then
+        die "This system does not appear to have an A/B installation (no squashfs root)"
     fi
 
-    # Run upgrade
+    # Populate DETECTED_* (arch/platform/hostname/network) — the image build in
+    # the upgrade needs them just like a fresh install does.
+    detect_local_network
+
+    # Run upgrade (mounts the boot partition itself, derived from root=)
     run_upgrade "$ALPINE_VERSION"
 }
 
@@ -485,13 +527,13 @@ find_working_mirror_local() {
 
     local test_url="${ALPINE_MIRROR}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/"
 
-    if curl -fsSL --connect-timeout 5 "$test_url" >/dev/null 2>&1; then
+    if http_check_url "$test_url"; then
         log_info "Mirror OK: ${ALPINE_MIRROR}"
     else
         log_warn "Primary mirror failed, trying fallbacks..."
         for mirror in $FALLBACK_MIRRORS; do
             test_url="${mirror}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/"
-            if curl -fsSL --connect-timeout 5 "$test_url" >/dev/null 2>&1; then
+            if http_check_url "$test_url"; then
                 ALPINE_MIRROR="$mirror"
                 log_info "Using fallback mirror: ${ALPINE_MIRROR}"
                 return 0
@@ -532,7 +574,7 @@ download_alpine_rpi_files_local() {
     local tarball_name
 
     # Find tarball name
-    tarball_name=$(curl -fsSL "${releases_url}/" 2>/dev/null | grep -oE 'alpine-rpi-[0-9.]+-aarch64\.tar\.gz' | head -1)
+    tarball_name=$(http_fetch_stdout "${releases_url}/" 2>/dev/null | grep -oE 'alpine-rpi-[0-9.]+-aarch64\.tar\.gz' | head -1)
     if [ -z "$tarball_name" ]; then
         tarball_name="alpine-rpi-${ALPINE_VERSION}.0-aarch64.tar.gz"
     fi

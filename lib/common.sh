@@ -16,6 +16,8 @@ DRY_RUN="${DRY_RUN:-false}"
 VERBOSE="${VERBOSE:-false}"
 FORCE="${FORCE:-false}"
 EXTRA_PACKAGES="${EXTRA_PACKAGES:-}"
+CUSTOM_SCRIPT="${CUSTOM_SCRIPT:-}"        # User script run inside the image chroot at build
+SSH_HOST_KEY_DIR="${SSH_HOST_KEY_DIR:-}"  # Control-host dir holding SSH host keys to bake in
 REBOOT_DELAY="${REBOOT_DELAY:-5}"
 TARGET_HOST="${TARGET_HOST:-}"
 TARGET_USER="${TARGET_USER:-}"
@@ -24,8 +26,10 @@ LOCAL_MODE="${LOCAL_MODE:-false}"         # Run locally (no SSH)
 INSTALL_MODE="${INSTALL_MODE:-false}"     # Install mode (vs live mode)
 INSTALL_CONTINUE="${INSTALL_CONTINUE:-false}"  # Continue installation after pivot
 UPGRADE_MODE="${UPGRADE_MODE:-false}"     # Upgrade mode (A/B switch)
+SLOT_ACTION="${SLOT_ACTION:-}"            # Slot subcommand: status|verify|rollback|bootcount
 KEEP_EXISTING="${KEEP_EXISTING:-false}"   # Keep existing system (dual-boot)
 OVERLAY_DEVICE="${OVERLAY_DEVICE:-}"      # Device for persistent overlay
+TARGET_DISK="${TARGET_DISK:-}"            # Explicit install disk (e.g. /dev/sda); empty = auto-detect
 BOOT_SLOT="${BOOT_SLOT:-A}"               # Current boot slot (A/B)
 HARDENED_MODE="${HARDENED_MODE:-false}"   # Security hardened mode
 
@@ -253,6 +257,11 @@ Modes:
   --install                      Install mode - install Alpine permanently (A/B scheme)
   upgrade                        Upgrade to new version (atomic A/B switch)
 
+A/B slot subcommands (run on an installed device; omit host to act locally):
+  status                         Show active slot and per-slot metadata
+  verify                         Mark the running slot as known-good (stops auto-rollback)
+  rollback                       Switch back to the other slot and reboot
+
 Options:
   -V, --alpine-version VERSION   Alpine version (default: 3.20)
   -m, --mirror URL               Alpine mirror URL
@@ -269,7 +278,21 @@ Options:
 
 Install options:
   --keep                         Keep existing system (dual-boot)
+  --disk DEVICE                  Target install disk (e.g. /dev/sda). REQUIRED when more
+                                   than one disk is present (e.g. SD + USB) - the installer
+                                   refuses to guess and risk wiping the boot medium.
   --overlay DEVICE               Device/partition for persistent data overlay
+
+Image customization:
+  --extra-packages PKGS          Additional apk packages (comma-separated)
+  --custom-script FILE           Shell script run inside the image chroot at build
+                                   time (network available). Use to install extra
+                                   software or fetch a project, e.g.:
+                                     wget -O- https://github.com/aya/myos/...tar.gz \\
+                                       | tar -xz -C /usr/local/share
+  --ssh-host-keys DIR            Bake these SSH host keys into the image (control-host
+                                   override). Default: reuse the keys already in use on
+                                   the building system so identity is stable across A/B.
 
 Security options:
   --hardened                     Security hardened mode:
@@ -351,6 +374,26 @@ parse_arguments() {
                 EXTRA_PACKAGES="$2"
                 shift 2
                 ;;
+            --extra-packages=*)
+                EXTRA_PACKAGES="${1#*=}"
+                shift
+                ;;
+            --custom-script)
+                CUSTOM_SCRIPT="$2"
+                shift 2
+                ;;
+            --custom-script=*)
+                CUSTOM_SCRIPT="${1#*=}"
+                shift
+                ;;
+            --ssh-host-keys)
+                SSH_HOST_KEY_DIR="$2"
+                shift 2
+                ;;
+            --ssh-host-keys=*)
+                SSH_HOST_KEY_DIR="${1#*=}"
+                shift
+                ;;
             --method)
                 INSTALL_METHOD="$2"
                 if [ "$INSTALL_METHOD" != "auto" ] && [ "$INSTALL_METHOD" != "kexec" ] && [ "$INSTALL_METHOD" != "takeover" ]; then
@@ -391,8 +434,20 @@ parse_arguments() {
                 OVERLAY_DEVICE="${1#*=}"
                 shift
                 ;;
+            --disk)
+                TARGET_DISK="$2"
+                shift 2
+                ;;
+            --disk=*)
+                TARGET_DISK="${1#*=}"
+                shift
+                ;;
             upgrade)
                 UPGRADE_MODE=true
+                shift
+                ;;
+            status|verify|rollback|bootcount)
+                SLOT_ACTION="$1"
                 shift
                 ;;
             --hardened)
@@ -419,7 +474,10 @@ parse_arguments() {
     done
 
     if [ "$pos_count" -eq 0 ]; then
-        if [ "$LOCAL_MODE" != "true" ]; then
+        if [ -n "$SLOT_ACTION" ]; then
+            # Slot subcommands with no target run locally on the installed device
+            LOCAL_MODE=true
+        elif [ "$LOCAL_MODE" != "true" ]; then
             show_usage
             die "Missing target host (use --local for local installation)"
         fi
