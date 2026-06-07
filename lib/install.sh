@@ -855,11 +855,11 @@ run_ab_install() {
     echo "A" > "${boot_mnt}/current_slot"
     cat > "${boot_mnt}/slots.meta" << EOF
 SLOT_A_VERSION=${ALPINE_VERSION}
-SLOT_A_DATE=$(date -Iseconds)
+SLOT_A_INSTALLED=$(date -Iseconds)
 SLOT_A_VERIFIED=true
 SLOT_A_BOOT_COUNT=0
 SLOT_B_VERSION=
-SLOT_B_DATE=
+SLOT_B_INSTALLED=
 SLOT_B_VERIFIED=false
 SLOT_B_BOOT_COUNT=0
 EOF
