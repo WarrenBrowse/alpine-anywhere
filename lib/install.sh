@@ -590,8 +590,11 @@ bake_management_tools() {
 bake_boot_guard_shim() {
     local root="$1"
     mkdir -p "${root}/sbin"
+    # Shebang uses busybox directly (NOT #!/bin/sh): switch_root's execv of a
+    # script whose interpreter is the /bin/sh symlink fails with ENOENT right
+    # after the pivot; /bin/busybox is a real binary and resolves reliably.
     cat > "${root}/sbin/aa-boot-init" << 'EOF'
-#!/bin/sh
+#!/bin/busybox sh
 # A/B boot-guard PID 1 shim (init=/sbin/aa-boot-init), runs in the full root.
 export PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 mount -t proc proc /proc 2>/dev/null || true

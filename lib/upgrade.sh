@@ -20,7 +20,10 @@
 # =============================================================================
 
 BOOT_MNT="/mnt/aa-boot"
-MAX_BOOT_ATTEMPTS=3
+# A slot that boots into the OS but fails to reach the verified/healthy state
+# rolls back after this many unverified boots. 1 = give it a single retry then
+# roll back (a healthy slot self-verifies on its first boot, count 0->1->reset).
+MAX_BOOT_ATTEMPTS=1
 
 # Append a timestamped line to the persistent A/B log on the boot partition
 # (requires BOOT_MNT mounted). Also echoes to stderr. This is the breadcrumb

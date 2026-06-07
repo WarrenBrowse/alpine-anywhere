@@ -175,7 +175,7 @@ Describe 'upgrade.sh'
 
     Describe 'Upgrade constants'
         It 'defines max boot attempts'
-            The variable MAX_BOOT_ATTEMPTS should equal 3
+            The variable MAX_BOOT_ATTEMPTS should equal 1
         End
     End
 End
