@@ -219,11 +219,10 @@ Describe 'install.sh'
         Before 'setup'
         After 'cleanup'
 
-        It 'adds /init.aa, keeps the original /init, and stages the aa CLI'
+        It 'installs the guard as /init, preserves the original as /init.real, stages aa'
             When call wrap_boot_initramfs "$WORKD/initramfs"
             The stderr should be defined
-            The value "$(gzip -dc "$WORKD/initramfs" | cpio -t 2>/dev/null)" should include "init.aa"
-            The value "$(gzip -dc "$WORKD/initramfs" | cpio -t 2>/dev/null)" should include "./init"
+            The value "$(gzip -dc "$WORKD/initramfs" | cpio -t 2>/dev/null)" should include "init.real"
             The value "$(gzip -dc "$WORKD/initramfs" | cpio -t 2>/dev/null)" should include "usr/local/bin/aa"
         End
     End

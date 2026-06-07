@@ -583,11 +583,11 @@ bake_management_tools() {
 }
 
 # Wrap an Alpine mkinitfs initramfs with an A/B boot-guard, in place.
-# Keeps the original Alpine init at /init and adds our guard as /init.aa; the
-# kernel runs it via rdinit=/init.aa. The guard counts the boot attempt and, if
-# the slot's squashfs won't mount, rolls back immediately, then hands off to the
-# original /init. Best-effort: any failure falls through to `exec /init`, so a
-# bug here cannot brick the boot (Alpine's proven init still mounts the root).
+# Installs our guard AS /init (the kernel always runs /init; rdinit= is not
+# honoured on the RPi) and preserves the original Alpine init as /init.real.
+# The guard counts the boot attempt and, if the slot's squashfs won't mount,
+# rolls back immediately, then hands off to /init.real. Best-effort: any failure
+# falls through to `exec /init.real`, so a bug here cannot brick the boot.
 wrap_boot_initramfs() {
     local img="$1"        # initramfs image to wrap (modified in place)
     _aa_cli_src >/dev/null || { log_warn "CLI source not found; skipping initramfs boot-guard"; return 0; }
@@ -600,12 +600,17 @@ wrap_boot_initramfs() {
 
     install_aa_cli "$tmp" || { log_warn "could not stage aa in initramfs"; rm -rf "$tmp"; return 0; }
 
-    cat > "$tmp/init.aa" << 'EOF'
+    # The kernel always runs /init from the initramfs (rdinit=/init.aa is NOT
+    # honoured on the RPi — confirmed: the guard never ran). So our guard BECOMES
+    # /init, and the original Alpine init is preserved as /init.real.
+    mv "$tmp/init" "$tmp/init.real"
+
+    cat > "$tmp/init" << 'EOF'
 #!/bin/sh
 # A/B boot-guard (best-effort): count the attempt, roll back an unmountable
-# slot, then hand off to the original Alpine init at /init. Heavily logged to
+# slot, then hand off to the real Alpine init (/init.real). Heavily logged to
 # the FAT boot partition (init-aa.log) so boots can be diagnosed after the fact.
-# ANY failure here falls through to `exec /init` so the guard cannot brick boot.
+# ANY failure here falls through to `exec /init.real` so it cannot brick boot.
 export PATH=/usr/local/bin:/usr/bin:/sbin:/bin
 
 mount -t proc proc /proc 2>/dev/null
@@ -631,7 +636,7 @@ ilog() {
     sync 2>/dev/null || true
 }
 
-ilog "=== /init.aa START (rdinit honoured) ==="
+ilog "=== boot-guard /init START ==="
 ilog "cmdline: $cmdline"
 ilog "root=$root bootdev=$bootdev"
 
@@ -664,11 +669,11 @@ else
     ilog "WARN: root device $root not available; skipping guard"
 fi
 
-ilog "handing off to /init (Alpine init)"
+ilog "handing off to /init.real (Alpine init)"
 umount /aa-boot 2>/dev/null
-exec /init
+exec /init.real
 EOF
-    chmod +x "$tmp/init.aa"
+    chmod +x "$tmp/init"
 
     ( cd "$tmp" && find . | cpio -o -H newc 2>/dev/null | gzip ) > "$img" \
         || log_warn "Could not repack initramfs boot-guard"
@@ -1087,12 +1092,12 @@ slot_to_partnum() {
 }
 
 # Kernel cmdline shared by both slots (root= is appended per-slot).
-# The A/B boot-guard lives in the initramfs (wrap_boot_initramfs): it counts
-# boot attempts and rolls back BEFORE mounting the root, and rolls back
-# immediately if the slot's squashfs won't even mount.
+# The A/B boot-guard IS the initramfs /init (wrap_boot_initramfs installs it as
+# /init and the original Alpine init as /init.real). No rdinit= — that is not
+# honoured on the RPi, so the guard must be /init, which the kernel always runs.
 # - panic=10: a dying init (PID 1 exit -> kernel panic) reboots after 10s so a
 #   broken-but-mountable slot also accumulates failed boots toward rollback.
-SLOT_KERNEL_OPTS="rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs rdinit=/init.aa panic=10 console=tty1 quiet"
+SLOT_KERNEL_OPTS="rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs panic=10 console=tty1 quiet"
 
 # Place a slot's kernel + initramfs on the boot partition as vmlinuz-<slot>/initramfs-<slot>
 place_slot_kernel() {
