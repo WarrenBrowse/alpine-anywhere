@@ -207,6 +207,17 @@ switch_slot() {
     slot_dev=$(get_part_dev "$disk" "$partnum")
 
     log_step "Switching boot to slot $new_slot..."
+
+    # Per-slot verity: enable aaverity=1 iff THIS slot was built with dm-verity
+    # (its slots.meta carries a ROOT_HASH). This is detected from the on-disk
+    # metadata, not a build-time flag, so `switch` does the right thing for a
+    # verity slot regardless of how it is invoked.
+    local kopts="$SLOT_KERNEL_OPTS"
+    if [ -n "$(get_slot_meta "$new_slot" ROOT_HASH)" ]; then
+        kopts="$kopts aaverity=1"
+        log_info "Slot $new_slot is dm-verity protected; adding aaverity=1"
+    fi
+
     if [ -f "${BOOT_MNT}/config.txt" ]; then
         # Raspberry Pi: select the slot's kernel/initramfs + root device.
         # Patterns are ANCHORED to the slot letter ([AB]) so a trailing comment
@@ -217,7 +228,7 @@ switch_slot() {
         sed_inplace_checked "${BOOT_MNT}/config.txt" "^kernel=vmlinuz-${new_slot}\$" \
             -e "s|^kernel=vmlinuz-[AB].*|kernel=vmlinuz-${new_slot}|" \
             -e "s|^initramfs initramfs-[AB].*|initramfs initramfs-${new_slot} followkernel|"
-        printf 'root=%s %s\n' "$slot_dev" "$(slot_kernel_opts)" | atomic_write "${BOOT_MNT}/cmdline.txt"
+        printf 'root=%s %s\n' "$slot_dev" "$kopts" | atomic_write "${BOOT_MNT}/cmdline.txt"
     elif [ -f "${BOOT_MNT}/extlinux/extlinux.conf" ]; then
         sed_inplace_checked "${BOOT_MNT}/extlinux/extlinux.conf" "^DEFAULT alpine-${new_slot}\$" \
             -e "s|^DEFAULT alpine-[AB].*|DEFAULT alpine-${new_slot}|"

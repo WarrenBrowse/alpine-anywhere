@@ -178,6 +178,20 @@ Describe 'upgrade.sh'
             The contents of file "$BOOT_MNT/current_slot" should include "B"
             The stderr should be defined
         End
+
+        It 'adds aaverity=1 only when the target slot has a ROOT_HASH (verity)'
+            printf 'SLOT_B_ROOT_HASH=deadbeef\n' > "$BOOT_MNT/slots.meta"
+            When call switch_slot B
+            The contents of file "$BOOT_MNT/cmdline.txt" should include "aaverity=1"
+            The stderr should be defined
+        End
+
+        It 'omits aaverity for a non-verity target slot'
+            printf 'SLOT_B_VERSION=3.20\n' > "$BOOT_MNT/slots.meta"
+            When call switch_slot B
+            The contents of file "$BOOT_MNT/cmdline.txt" should not include "aaverity"
+            The stderr should be defined
+        End
     End
 
     Describe 'Upgrade constants'
