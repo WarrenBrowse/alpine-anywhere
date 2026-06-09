@@ -80,6 +80,25 @@ Describe 'install.sh'
             End
         End
 
+        Describe 'kernel_supports_verity()'
+            setup() { KROOT=$(mktemp -d); mkdir -p "$KROOT/boot"; }
+            cleanup_dir() { rm -rf "$KROOT"; }
+            BeforeEach 'setup'
+            AfterEach 'cleanup_dir'
+
+            It 'is true when CONFIG_DM_VERITY=m'
+                printf 'CONFIG_BLK_DEV_DM=m\nCONFIG_DM_VERITY=m\n' > "$KROOT/boot/config-6.6"
+                When call kernel_supports_verity "$KROOT"
+                The status should be success
+            End
+
+            It 'is false when CONFIG_DM_VERITY is not set (Alpine linux-rpi)'
+                printf 'CONFIG_BLK_DEV_DM=m\n# CONFIG_DM_VERITY is not set\n' > "$KROOT/boot/config-6.6"
+                When call kernel_supports_verity "$KROOT"
+                The status should be failure
+            End
+        End
+
         Describe 'format_verity_slot()'
             setup() {
                 TESTDIR=$(mktemp -d)

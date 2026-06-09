@@ -340,6 +340,23 @@ get_part_dev() {
     fi
 }
 
+# True if the kernel installed in the build chroot supports dm-verity, either
+# builtin (CONFIG_DM_VERITY=y) or as a loadable module (=m / a dm-verity.ko).
+# Checked against the real /boot/config-* so we never enable verity on a kernel
+# that can't open it at boot (e.g. Alpine linux-rpi, which disables it).
+kernel_supports_verity() {
+    _ksv_root="$1"
+    # Builtin or module per the kernel config.
+    if grep -hqs '^CONFIG_DM_VERITY=[ym]' "${_ksv_root}"/boot/config-* 2>/dev/null; then
+        return 0
+    fi
+    # Fallback: an actual dm-verity.ko shipped under the installed modules.
+    if ls "${_ksv_root}"/lib/modules/*/kernel/drivers/md/dm-verity.ko* >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
 # Write a squashfs image to a slot partition AND lay down a dm-verity hash tree
 # for it, so the kernel can cryptographically verify every block at runtime.
 #
@@ -501,8 +518,10 @@ EOF
     mount --bind /dev "${build_dir}/dev"
 
     # Determine kernel package based on platform. Alpine 3.20+ unified the RPi
-    # flavors into a single `linux-rpi` (the old linux-rpi4 no longer exists),
-    # so use that; it ships the dm-verity module needed for --verity.
+    # flavors into a single `linux-rpi` (the old linux-rpi4 no longer exists).
+    # NOTE: linux-rpi has `# CONFIG_DM_VERITY is not set` (verified on a real
+    # 6.6.49-r0 Pi), so --verity is NOT available there; linux-lts (x86_64) is.
+    # The feasibility gate below enforces this.
     local kernel_pkg="linux-lts"
     if [ "$DETECTED_PLATFORM" = "rpi" ]; then
         kernel_pkg="linux-rpi"
@@ -555,6 +574,21 @@ EOF
     # RPi: install firmware package
     if [ "$DETECTED_PLATFORM" = "rpi" ]; then
         chroot "$build_dir" /sbin/apk add --no-cache raspberrypi-bootloader
+    fi
+
+    # dm-verity feasibility gate: the stock Alpine linux-rpi kernel ships with
+    # `# CONFIG_DM_VERITY is not set` (verified on a real RPi: 6.6.49-r0), so
+    # opening the verity device at boot would fail and the slot would never
+    # mount -> rollback loop -> unbootable. Check the kernel we just installed
+    # and refuse (explicit --verity) or auto-disable (hardened default) rather
+    # than building a brick.
+    if verity_enabled && ! kernel_supports_verity "$build_dir"; then
+        if [ "$VERITY_MODE" = "on" ]; then
+            die "dm-verity requested but the installed kernel ($kernel_pkg) has no CONFIG_DM_VERITY. Use --no-verity or a kernel with dm-verity (e.g. linux-lts on x86_64)."
+        fi
+        log_warn "Kernel ($kernel_pkg) lacks CONFIG_DM_VERITY; disabling dm-verity for this build."
+        log_warn "(The hardened root will NOT be verity-protected on this platform.)"
+        VERITY_MODE=off
     fi
 
     # Extra packages
