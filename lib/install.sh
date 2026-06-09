@@ -802,13 +802,23 @@ wrap_boot_initramfs() {
         chmod +x "$tmp/sbin/aa-verity-open"
 
         if ! grep -q '/sbin/aa-verity-open' "$tmp/init"; then
-            # Insert before the FIRST line that mounts onto $sysroot (the root
-            # mount). Fail the build LOUDLY if no such anchor exists, rather than
-            # shipping a verity slot the initramfs can't open (= unbootable).
-            grep -qE '^[[:space:]]*mount .*\$sysroot' "$tmp/init" \
-                || die "wrap_boot_initramfs: no root-mount anchor for verity in initramfs init (mkinitfs layout changed)"
-            awk '
-                /^[[:space:]]*mount .*\$sysroot/ && !done {
+            # Open verity right before the root device is mounted, AFTER
+            # nlplug-findfs has plugged the real slot node. In the real Alpine
+            # mkinitfs init the overlaytmpfs path (what we use) mounts $KOPT_root
+            # at /media/root-ro via `mkdir -p /media/root-ro ...`; the plain path
+            # mounts onto $sysroot. Anchor on whichever appears first and rewrite
+            # KOPT_root to the verity mapper so the subsequent mount uses it.
+            # Fail the build LOUDLY rather than ship an unbootable verity slot.
+            local vanchor=""
+            if grep -qE '^[[:space:]]*mkdir -p /media/root-ro' "$tmp/init"; then
+                vanchor='^[[:space:]]*mkdir -p /media/root-ro'
+            elif grep -qE 'mount .*\$sysroot' "$tmp/init"; then
+                vanchor='mount .*\$sysroot'
+            else
+                die "wrap_boot_initramfs: no root-mount anchor for verity in initramfs init (mkinitfs layout changed)"
+            fi
+            awk -v anchor="$vanchor" '
+                $0 ~ anchor && !done {
                     match($0, /^[[:space:]]*/); ind=substr($0, 1, RLENGTH)
                     print ind "if [ \"$KOPT_aaverity\" = 1 ]; then _aadev=$(/sbin/aa-verity-open \"$KOPT_root\" \"$sysroot\" 2>/dev/null); [ -n \"$_aadev\" ] && KOPT_root=\"$_aadev\" && root=\"$_aadev\"; fi"
                     done=1

@@ -381,22 +381,32 @@ exit 0'
         # before the root mount (anchored on `mount ... $sysroot`).
         wrap_verity_inspect() {
             VERITY_MODE=on
-            # Rebuild the fixture init with a root-mount line for the verity anchor.
-            printf '#!/bin/sh\nmount -t proc proc /proc\nmount -o ro "$KOPT_root" "$sysroot"\nexec switch_root "$sysroot" /sbin/init "$@"\n' > "$SRC/init"
+            # Rebuild the fixture init mirroring the REAL Alpine mkinitfs overlay
+            # path: nlplug-findfs, then `mkdir -p /media/root-ro ...`, then the
+            # root mount of $KOPT_root onto /media/root-ro (NOT $sysroot).
+            {
+                printf '#!/bin/sh\n'
+                printf 'nlplug-findfs -p /sbin/mdev $KOPT_root\n'
+                printf 'mkdir -p /media/root-ro /media/root-rw $sysroot/media/root-ro\n'
+                printf 'mount -t squashfs -o ro $KOPT_root /media/root-ro\n'
+                printf 'mount -t overlay -o lowerdir=/media/root-ro overlayfs $sysroot\n'
+                printf 'exec switch_root $sysroot /sbin/init "$@"\n'
+            } > "$SRC/init"
             chmod +x "$SRC/init"
             ( cd "$SRC" && find . | cpio -o -H newc 2>/dev/null | gzip ) > "$WD/initramfs"
             wrap_boot_initramfs "$WD/initramfs" >/dev/null 2>&1
             rm -rf "$WD/out"; mkdir -p "$WD/out"
             ( cd "$WD/out" && gzip -dc "$WD/initramfs" | cpio -idm 2>/dev/null )
             [ -x "$WD/out/sbin/aa-verity-open" ] && echo "HAS_VERITY_FILE"
-            awk '/aa-verity-open/{v=NR} /mount .*\$sysroot/{m=NR} END{ if (v>0 && m>0 && v<m) print "VERITY_BEFORE_MOUNT" }' "$WD/out/init"
+            # verity-open must come AFTER nlplug-findfs and BEFORE the root mount
+            awk '/nlplug-findfs/{n=NR} /aa-verity-open/{v=NR} /mount .*\/media\/root-ro/{m=NR} END{ if (n>0 && v>n && m>0 && v<m) print "VERITY_AFTER_NLPLUG_BEFORE_MOUNT" }' "$WD/out/init"
         }
 
-        It 'embeds aa-verity-open and calls it before the root mount when --verity'
+        It 'embeds aa-verity-open and calls it after nlplug-findfs, before the root mount'
             command -v cpio >/dev/null 2>&1 || Skip "cpio not available"
             When call wrap_verity_inspect
             The output should include "HAS_VERITY_FILE"
-            The output should include "VERITY_BEFORE_MOUNT"
+            The output should include "VERITY_AFTER_NLPLUG_BEFORE_MOUNT"
         End
     End
 
