@@ -127,6 +127,36 @@ is_block_device() {
     [ -b "$1" ]
 }
 
+# Ensure the system clock is sane before any TLS download. RTC-less hardware
+# (e.g. a Raspberry Pi) can boot at ~1970, which makes every HTTPS certificate
+# look "not yet valid" and breaks fail-closed integrity checks. Best-effort:
+# if the year looks bogus, try to step the clock via NTP (busybox ntpd, then
+# chronyd/ntpd if present). Never fatal - just warns if it can't fix it.
+ensure_sane_clock() {
+    _esc_year=$(date -u +%Y 2>/dev/null || echo 1970)
+    [ "${_esc_year:-1970}" -ge 2021 ] 2>/dev/null && return 0
+
+    log_warn "System clock looks wrong (year ${_esc_year}); syncing time before TLS downloads..."
+    _esc_pool="pool.ntp.org"
+    if command_exists ntpd; then
+        # busybox ntpd: -q quit after sync, -n no daemon, -p server
+        ntpd -q -n -p "$_esc_pool" >/dev/null 2>&1 \
+            || ntpd -dnq -p "$_esc_pool" >/dev/null 2>&1 || true
+    fi
+    _esc_year=$(date -u +%Y 2>/dev/null || echo 1970)
+    if [ "${_esc_year:-1970}" -lt 2021 ] 2>/dev/null && command_exists chronyd; then
+        chronyd -q "server $_esc_pool iburst" >/dev/null 2>&1 || true
+        _esc_year=$(date -u +%Y 2>/dev/null || echo 1970)
+    fi
+
+    if [ "${_esc_year:-1970}" -ge 2021 ] 2>/dev/null; then
+        log_info "Clock synced: $(date -u 2>/dev/null)"
+    else
+        log_warn "Could not sync clock automatically. HTTPS/integrity checks may fail."
+        log_warn "Fix manually (e.g. 'date -s \"YYYY-MM-DD HH:MM:SS\"') and retry."
+    fi
+}
+
 # Is dm-verity protection of the A/B slots enabled? auto => on iff --hardened.
 verity_enabled() {
     case "$VERITY_MODE" in

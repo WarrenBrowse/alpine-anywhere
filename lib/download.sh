@@ -215,10 +215,12 @@ verify_downloads() {
 # List of fallback mirrors (space-separated string)
 FALLBACK_MIRRORS="https://dl-cdn.alpinelinux.org/alpine https://uk.alpinelinux.org/alpine https://nl.alpinelinux.org/alpine https://ftp.halifax.rwth-aachen.de/alpine"
 
-# Test if a mirror is accessible. When integrity verification is in force,
-# also require that the published .sha512 for the netboot kernel is reachable -
-# a mirror that serves artifacts but not their checksums would otherwise force
-# a fail-closed abort later.
+# Test if a mirror is accessible. We only check reachability here - integrity is
+# enforced at DOWNLOAD time (verify_sha512/enforce_integrity), which fails closed
+# with a clear message if a checksum is missing. Gating mirror SELECTION on a
+# specific artifact's checksum was both fragile (artifact/layout varies by mode
+# and arch) and wrong for install mode (which uses apk + minirootfs, not the
+# netboot kernel).
 test_mirror() {
     mirror="$1"
     test_url="${mirror}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/"
@@ -226,14 +228,6 @@ test_mirror() {
     log_debug "Testing mirror: $mirror"
 
     http_check_url "$test_url" || return 1
-
-    if [ "$NO_VERIFY" != "true" ] && [ -z "$CHECKSUM_DIR" ]; then
-        sum_url="${mirror}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/netboot/vmlinuz-${KERNEL_FLAVOR}.sha512"
-        if ! http_check_url "$sum_url"; then
-            log_debug "Mirror lacks checksum file: $sum_url"
-            return 1
-        fi
-    fi
     return 0
 }
 

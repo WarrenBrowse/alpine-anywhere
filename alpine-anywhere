@@ -305,6 +305,8 @@ run_local_ab_install() {
     log_step "Step 1/6: System validation"
     validate_local_commands
     validate_local_system
+    # RTC-less targets (Raspberry Pi) can boot at 1970 -> TLS fails. Fix first.
+    ensure_sane_clock
 
     # Step 2: Network detection
     log_step "Step 2/6: Network detection"
@@ -413,6 +415,9 @@ run_install_continue() {
     INSTALL_CACHE_DIR="${INSTALL_BASE_DIR}/cache"
     mkdir -p "$INSTALL_CACHE_DIR"
 
+    # RTC-less targets can boot at 1970 -> TLS fails on the image build.
+    ensure_sane_clock
+
     # Detect disk (explicit --disk wins, consistent with run_ab_install)
     local disk
     if [ -n "$TARGET_DISK" ]; then
@@ -451,6 +456,9 @@ run_local_upgrade() {
     if ! mount 2>/dev/null | grep -q '/media/root-ro'; then
         die "This system does not appear to have an A/B installation (no squashfs root)"
     fi
+
+    # RTC-less targets can boot at 1970 -> TLS fails on the image build.
+    ensure_sane_clock
 
     # Populate DETECTED_* (arch/platform/hostname/network) — the image build in
     # the upgrade needs them just like a fresh install does.
