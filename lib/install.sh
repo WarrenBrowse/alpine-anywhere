@@ -1292,6 +1292,10 @@ install_secondary_slot() {
         set_slot_meta "$slot" "SALT" "$2"
         set_slot_meta "$slot" "DATA_SIZE" "$3"
         set_slot_meta "$slot" "HASH_OFFSET" "$4"
+    else
+        # Non-verity image: clear any stale verity metadata from a prior verity
+        # install of this slot, so `switch` won't spuriously add aaverity=1.
+        clear_slot_verity_meta "$slot"
     fi
     sync
     require umount "$BOOT_MNT"

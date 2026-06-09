@@ -132,6 +132,16 @@ set_slot_meta() {
         | atomic_write "$meta"
 }
 
+# Remove all dm-verity metadata for a slot (used when (re)installing a
+# non-verity image where a previous verity install left stale keys behind).
+clear_slot_verity_meta() {
+    local slot="$1"
+    local meta="${BOOT_MNT}/slots.meta"
+    [ -f "$meta" ] || return 0
+    grep -vE "^SLOT_${slot}_(ROOT_HASH|SALT|DATA_SIZE|HASH_OFFSET|ROOT_HASH_SIG)=" "$meta" \
+        | atomic_write "$meta"
+}
+
 # Set a non-slot (global) key in slots.meta, e.g. ROLLBACK_COUNT / BOOT_HALTED.
 set_global_meta() {
     local key="$1" value="$2"
@@ -189,6 +199,10 @@ install_to_slot() {
         set_slot_meta "$target_slot" "SALT" "$2"
         set_slot_meta "$target_slot" "DATA_SIZE" "$3"
         set_slot_meta "$target_slot" "HASH_OFFSET" "$4"
+    else
+        # Non-verity image: drop any stale verity metadata from a prior verity
+        # install of this slot, so `switch` won't spuriously add aaverity=1.
+        clear_slot_verity_meta "$target_slot"
     fi
 
     rm -f "$squashfs"
