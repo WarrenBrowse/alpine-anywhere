@@ -12,6 +12,8 @@ ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
 KERNEL_FLAVOR="${KERNEL_FLAVOR:-lts}"
 SSH_PORT="${SSH_PORT:-22}"
 SSH_IDENTITY="${SSH_IDENTITY:-}"
+SSH_KNOWN_HOSTS="${SSH_KNOWN_HOSTS:-}"    # Pinned known_hosts file (enforces StrictHostKeyChecking=yes)
+SSH_FINGERPRINT="${SSH_FINGERPRINT:-}"    # Expected host-key fingerprint (out-of-band pin)
 DRY_RUN="${DRY_RUN:-false}"
 VERBOSE="${VERBOSE:-false}"
 FORCE="${FORCE:-false}"
@@ -34,6 +36,9 @@ OVERLAY_DEVICE="${OVERLAY_DEVICE:-}"      # Device for persistent overlay
 TARGET_DISK="${TARGET_DISK:-}"            # Explicit install disk (e.g. /dev/sda); empty = auto-detect
 BOOT_SLOT="${BOOT_SLOT:-A}"               # Current boot slot (A/B)
 HARDENED_MODE="${HARDENED_MODE:-false}"   # Security hardened mode
+NO_VERIFY="${NO_VERIFY:-false}"           # Skip artifact checksum verification (UNSAFE)
+CHECKSUM_DIR="${CHECKSUM_DIR:-}"          # Local dir of *.sha512 files (air-gapped mirror)
+VERITY_MODE="${VERITY_MODE:-auto}"        # dm-verity on slots: auto|on|off (auto = on iff hardened)
 
 # Working directories (set by setup_install_dirs in exec.sh)
 WORK_DIR=""
@@ -115,6 +120,161 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# True if PATH is a block device. Wrapped in a function so tests can stub it
+# (they can't create real block devices without root).
+is_block_device() {
+    [ -b "$1" ]
+}
+
+# Is dm-verity protection of the A/B slots enabled? auto => on iff --hardened.
+verity_enabled() {
+    case "$VERITY_MODE" in
+        on) return 0 ;;
+        off) return 1 ;;
+        auto) [ "$HARDENED_MODE" = "true" ] ;;
+        *) return 1 ;;
+    esac
+}
+
+# =============================================================================
+# Error-handling discipline
+# =============================================================================
+#
+# `set -eu` is global (top of this file) but MUST NOT be relied upon for any
+# command that mutates persistent state: in a conditional context (inside
+# `if`, `&&`, `||`, or a function whose result is tested) `set -e` is
+# suppressed, so a failing mount/dd/mkfs would silently continue. Every such
+# command goes through `require` (abort on failure) or `try_warn` (best-effort,
+# returns status). Never use `set -e` in PID 1 / init contexts (a failing probe
+# must not kill init) - those use explicit per-step checks instead.
+
+# Run a command; abort with context if it fails. Use for every stateful op
+# (mount, umount, mkfs, parted, losetup, dd, cp of boot files, ...).
+require() {
+    "$@" || die "command failed (exit $?): $*"
+}
+
+# Run a best-effort command; log a warning on failure but keep going.
+# Returns the command's exit status. Use for genuinely optional steps
+# (partprobe, cosmetic cleanup) - replaces silent `|| true`.
+try_warn() {
+    if "$@"; then
+        return 0
+    else
+        _tw_rc=$?
+        log_warn "non-fatal command failed (exit $_tw_rc): $*"
+        return "$_tw_rc"
+    fi
+}
+
+# Quote a single value so it is safe to embed in a remote shell command line.
+# POSIX sh / BusyBox ash / bash 3.2 compatible. Each ' becomes '\'' .
+# NOTE: command substitution strips trailing newlines, so this helper must
+# only be used for short scalar values (hostnames, paths, versions), never for
+# multi-line file content - transfer file content with scp_to_remote instead.
+shell_quote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# Portable SHA-512 of a file -> bare hex on stdout (no filename).
+# Tries sha512sum (Linux/BusyBox), shasum (macOS), then openssl.
+sha512_file() {
+    if command_exists sha512sum; then
+        sha512sum "$1" | awk '{print $1}'
+    elif command_exists shasum; then
+        shasum -a 512 "$1" | awk '{print $1}'
+    elif command_exists openssl; then
+        openssl dgst -sha512 "$1" | awk '{print $NF}'
+    else
+        die "no SHA-512 tool available (need sha512sum, shasum, or openssl)"
+    fi
+}
+
+# Portable SHA-256 of a file -> bare hex on stdout (no filename).
+sha256_file() {
+    if command_exists sha256sum; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command_exists shasum; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif command_exists openssl; then
+        openssl dgst -sha256 "$1" | awk '{print $NF}'
+    else
+        die "no SHA-256 tool available (need sha256sum, shasum, or openssl)"
+    fi
+}
+
+# Atomically replace FILE with stdin: write to a temp sibling, fsync, rename,
+# then sync the directory. Survives power loss without leaving a truncated
+# file. Use for slots.meta, current_slot, config.txt/cmdline.txt/extlinux.conf.
+atomic_write() {
+    _aw_file="$1"
+    _aw_tmp="${_aw_file}.aatmp.$$"
+    cat > "$_aw_tmp" || { rm -f "$_aw_tmp"; die "atomic_write: cannot write $_aw_tmp"; }
+    sync "$_aw_tmp" 2>/dev/null || sync
+    mv -f "$_aw_tmp" "$_aw_file" || { rm -f "$_aw_tmp"; die "atomic_write: cannot rename to $_aw_file"; }
+    # Sync parent dir so the rename itself is durable (best-effort: busybox
+    # sync has no -d, so fall back to a global sync).
+    sync "$(dirname "$_aw_file")" 2>/dev/null || sync
+}
+
+# Assert that DIR is currently a mount point. Closes the "wrote to the tmpfs
+# mountpoint because mount silently failed, install reported success but the
+# system is unbootable" hole. PROC_MOUNTS is overridable for tests.
+assert_mounted() {
+    _am_dir="$1"
+    _am_proc="${PROC_MOUNTS:-/proc/mounts}"
+    if command_exists mountpoint; then
+        mountpoint -q "$_am_dir" && return 0
+    fi
+    grep -q " $_am_dir " "$_am_proc" 2>/dev/null || die "expected $_am_dir to be a mount point, but it is not (mount failed?)"
+}
+
+# Write a disk image to a block device, durably and verified.
+#   - conv=fsync so the data is on the platter before we return
+#   - stderr is surfaced (not discarded) so a write error is visible
+#   - read back and compare SHA-256 to catch partial writes / bad media before
+#     the slot is ever marked bootable
+# Echoes the image's sha256 on success (callers store it in slots.meta).
+write_image_to_device() {
+    _wid_src="$1"; _wid_dev="$2"
+    [ -f "$_wid_src" ] || die "write_image_to_device: source $_wid_src missing"
+    is_block_device "$_wid_dev" || die "write_image_to_device: $_wid_dev is not a block device"
+
+    require dd if="$_wid_src" of="$_wid_dev" bs=1M conv=fsync
+    sync
+
+    _wid_size=$(wc -c < "$_wid_src")
+    _wid_want=$(sha256_file "$_wid_src")
+    # Read back exactly as many bytes as the image and hash them.
+    _wid_got=$(dd if="$_wid_dev" bs=1M 2>/dev/null | head -c "$_wid_size" | { \
+        if command_exists sha256sum; then sha256sum | awk '{print $1}';
+        elif command_exists shasum; then shasum -a 256 | awk '{print $1}';
+        else openssl dgst -sha256 | awk '{print $NF}'; fi; })
+    if [ "$_wid_want" != "$_wid_got" ]; then
+        die "write_image_to_device: read-back mismatch on $_wid_dev (image not durably/correctly written)"
+    fi
+    log_info "Image write verified (sha256) on $_wid_dev"
+    echo "$_wid_want"
+}
+
+# In-place sed with verification. Runs `sed -e EXPR... FILE` to a temp file,
+# requires the result to be non-empty AND to contain EXPECT (the post-edit
+# state the caller expects), then atomically replaces FILE. Dies on a
+# zero-match no-op - silently failing to flip a slot is a brick path after an
+# upgrade. Usage: sed_inplace_checked FILE EXPECT -e 's|...|...|' [-e ...]
+sed_inplace_checked() {
+    _sic_file="$1"; _sic_expect="$2"; shift 2
+    _sic_tmp="${_sic_file}.aatmp.$$"
+    sed "$@" "$_sic_file" > "$_sic_tmp" || { rm -f "$_sic_tmp"; die "sed_inplace_checked: sed failed on $_sic_file"; }
+    [ -s "$_sic_tmp" ] || { rm -f "$_sic_tmp"; die "sed_inplace_checked: result empty for $_sic_file"; }
+    if ! grep -q "$_sic_expect" "$_sic_tmp"; then
+        rm -f "$_sic_tmp"
+        die "sed_inplace_checked: expected state '$_sic_expect' absent after edit of $_sic_file"
+    fi
+    mv -f "$_sic_tmp" "$_sic_file" || { rm -f "$_sic_tmp"; die "sed_inplace_checked: cannot replace $_sic_file"; }
+    sync "$_sic_file" 2>/dev/null || sync
+}
+
 # Create temporary working directory
 create_work_dir() {
     WORK_DIR=$(mktemp -d -t alpine-anywhere.XXXXXX)
@@ -132,9 +292,25 @@ cleanup() {
 
     if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then
         log_debug "Cleaning up work directory: $WORK_DIR"
+        secure_wipe_dir "$WORK_DIR"
         rm -rf "$WORK_DIR"
     fi
     exit $exit_code
+}
+
+# Best-effort secure erase of sensitive material (SSH host keys, apkovl,
+# captured keys) under a directory before it is removed. Uses shred when
+# available, else overwrites with a single zero pass. Never fatal.
+secure_wipe_dir() {
+    _swd_dir="$1"
+    [ -d "$_swd_dir" ] || return 0
+    if command_exists shred; then
+        find "$_swd_dir" -type f \( -name '*_key' -o -name '*.tar.gz' -o -name 'authorized_keys' -o -path '*ssh*' \) \
+            -exec shred -u {} + 2>/dev/null || true
+    else
+        find "$_swd_dir" -type f \( -name '*_key' -o -name '*.tar.gz' -o -name 'authorized_keys' -o -path '*ssh*' \) \
+            -exec sh -c 'dd if=/dev/zero of="$1" bs=1k count=8 conv=notrunc 2>/dev/null; rm -f "$1"' _ {} \; 2>/dev/null || true
+    fi
 }
 
 # Setup cleanup trap
@@ -271,6 +447,10 @@ Options:
   -k, --kernel FLAVOR            Kernel flavor: lts or virt (default: lts)
   -p, --port PORT                SSH port (default: 22)
   -i, --identity FILE            SSH private key file
+  --known-hosts FILE             Pin the target's host key via this known_hosts
+                                   file (enforces StrictHostKeyChecking=yes)
+  --ssh-fingerprint FP           Expected host-key fingerprint; abort on mismatch
+                                   (out-of-band MITM defence)
   -n, --dry-run                  Show what would be done without executing
   -v, --verbose                  Verbose output
   -f, --force                    Skip confirmation prompts
@@ -302,6 +482,16 @@ Image customization:
 Init system:
   --init SYSTEM                  Init/service manager: openrc or s6
                                    (default: s6 in --hardened mode, else openrc)
+
+Integrity options:
+  --checksum-dir DIR             Verify downloads against local *.sha512 files
+                                   in DIR (for air-gapped/pinned mirrors)
+  --no-verify                    Skip artifact checksum verification (UNSAFE -
+                                   only for debugging; never for a VPN host)
+  --verity                       Protect A/B root slots with dm-verity (default
+                                   ON in --hardened): per-slot hash tree, root
+                                   verified block-by-block at boot
+  --no-verity                    Disable dm-verity (debug / unsupported kernels)
 
 Security options:
   --hardened                     Security hardened mode:
@@ -469,6 +659,42 @@ parse_arguments() {
                 ;;
             --hardened)
                 HARDENED_MODE=true
+                shift
+                ;;
+            --no-verify)
+                NO_VERIFY=true
+                shift
+                ;;
+            --known-hosts)
+                SSH_KNOWN_HOSTS="$2"
+                shift 2
+                ;;
+            --known-hosts=*)
+                SSH_KNOWN_HOSTS="${1#*=}"
+                shift
+                ;;
+            --ssh-fingerprint)
+                SSH_FINGERPRINT="$2"
+                shift 2
+                ;;
+            --ssh-fingerprint=*)
+                SSH_FINGERPRINT="${1#*=}"
+                shift
+                ;;
+            --verity)
+                VERITY_MODE=on
+                shift
+                ;;
+            --no-verity)
+                VERITY_MODE=off
+                shift
+                ;;
+            --checksum-dir)
+                CHECKSUM_DIR="$2"
+                shift 2
+                ;;
+            --checksum-dir=*)
+                CHECKSUM_DIR="${1#*=}"
                 shift
                 ;;
             --init)

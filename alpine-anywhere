@@ -79,6 +79,10 @@ main() {
     # Parse command line arguments
     parse_arguments "$@"
 
+    # Reject unsafe characters in inputs that reach remote shells / kernel
+    # cmdline before doing anything with them.
+    validate_safe_inputs
+
     # Lightweight A/B slot subcommands (status/verify/rollback/bootcount).
     # Handled before the banner/work-dir setup so they stay quiet and fast
     # (bootcount runs at every boot from an OpenRC service).
@@ -190,8 +194,23 @@ run_remote_installation() {
     log_info "Scripts deployed. Pivoting to Alpine (RAM-only)..."
     echo ""
 
-    # Execute on remote - connection will be lost during pivot
+    # Execute on remote. The connection is EXPECTED to drop mid-command when
+    # the pivot starts, so a non-zero return here is not, by itself, proof of
+    # success OR failure - we must observe the host afterwards. We do not print
+    # a success banner on faith (the old `|| true` masked real failures).
     run_on_remote || true
+
+    if [ "$DRY_RUN" = "true" ]; then
+        log_info "[DRY-RUN] Skipping post-pivot verification"
+        return 0
+    fi
+
+    log_step "Verifying the host came back as Alpine..."
+    # Drop the multiplexed master: it is pinned to the pre-pivot session and
+    # would otherwise poison the reconnect.
+    close_ssh_multiplexing 2>/dev/null || true
+    wait_for_host 180
+    verify_alpine_boot
 
     echo ""
     echo "============================================"

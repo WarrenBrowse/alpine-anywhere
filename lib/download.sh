@@ -75,7 +75,63 @@ http_check_url() {
 # Download Functions
 # =============================================================================
 
-# Download a file with progress indication
+# Verify a downloaded file against its published SHA-512.
+# The checksum source is, in order of preference:
+#   1. $CHECKSUM_DIR/<basename>.sha512  (air-gapped / pinned local copy)
+#   2. <url>.sha512 fetched over HTTPS   (Alpine publishes these alongside
+#      every netboot / minirootfs / release artifact)
+# Honest trust model: Alpine does NOT publish detached GPG signatures for the
+# netboot images, so the anchor here is HTTPS transport + the published
+# sha512. apk packages pulled later are separately covered by the signed
+# APKINDEX. Returns: 0 verified, 2 no checksum available (caller decides
+# policy), dies on an actual mismatch.
+verify_sha512() {
+    _vs_url="$1"; _vs_dest="$2"
+    _vs_name=$(basename "$_vs_dest")
+    _vs_want=""
+
+    if [ -n "$CHECKSUM_DIR" ] && [ -f "${CHECKSUM_DIR}/${_vs_name}.sha512" ]; then
+        _vs_want=$(awk '{print $1}' "${CHECKSUM_DIR}/${_vs_name}.sha512")
+        log_debug "Checksum source: ${CHECKSUM_DIR}/${_vs_name}.sha512"
+    else
+        _vs_want=$(http_fetch_stdout "${_vs_url}.sha512" 2>/dev/null | awk '{print $1}' || true)
+        log_debug "Checksum source: ${_vs_url}.sha512"
+    fi
+
+    if [ -z "$_vs_want" ]; then
+        log_warn "No .sha512 published for ${_vs_name}"
+        return 2
+    fi
+
+    _vs_got=$(sha512_file "$_vs_dest")
+    if [ "$_vs_want" != "$_vs_got" ]; then
+        log_error "CHECKSUM MISMATCH for ${_vs_name}"
+        log_error "  expected: $_vs_want"
+        log_error "  got:      $_vs_got"
+        die "Integrity check failed for ${_vs_name} - refusing to use a tampered/corrupt artifact"
+    fi
+
+    log_info "Integrity verified (sha512): ${_vs_name}"
+    return 0
+}
+
+# Apply the fail-closed verification policy to a freshly downloaded file.
+# --no-verify downgrades to a warning (documented unsafe). A missing checksum
+# is fatal by default (paranoid VPN host) unless --no-verify is set.
+enforce_integrity() {
+    _ei_url="$1"; _ei_dest="$2"
+    if [ "$NO_VERIFY" = "true" ]; then
+        log_warn "Integrity check SKIPPED for $(basename "$_ei_dest") (--no-verify)"
+        return 0
+    fi
+    verify_sha512 "$_ei_url" "$_ei_dest"
+    case $? in
+        0) return 0 ;;
+        2) die "No checksum available for $(basename "$_ei_dest"). Use --checksum-dir or (unsafe) --no-verify." ;;
+    esac
+}
+
+# Download a file with progress indication, then verify its integrity.
 download_file() {
     url="$1"
     dest="$2"
@@ -91,6 +147,8 @@ download_file() {
     if ! http_fetch_file "$url" "$dest"; then
         die "Failed to download: $url"
     fi
+
+    enforce_integrity "$url" "$dest"
 
     log_debug "Downloaded: $filename"
 }
@@ -157,17 +215,26 @@ verify_downloads() {
 # List of fallback mirrors (space-separated string)
 FALLBACK_MIRRORS="https://dl-cdn.alpinelinux.org/alpine https://uk.alpinelinux.org/alpine https://nl.alpinelinux.org/alpine https://ftp.halifax.rwth-aachen.de/alpine"
 
-# Test if a mirror is accessible
+# Test if a mirror is accessible. When integrity verification is in force,
+# also require that the published .sha512 for the netboot kernel is reachable -
+# a mirror that serves artifacts but not their checksums would otherwise force
+# a fail-closed abort later.
 test_mirror() {
     mirror="$1"
     test_url="${mirror}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/"
 
     log_debug "Testing mirror: $mirror"
 
-    if http_check_url "$test_url"; then
-        return 0
+    http_check_url "$test_url" || return 1
+
+    if [ "$NO_VERIFY" != "true" ] && [ -z "$CHECKSUM_DIR" ]; then
+        sum_url="${mirror}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/netboot/vmlinuz-${KERNEL_FLAVOR}.sha512"
+        if ! http_check_url "$sum_url"; then
+            log_debug "Mirror lacks checksum file: $sum_url"
+            return 1
+        fi
     fi
-    return 1
+    return 0
 }
 
 # Find a working mirror

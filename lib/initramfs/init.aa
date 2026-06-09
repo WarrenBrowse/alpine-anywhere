@@ -1,0 +1,146 @@
+#!/bin/sh
+# A/B boot-guard: invoked by the patched Alpine init right before switch_root,
+# as:  init.aa "$KOPT_root" "$sysroot"
+#
+# By this point the init has moved /proc,/sys,/dev into $sysroot, so we must NOT
+# rely on /proc/cmdline or /dev/* being at their usual paths. Best-effort: this
+# NEVER blocks the boot (exit 0) unless it deliberately reboots for a rollback.
+#
+# Strict POSIX sh / BusyBox ash - runs before switch_root. Do not add bashisms.
+# This file is a standalone script (not a heredoc) so it can be `sh -n`-checked,
+# shellcheck'd and unit-tested; wrap_boot_initramfs copies it into the initramfs.
+ROOTARG="$1"; SYSROOT="$2"
+
+# Mount point for the FAT boot partition. Overridable for unit tests; defaults
+# to /aa-boot in the real initramfs.
+AA_BOOT_DIR="${AA_BOOT_DIR:-/aa-boot}"
+
+# Kernel-log breadcrumbs (survive into the booted system's `dmesg`). /dev may be
+# at $SYSROOT/dev now, so pick whichever /dev/kmsg is writable.
+KMSG=/dev/kmsg; [ -w "$KMSG" ] || KMSG="${SYSROOT}/dev/kmsg"
+klog() { echo "init.aa: $*" > "$KMSG" 2>/dev/null; echo "init.aa: $*"; }
+
+# 1) Root device: prefer the init's $KOPT_root arg; fall back to the (moved)
+#    cmdline under $SYSROOT/proc, then a bare /proc/cmdline.
+root="$ROOTARG"
+[ -z "$root" ] && [ -n "$SYSROOT" ] && root=$(sed -n 's/.*[ ]root=\([^ ]*\).*/\1/p' "${SYSROOT}/proc/cmdline" 2>/dev/null | head -n1)
+[ -z "$root" ] && root=$(sed -n 's/.*[ ]root=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null | head -n1)
+klog "enter root='$root' sysroot='$SYSROOT'"
+case "$root" in
+    *2) slot=A ;;
+    *3) slot=B ;;
+    *) klog "root not an A/B slot; skip"; exit 0 ;;
+esac
+case "$root" in *mmcblk*|*nvme*) pfx="p" ;; *) pfx="" ;; esac
+disk=${root%${pfx}[0-9]}            # e.g. /dev/sda  /dev/mmcblk0
+base=${disk##*/}                    # e.g. sda       mmcblk0
+
+# 2) Locate the FAT boot partition node (part 1). /dev was likely moved to
+#    $SYSROOT/dev, so search there too.
+bootname="${base}${pfx}1"
+boot=""
+for c in "/dev/${bootname}" "${SYSROOT}/dev/${bootname}"; do
+    [ -b "$c" ] && { boot="$c"; break; }
+done
+[ -z "$boot" ] && boot="/dev/${bootname}"
+klog "slot=$slot disk=$disk boot=$boot"
+
+# 3) Mount it (vfat is built into the kernel - no module needed).
+mkdir -p "${AA_BOOT_DIR}" 2>/dev/null
+if ! mount -t vfat "$boot" "${AA_BOOT_DIR}" 2>/dev/null && ! mount "$boot" "${AA_BOOT_DIR}" 2>/dev/null; then
+    klog "cannot mount boot $boot; skip (boot continues)"
+    exit 0
+fi
+meta=${AA_BOOT_DIR}/slots.meta
+say() { echo "$*" >> "${AA_BOOT_DIR}/init-aa.log" 2>/dev/null; sync 2>/dev/null; klog "$*"; }
+say "start slot=$slot root=$root boot=$boot"
+if [ ! -f "$meta" ]; then say "no slots.meta; skip"; umount "${AA_BOOT_DIR}" 2>/dev/null; exit 0; fi
+
+# meta_set KEY VALUE  - atomically replace a key in slots.meta (tmp+mv+sync).
+meta_set() {
+    grep -v "^$1=" "$meta" > "$meta.t" 2>/dev/null
+    echo "$1=$2" >> "$meta.t"
+    mv "$meta.t" "$meta"; sync
+}
+
+# If a prior rollback already halted slot-flipping (both slots judged bad),
+# do NOT keep rebooting - that is an infinite reboot loop on a headless box.
+# Just continue booting the current slot and log loudly; `aa verify` clears it.
+if [ "$(sed -n 's/^BOOT_HALTED=//p' "$meta" | head -n1)" = "1" ]; then
+    say "BOOT_HALTED set; not flipping slots, continuing current boot"
+    umount "${AA_BOOT_DIR}" 2>/dev/null
+    exit 0
+fi
+
+# Increment this slot's boot counter (persisted on the FAT boot partition).
+cnt=$(sed -n "s/^SLOT_${slot}_BOOT_COUNT=//p" "$meta" | head -n1); cnt=$((${cnt:-0}+1))
+ver=$(sed -n "s/^SLOT_${slot}_VERIFIED=//p" "$meta" | head -n1)
+meta_set "SLOT_${slot}_BOOT_COUNT" "$cnt"
+say "count=$cnt verified=$ver (rollback when count>1 && !verified)"
+
+# One unverified retry then roll back: the first boot sets count=1 (the slot's
+# own aa-verify resets it to 0 on a healthy boot); if it failed and rebooted,
+# count reaches 2 while still unverified -> switch to the other slot.
+if [ "$cnt" -gt 1 ] && [ "$ver" != "true" ]; then
+    other=B; [ "$slot" = B ] && other=A
+    opart_other=3; [ "$other" = A ] && opart_other=2
+    if grep -q "^SLOT_${other}_VERSION=." "$meta"; then
+        odev="/dev/${base}${pfx}${opart_other}"      # canonical path for next boot
+        changed=0
+        # config.txt: select the other slot's kernel + initramfs (RPi). Anchor
+        # the pattern to the slot letter ([AB]) so a trailing comment cannot be
+        # swallowed, and only treat the edit as done if it actually changed.
+        if [ -f ${AA_BOOT_DIR}/config.txt ]; then
+            sed "s|^kernel=vmlinuz-[AB].*|kernel=vmlinuz-${other}|; s|^initramfs initramfs-[AB].*|initramfs initramfs-${other} followkernel|" ${AA_BOOT_DIR}/config.txt > ${AA_BOOT_DIR}/config.txt.t 2>/dev/null
+            if grep -q "^kernel=vmlinuz-${other}\$" ${AA_BOOT_DIR}/config.txt.t; then
+                mv ${AA_BOOT_DIR}/config.txt.t ${AA_BOOT_DIR}/config.txt; sync; changed=1
+            else
+                rm -f ${AA_BOOT_DIR}/config.txt.t
+            fi
+            # cmdline.txt: swap only root=, preserving the rest of the options.
+            if [ -f ${AA_BOOT_DIR}/cmdline.txt ]; then
+                sed "s|root=[^ ]*|root=${odev}|" ${AA_BOOT_DIR}/cmdline.txt > ${AA_BOOT_DIR}/cmdline.txt.t 2>/dev/null \
+                    && mv ${AA_BOOT_DIR}/cmdline.txt.t ${AA_BOOT_DIR}/cmdline.txt; sync
+            fi
+        fi
+        # extlinux fallback (non-RPi): point DEFAULT at the other slot.
+        if [ -f ${AA_BOOT_DIR}/extlinux/extlinux.conf ]; then
+            sed "s|^DEFAULT alpine-[AB].*|DEFAULT alpine-${other}|" ${AA_BOOT_DIR}/extlinux/extlinux.conf > ${AA_BOOT_DIR}/extlinux/extlinux.conf.t 2>/dev/null
+            if grep -q "^DEFAULT alpine-${other}\$" ${AA_BOOT_DIR}/extlinux/extlinux.conf.t; then
+                mv ${AA_BOOT_DIR}/extlinux/extlinux.conf.t ${AA_BOOT_DIR}/extlinux/extlinux.conf; sync; changed=1
+            else
+                rm -f ${AA_BOOT_DIR}/extlinux/extlinux.conf.t
+            fi
+        fi
+
+        if [ "$changed" != "1" ]; then
+            say "bootloader config unchanged (no slot pattern matched); NOT flipping current_slot"
+            umount "${AA_BOOT_DIR}" 2>/dev/null
+            exit 0
+        fi
+
+        # Reset the rollback target's boot counter so it gets its own fair retry
+        # window (a stale count from a previous upgrade would otherwise trigger
+        # an immediate re-rollback - a ping-pong between slots).
+        meta_set "SLOT_${other}_BOOT_COUNT" "0"
+        # Track total rollbacks; if we keep ping-ponging, halt flipping.
+        rbc=$(sed -n 's/^ROLLBACK_COUNT=//p' "$meta" | head -n1); rbc=$((${rbc:-0}+1))
+        meta_set "ROLLBACK_COUNT" "$rbc"
+        if [ "$rbc" -gt 2 ]; then
+            meta_set "BOOT_HALTED" "1"
+            say "ROLLBACK_COUNT=$rbc exceeded; setting BOOT_HALTED (will stop flipping after this one)"
+        fi
+
+        printf '%s\n' "$other" > ${AA_BOOT_DIR}/current_slot.t && mv ${AA_BOOT_DIR}/current_slot.t ${AA_BOOT_DIR}/current_slot
+        say "ROLLBACK $slot -> $other (root=$odev); rebooting now"
+        sync; umount "${AA_BOOT_DIR}" 2>/dev/null; sync
+        reboot -f 2>/dev/null
+        # Fallbacks if the reboot applet is unavailable (/proc may be at $SYSROOT).
+        echo b > /proc/sysrq-trigger 2>/dev/null
+        echo b > "${SYSROOT}/proc/sysrq-trigger" 2>/dev/null
+    else
+        say "no bootable $other image (no SLOT_${other}_VERSION); cannot roll back"
+    fi
+fi
+umount "${AA_BOOT_DIR}" 2>/dev/null
+exit 0

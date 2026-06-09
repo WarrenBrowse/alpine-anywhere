@@ -20,6 +20,12 @@ PART_BOOT_SIZE_MB=512
 PART_SLOT_SIZE_MB=2048
 MIN_DISK_SIZE_MB=5120
 
+# dm-verity: the per-slot hash tree is appended INSIDE the slot partition at a
+# fixed offset near its end (a tree for a ~1.5 GiB image is well under 16 MiB;
+# 64 MiB is a generous constant so the initramfs needs no metadata to find it).
+VERITY_RESERVE_MB=64
+VERITY_OFFSET_MB=$((PART_SLOT_SIZE_MB - VERITY_RESERVE_MB))
+
 # =============================================================================
 # Disk Detection
 # =============================================================================
@@ -114,9 +120,17 @@ auto_detect_overlay_device() {
     root_disk=$(detect_root_disk)
     log_debug "Root disk: $root_disk"
 
-    # First, look for existing data partitions on root disk
-    get_partition_info "$root_disk" | while IFS= read -r line; do
-        local part size fstype label mount
+    # First, look for existing data partitions on root disk.
+    # NOTE: must NOT pipe into `while` - a piped loop runs in a subshell and
+    # the preferred_part/usable_part/unformatted_part assignments would be lost,
+    # making detection silently always return empty (or, worse, a later edit
+    # picking a wrong device). Feed the loop via a here-doc instead so it runs
+    # in the current shell. (BusyBox ash / bash 3.2 both lack `lastpipe`.)
+    local part_info
+    part_info=$(get_partition_info "$root_disk")
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        local part fstype label mount status
         part=$(echo "$line" | awk '{print $1}')
         fstype=$(echo "$line" | awk '{print $3}')
         label=$(echo "$line" | awk '{print $4}')
@@ -127,7 +141,6 @@ auto_detect_overlay_device() {
             /|/boot*) continue ;;
         esac
 
-        local status
         status=$(is_usable_data_partition "$part")
 
         case "$status" in
@@ -144,7 +157,9 @@ auto_detect_overlay_device() {
                 log_debug "Found unformatted partition: $part"
                 ;;
         esac
-    done
+    done <<EOF
+$part_info
+EOF
 
     # Return best option
     if [ -n "$preferred_part" ]; then
@@ -208,28 +223,33 @@ create_partition_layout() {
     local slot_end_mb=$((1 + PART_BOOT_SIZE_MB + PART_SLOT_SIZE_MB + PART_SLOT_SIZE_MB))
 
     log_info "Creating GPT partition table..."
-    parted -s "$disk" mklabel gpt
+    require parted -s "$disk" mklabel gpt
 
     log_info "Creating boot partition (${PART_BOOT_SIZE_MB}MB, FAT32)..."
-    parted -s "$disk" mkpart boot fat32 1MiB "${PART_BOOT_SIZE_MB}MiB"
-    parted -s "$disk" set 1 boot on
+    require parted -s "$disk" mkpart boot fat32 1MiB "${PART_BOOT_SIZE_MB}MiB"
+    require parted -s "$disk" set 1 boot on
 
     log_info "Creating slot A partition (${PART_SLOT_SIZE_MB}MB)..."
-    parted -s "$disk" mkpart slota ext4 "${PART_BOOT_SIZE_MB}MiB" "$((PART_BOOT_SIZE_MB + PART_SLOT_SIZE_MB))MiB"
+    require parted -s "$disk" mkpart slota ext4 "${PART_BOOT_SIZE_MB}MiB" "$((PART_BOOT_SIZE_MB + PART_SLOT_SIZE_MB))MiB"
 
     log_info "Creating slot B partition (${PART_SLOT_SIZE_MB}MB)..."
-    parted -s "$disk" mkpart slotb ext4 "$((PART_BOOT_SIZE_MB + PART_SLOT_SIZE_MB))MiB" "${slot_end_mb}MiB"
+    require parted -s "$disk" mkpart slotb ext4 "$((PART_BOOT_SIZE_MB + PART_SLOT_SIZE_MB))MiB" "${slot_end_mb}MiB"
 
     if [ "$with_data" = "true" ]; then
         log_info "Creating data partition (remaining space)..."
-        parted -s "$disk" mkpart data ext4 "${slot_end_mb}MiB" 100%
+        require parted -s "$disk" mkpart data ext4 "${slot_end_mb}MiB" 100%
     fi
 
-    # Try to re-read partition table
-    sleep 2
-    partprobe "$disk" 2>/dev/null || true
-    blockdev --rereadpt "$disk" 2>/dev/null || true
+    # Try to re-read partition table. partprobe/blockdev legitimately fail on a
+    # busy disk, so they stay best-effort - but the partition table MUST be
+    # readable one way or another before we format/dd, so ensure_partition_devices
+    # (which falls back to loop devices and dies if even that fails) is the
+    # authoritative gate, asserted here.
+    sync
+    try_warn partprobe "$disk"
+    try_warn blockdev --rereadpt "$disk"
     sleep 1
+    ensure_partition_devices "$disk"
 
     log_info "Partition layout created"
 }
@@ -266,25 +286,43 @@ ensure_partition_devices() {
     local part_info
     part_info=$(sfdisk -d "$disk" 2>/dev/null | grep "^${disk}")
 
+    # Feed the loop via here-doc, NOT a pipe: a piped `while` runs in a subshell
+    # so a losetup failure inside it would be invisible AND we must `die` before
+    # exporting any PART_*_DEV that points at a stale/never-created loop device -
+    # otherwise a later `dd` could write to the wrong device. (CRITICAL.)
     local part_num=0
-    echo "$part_info" | while IFS= read -r line; do
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
         part_num=$((part_num + 1))
-        local start size
+        local start size loop
         start=$(echo "$line" | sed -n 's/.*start= *\([0-9]*\).*/\1/p')
         size=$(echo "$line" | sed -n 's/.*size= *\([0-9]*\).*/\1/p')
-        if [ -n "$start" ] && [ -n "$size" ]; then
-            local loop="/dev/loop$((part_num - 1))"
-            losetup -d "$loop" 2>/dev/null || true
-            losetup -o $((start * 512)) --sizelimit $((size * 512)) "$loop" "$disk"
-            log_debug "  $loop -> offset=$start size=$size sectors"
+        if [ -z "$start" ] || [ -z "$size" ]; then
+            die "ensure_partition_devices: could not parse offsets from sfdisk for partition $part_num"
         fi
-    done
+        loop="/dev/loop$((part_num - 1))"
+        losetup -d "$loop" 2>/dev/null || true
+        require losetup -o $((start * 512)) --sizelimit $((size * 512)) "$loop" "$disk"
+        log_debug "  $loop -> offset=$start size=$size sectors"
+    done <<EOF
+$part_info
+EOF
+
+    [ "$part_num" -ge 3 ] || die "ensure_partition_devices: expected >=3 partitions, mapped $part_num"
 
     # Export loop device mapping
     PART_BOOT_DEV="/dev/loop0"
     PART_SLOTA_DEV="/dev/loop1"
     PART_SLOTB_DEV="/dev/loop2"
     PART_DATA_DEV="/dev/loop3"
+
+    # Verify each mapped loop actually backs the target disk before any caller
+    # writes to it.
+    local d
+    for d in "$PART_BOOT_DEV" "$PART_SLOTA_DEV" "$PART_SLOTB_DEV"; do
+        [ -b "$d" ] || die "ensure_partition_devices: $d is not a block device after losetup"
+        losetup "$d" 2>/dev/null | grep -qF "$disk" || die "ensure_partition_devices: $d does not back $disk"
+    done
 }
 
 # Get the actual device for a partition (handles loop device fallback)
@@ -302,6 +340,48 @@ get_part_dev() {
     fi
 }
 
+# Write a squashfs image to a slot partition AND lay down a dm-verity hash tree
+# for it, so the kernel can cryptographically verify every block at runtime.
+#
+# Layout inside the slot partition:
+#   [ 0 .. data_size )                 squashfs image (read-only root)
+#   [ VERITY_OFFSET_MB MiB .. )        verity hash tree
+# With veritysetup's --hash-offset the SAME device is both data and hash device,
+# so no extra partition is needed (RPi/UEFI-agnostic).
+#
+# Echoes a single line:  ROOT_HASH SALT DATA_SIZE HASH_OFFSET_BYTES
+# which the caller persists into slots.meta. Dies on any failure.
+format_verity_slot() {
+    _fvs_src="$1"; _fvs_dev="$2"
+    command_exists veritysetup || die "veritysetup not found (install cryptsetup) - required for --verity"
+    [ -f "$_fvs_src" ] || die "format_verity_slot: source $_fvs_src missing"
+    is_block_device "$_fvs_dev" || die "format_verity_slot: $_fvs_dev is not a block device"
+
+    _fvs_size=$(wc -c < "$_fvs_src")
+    _fvs_offset=$((VERITY_OFFSET_MB * 1024 * 1024))
+    if [ "$_fvs_size" -gt "$_fvs_offset" ]; then
+        die "format_verity_slot: image ($_fvs_size B) exceeds verity offset ($_fvs_offset B); slot too small"
+    fi
+
+    # Build the hash tree to a sidecar file and capture Root hash + Salt.
+    _fvs_hash="${_fvs_src}.hash"
+    _fvs_out=$(veritysetup format "$_fvs_src" "$_fvs_hash" \
+        --data-block-size=4096 --hash-block-size=4096) \
+        || die "veritysetup format failed for $_fvs_src"
+    _fvs_root=$(printf '%s\n' "$_fvs_out" | awk '/Root hash:/{print $NF}')
+    _fvs_salt=$(printf '%s\n' "$_fvs_out" | awk '/Salt:/{print $NF}')
+    [ -n "$_fvs_root" ] || die "format_verity_slot: could not parse Root hash"
+
+    # Write image at offset 0, then the hash tree at the fixed offset.
+    require dd if="$_fvs_src" of="$_fvs_dev" bs=1M conv=fsync
+    require dd if="$_fvs_hash" of="$_fvs_dev" bs=1M seek="$VERITY_OFFSET_MB" conv=fsync
+    sync
+    rm -f "$_fvs_hash"
+
+    log_info "Slot verity formatted: root=${_fvs_root} (data ${_fvs_size}B, hash@${_fvs_offset}B)" >&2
+    echo "$_fvs_root $_fvs_salt $_fvs_size $_fvs_offset"
+}
+
 # Format partitions
 format_partitions() {
     local disk="$1"
@@ -316,7 +396,7 @@ format_partitions() {
     boot_dev=$(get_part_dev "$disk" 1)
 
     log_info "Formatting boot partition ($boot_dev, FAT32)..."
-    mkfs.vfat -F 32 -n ALPINE_BOOT "$boot_dev"
+    require mkfs.vfat -F 32 -n ALPINE_BOOT "$boot_dev"
 
     # Slot A and B are raw (squashfs written directly), no formatting needed
     log_info "Slot A and B: raw partitions (squashfs will be written directly)"
@@ -324,7 +404,7 @@ format_partitions() {
     if [ "$with_data" = "true" ]; then
         data_dev=$(get_part_dev "$disk" 4)
         log_info "Formatting data partition ($data_dev, ext4)..."
-        mkfs.ext4 -L ALPINE_DATA -q -F "$data_dev"
+        require mkfs.ext4 -L ALPINE_DATA -q -F "$data_dev"
     fi
 
     log_info "Partitions formatted"
@@ -392,13 +472,18 @@ generate_system_squashfs() {
     local build_dir
     build_dir=$(mktemp -d)
 
-    # Extract minirootfs
+    # Extract minirootfs. Download to a file first (not a streamed pipe) so the
+    # archive can be integrity-checked against its published sha512 before any
+    # of its contents touch the build tree.
     log_info "Extracting base system..."
     if [ -f "${INSTALL_CACHE_DIR}/minirootfs.tar.gz" ]; then
-        tar -xzf "${INSTALL_CACHE_DIR}/minirootfs.tar.gz" -C "$build_dir"
+        require tar -xzf "${INSTALL_CACHE_DIR}/minirootfs.tar.gz" -C "$build_dir"
     else
         local minirootfs_url="${ALPINE_MIRROR}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/alpine-minirootfs-${ALPINE_VERSION}.0-${DETECTED_ARCH}.tar.gz"
-        http_fetch_stdout "$minirootfs_url" | tar xz -C "$build_dir"
+        local minirootfs_tgz="${build_dir}.minirootfs.tar.gz"
+        download_file "$minirootfs_url" "$minirootfs_tgz"
+        require tar -xzf "$minirootfs_tgz" -C "$build_dir"
+        rm -f "$minirootfs_tgz"
     fi
 
     # DNS must be set BEFORE apk update
@@ -415,16 +500,24 @@ EOF
     mount -t sysfs sysfs "${build_dir}/sys"
     mount --bind /dev "${build_dir}/dev"
 
-    # Determine kernel package based on platform
+    # Determine kernel package based on platform. Alpine 3.20+ unified the RPi
+    # flavors into a single `linux-rpi` (the old linux-rpi4 no longer exists),
+    # so use that; it ships the dm-verity module needed for --verity.
     local kernel_pkg="linux-lts"
     if [ "$DETECTED_PLATFORM" = "rpi" ]; then
-        kernel_pkg="linux-rpi4"
+        kernel_pkg="linux-rpi"
     fi
 
-    # Configure mkinitfs to include squashfs BEFORE installing kernel
+    # Configure mkinitfs to include squashfs BEFORE installing kernel.
+    # When dm-verity is enabled we also pull in the stock `cryptsetup` mkinitfs
+    # feature, which embeds /sbin/veritysetup + its libs and the dm-mod/dm-verity
+    # modules into the initramfs (the same proven path Alpine uses for LUKS).
     mkdir -p "${build_dir}/etc/mkinitfs"
-    echo 'features="ata base cdrom ext4 keymap kms mmc nvme scsi usb virtio squashfs"' \
-        > "${build_dir}/etc/mkinitfs/mkinitfs.conf"
+    local mkinitfs_features="ata base cdrom ext4 keymap kms mmc nvme scsi usb virtio squashfs"
+    if verity_enabled; then
+        mkinitfs_features="$mkinitfs_features cryptsetup"
+    fi
+    echo "features=\"${mkinitfs_features}\"" > "${build_dir}/etc/mkinitfs/mkinitfs.conf"
 
     # Install packages
     log_info "Installing packages (kernel: $kernel_pkg)..."
@@ -443,6 +536,12 @@ EOF
         init_pkg="s6 s6-rc s6-linux-init s6-portable-utils s6-linux-utils execline"
     fi
 
+    # cryptsetup provides veritysetup, needed both at build time (format the
+    # hash tree) and on the installed system (re-format on upgrade) when
+    # dm-verity is enabled.
+    local verity_pkg=""
+    verity_enabled && verity_pkg="cryptsetup"
+
     # squashfs-tools is needed on the installed system so `alpine-anywhere
     # upgrade` can build the next slot's image in place.
     chroot "$build_dir" /sbin/apk add --no-cache \
@@ -450,7 +549,7 @@ EOF
         "$kernel_pkg" linux-firmware-none \
         mkinitfs \
         $ssh_pkg \
-        e2fsprogs dosfstools squashfs-tools \
+        e2fsprogs dosfstools squashfs-tools $verity_pkg \
         chrony ca-certificates curl
 
     # RPi: install firmware package
@@ -609,92 +708,18 @@ wrap_boot_initramfs() {
     grep -q 'exec .*switch_root' "$tmp/init" || { log_warn "no 'exec ... switch_root' in init; skipping boot-guard"; rm -rf "$tmp"; return 0; }
 
     mkdir -p "$tmp/sbin"
-    cat > "$tmp/sbin/init.aa" << 'EOF'
-#!/bin/sh
-# A/B boot-guard: invoked by the patched Alpine init right before switch_root,
-# as:  init.aa "$KOPT_root" "$sysroot"
-# By this point the init has moved /proc,/sys,/dev into $sysroot, so we must NOT
-# rely on /proc/cmdline or /dev/* being at their usual paths. Best-effort: never
-# blocks the boot (exit 0) unless it deliberately reboots for a rollback.
-ROOTARG="$1"; SYSROOT="$2"
-
-# Kernel-log breadcrumbs (survive into the booted system's `dmesg`). /dev may be
-# at $SYSROOT/dev now, so pick whichever /dev/kmsg is writable.
-KMSG=/dev/kmsg; [ -w "$KMSG" ] || KMSG="${SYSROOT}/dev/kmsg"
-klog() { echo "init.aa: $*" > "$KMSG" 2>/dev/null; echo "init.aa: $*"; }
-
-# 1) Root device: prefer the init's $KOPT_root arg; fall back to the (moved)
-#    cmdline under $SYSROOT/proc, then a bare /proc/cmdline.
-root="$ROOTARG"
-[ -z "$root" ] && [ -n "$SYSROOT" ] && root=$(sed -n 's/.*[ ]root=\([^ ]*\).*/\1/p' "${SYSROOT}/proc/cmdline" 2>/dev/null | head -n1)
-[ -z "$root" ] && root=$(sed -n 's/.*[ ]root=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null | head -n1)
-klog "enter root='$root' sysroot='$SYSROOT'"
-case "$root" in
-    *2) slot=A ;;
-    *3) slot=B ;;
-    *) klog "root not an A/B slot; skip"; exit 0 ;;
-esac
-case "$root" in *mmcblk*|*nvme*) pfx="p" ;; *) pfx="" ;; esac
-disk=${root%${pfx}[0-9]}            # e.g. /dev/sda  /dev/mmcblk0
-base=${disk##*/}                    # e.g. sda       mmcblk0
-
-# 2) Locate the FAT boot partition node (part 1). /dev was likely moved to
-#    $SYSROOT/dev, so search there too.
-bootname="${base}${pfx}1"
-boot=""
-for c in "/dev/${bootname}" "${SYSROOT}/dev/${bootname}"; do
-    [ -b "$c" ] && { boot="$c"; break; }
-done
-[ -z "$boot" ] && boot="/dev/${bootname}"
-klog "slot=$slot disk=$disk boot=$boot"
-
-# 3) Mount it (vfat is built into the kernel — no module needed).
-mkdir -p /aa-boot 2>/dev/null
-if ! mount -t vfat "$boot" /aa-boot 2>/dev/null && ! mount "$boot" /aa-boot 2>/dev/null; then
-    klog "cannot mount boot $boot; skip (boot continues)"
-    exit 0
-fi
-meta=/aa-boot/slots.meta
-say() { echo "$*" >> /aa-boot/init-aa.log 2>/dev/null; sync 2>/dev/null; klog "$*"; }
-say "start slot=$slot root=$root boot=$boot"
-if [ ! -f "$meta" ]; then say "no slots.meta; skip"; umount /aa-boot 2>/dev/null; exit 0; fi
-
-# Increment this slot's boot counter (persisted on the FAT boot partition).
-cnt=$(sed -n "s/^SLOT_${slot}_BOOT_COUNT=//p" "$meta" | head -n1); cnt=$((${cnt:-0}+1))
-ver=$(sed -n "s/^SLOT_${slot}_VERIFIED=//p" "$meta" | head -n1)
-grep -v "^SLOT_${slot}_BOOT_COUNT=" "$meta" > "$meta.t" 2>/dev/null
-echo "SLOT_${slot}_BOOT_COUNT=$cnt" >> "$meta.t"
-mv "$meta.t" "$meta"; sync
-say "count=$cnt verified=$ver (rollback when count>1 && !verified)"
-
-# One unverified retry then roll back: the first boot sets count=1 (the slot's
-# own aa-verify resets it to 0 on a healthy boot); if it failed and rebooted,
-# count reaches 2 while still unverified -> switch to the other slot.
-if [ "$cnt" -gt 1 ] && [ "$ver" != "true" ]; then
-    other=B; [ "$slot" = B ] && other=A
-    opart_other=3; [ "$other" = A ] && opart_other=2
-    if grep -q "^SLOT_${other}_VERSION=." "$meta"; then
-        odev="/dev/${base}${pfx}${opart_other}"      # canonical path for next boot
-        # config.txt: select the other slot's kernel + initramfs (RPi).
-        sed -i "s|^kernel=vmlinuz-.*|kernel=vmlinuz-${other}|; s|^initramfs initramfs-.*|initramfs initramfs-${other} followkernel|" /aa-boot/config.txt 2>/dev/null
-        # cmdline.txt: swap only root=, preserving the rest of the options.
-        sed -i "s|root=[^ ]*|root=${odev}|" /aa-boot/cmdline.txt 2>/dev/null
-        # extlinux fallback (non-RPi): point DEFAULT at the other slot.
-        [ -f /aa-boot/extlinux/extlinux.conf ] && sed -i "s|^DEFAULT .*|DEFAULT alpine-${other}|" /aa-boot/extlinux/extlinux.conf 2>/dev/null
-        echo "$other" > /aa-boot/current_slot
-        say "ROLLBACK $slot -> $other (root=$odev); rebooting now"
-        sync; umount /aa-boot 2>/dev/null; sync
-        reboot -f 2>/dev/null
-        # Fallbacks if the reboot applet is unavailable (/proc may be at $SYSROOT).
-        echo b > /proc/sysrq-trigger 2>/dev/null
-        echo b > "${SYSROOT}/proc/sysrq-trigger" 2>/dev/null
-    else
-        say "no bootable $other image (no SLOT_${other}_VERSION); cannot roll back"
-    fi
-fi
-umount /aa-boot 2>/dev/null
-exit 0
-EOF
+    # init.aa now lives as a standalone, testable file under lib/initramfs/.
+    # Resolve it from wherever the tool is installed/run.
+    local init_aa_src=""
+    for cand in \
+        "${SCRIPT_DIR}/lib/initramfs/init.aa" \
+        "${INSTALL_LIB_DIR}/initramfs/init.aa" \
+        "${INSTALL_BASE_DIR}/lib/initramfs/init.aa" \
+        "/boot/alpine-anywhere/lib/initramfs/init.aa"; do
+        [ -f "$cand" ] && { init_aa_src="$cand"; break; }
+    done
+    [ -n "$init_aa_src" ] || { log_warn "init.aa source not found; skipping boot-guard"; rm -rf "$tmp"; return 0; }
+    require cp "$init_aa_src" "$tmp/sbin/init.aa"
     chmod +x "$tmp/sbin/init.aa"
 
     # Insert the guard call on the line(s) before `exec ... switch_root`, once,
@@ -712,6 +737,40 @@ EOF
             { print }
         ' "$tmp/init" > "$tmp/init.aa.new" && mv "$tmp/init.aa.new" "$tmp/init"
         chmod +x "$tmp/init"
+    fi
+
+    # dm-verity: copy aa-verity-open and insert a call BEFORE the root mount so
+    # the init mounts the verified mapper device instead of the raw slot. The
+    # verity device must be opened before the mount that targets $sysroot.
+    if verity_enabled; then
+        local vopen_src=""
+        for cand in \
+            "${SCRIPT_DIR}/lib/initramfs/aa-verity-open" \
+            "${INSTALL_LIB_DIR}/initramfs/aa-verity-open" \
+            "${INSTALL_BASE_DIR}/lib/initramfs/aa-verity-open" \
+            "/boot/alpine-anywhere/lib/initramfs/aa-verity-open"; do
+            [ -f "$cand" ] && { vopen_src="$cand"; break; }
+        done
+        [ -n "$vopen_src" ] || die "aa-verity-open source not found but --verity requested"
+        require cp "$vopen_src" "$tmp/sbin/aa-verity-open"
+        chmod +x "$tmp/sbin/aa-verity-open"
+
+        if ! grep -q '/sbin/aa-verity-open' "$tmp/init"; then
+            # Insert before the FIRST line that mounts onto $sysroot (the root
+            # mount). Fail the build LOUDLY if no such anchor exists, rather than
+            # shipping a verity slot the initramfs can't open (= unbootable).
+            grep -qE '^[[:space:]]*mount .*\$sysroot' "$tmp/init" \
+                || die "wrap_boot_initramfs: no root-mount anchor for verity in initramfs init (mkinitfs layout changed)"
+            awk '
+                /^[[:space:]]*mount .*\$sysroot/ && !done {
+                    match($0, /^[[:space:]]*/); ind=substr($0, 1, RLENGTH)
+                    print ind "if [ \"$KOPT_aaverity\" = 1 ]; then _aadev=$(/sbin/aa-verity-open \"$KOPT_root\" \"$sysroot\" 2>/dev/null); [ -n \"$_aadev\" ] && KOPT_root=\"$_aadev\" && root=\"$_aadev\"; fi"
+                    done=1
+                }
+                { print }
+            ' "$tmp/init" > "$tmp/init.v.new" && mv "$tmp/init.v.new" "$tmp/init"
+            chmod +x "$tmp/init"
+        fi
     fi
 
     ( cd "$tmp" && find . | cpio -o -H newc 2>/dev/null | gzip ) > "$img" \
@@ -1008,12 +1067,18 @@ run_ab_install() {
     local squashfs="/tmp/system.squashfs"
     generate_system_squashfs "$squashfs"
 
-    # Step 3: Write squashfs to slot A
-    local slota_dev
+    # Step 3: Write squashfs to slot A (durable + read-back verified, and if
+    # enabled, with a dm-verity hash tree so the root is cryptographically
+    # verified block-by-block at runtime).
+    local slota_dev slota_sha slota_vmeta=""
     slota_dev=$(get_part_dev "$disk" 2)
     log_step "Writing squashfs to slot A ($slota_dev)..."
-    dd if="$squashfs" of="$slota_dev" bs=1M 2>/dev/null
-    sync
+    if verity_enabled; then
+        slota_vmeta=$(format_verity_slot "$squashfs" "$slota_dev")
+        slota_sha=$(sha256_file "$squashfs")
+    else
+        slota_sha=$(write_image_to_device "$squashfs" "$slota_dev")
+    fi
     log_info "Slot A written: $(du -h "$squashfs" | cut -f1)"
 
     # Step 4: Install boot files
@@ -1021,7 +1086,8 @@ run_ab_install() {
     boot_dev=$(get_part_dev "$disk" 1)
     local boot_mnt="/mnt/boot"
     mkdir -p "$boot_mnt"
-    mount "$boot_dev" "$boot_mnt"
+    require mount "$boot_dev" "$boot_mnt"
+    assert_mounted "$boot_mnt"
 
     log_step "Installing boot files..."
     # Shared boot files: firmware, DTBs, overlays (identical for both slots)
@@ -1040,6 +1106,11 @@ run_ab_install() {
         cp "${SCRIPT_DIR}/alpine-anywhere" "${boot_mnt}/alpine-anywhere/" 2>/dev/null || true
     cp "${INSTALL_BASE_DIR}"/lib/*.sh "${boot_mnt}/alpine-anywhere/lib/" 2>/dev/null || \
         cp "${SCRIPT_DIR}"/lib/*.sh "${boot_mnt}/alpine-anywhere/lib/" 2>/dev/null || true
+    # initramfs payloads (init.aa, aa-verity-open) so future upgrades on-device
+    # can re-wrap the initramfs without network access.
+    mkdir -p "${boot_mnt}/alpine-anywhere/lib/initramfs"
+    cp "${INSTALL_LIB_DIR}"/initramfs/* "${boot_mnt}/alpine-anywhere/lib/initramfs/" 2>/dev/null || \
+        cp "${SCRIPT_DIR}"/lib/initramfs/* "${boot_mnt}/alpine-anywhere/lib/initramfs/" 2>/dev/null || true
     chmod +x "${boot_mnt}/alpine-anywhere/alpine-anywhere" 2>/dev/null || true
 
     # Step 6: Setup data partition (phase 3 prep)
@@ -1047,32 +1118,47 @@ run_ab_install() {
         local data_dev
         data_dev=$(get_part_dev "$disk" 4)
         mkdir -p /mnt/data
-        mount "$data_dev" /mnt/data
+        require mount "$data_dev" /mnt/data
+        assert_mounted /mnt/data
         setup_data_partition /mnt/data
-        umount /mnt/data
+        require umount /mnt/data
     fi
 
     # Cleanup
-    umount "$boot_mnt"
+    require umount "$boot_mnt"
     rm -f "$squashfs"
     rm -rf /tmp/boot-files
 
     # Create slot metadata on boot partition.
     # current_slot: single-line slot letter (A/B), read by upgrade.sh.
     # slots.meta:   KEY=VALUE per-slot metadata (version/date/verified/boot count).
-    mount "$boot_dev" "$boot_mnt"
-    echo "A" > "${boot_mnt}/current_slot"
-    cat > "${boot_mnt}/slots.meta" << EOF
+    require mount "$boot_dev" "$boot_mnt"
+    assert_mounted "$boot_mnt"
+    printf 'A\n' | atomic_write "${boot_mnt}/current_slot"
+
+    # Optional dm-verity fields for slot A (ROOT_HASH SALT DATA_SIZE HASH_OFFSET).
+    local slota_verity_lines=""
+    if [ -n "$slota_vmeta" ]; then
+        set -- $slota_vmeta
+        slota_verity_lines="SLOT_A_ROOT_HASH=$1
+SLOT_A_SALT=$2
+SLOT_A_DATA_SIZE=$3
+SLOT_A_HASH_OFFSET=$4"
+    fi
+
+    cat <<EOF | atomic_write "${boot_mnt}/slots.meta"
 SLOT_A_VERSION=${ALPINE_VERSION}
 SLOT_A_INSTALLED=$(date -Iseconds)
 SLOT_A_VERIFIED=true
 SLOT_A_BOOT_COUNT=0
+SLOT_A_SHA256=${slota_sha}
+${slota_verity_lines}
 SLOT_B_VERSION=
 SLOT_B_INSTALLED=
 SLOT_B_VERIFIED=false
 SLOT_B_BOOT_COUNT=0
 EOF
-    umount "$boot_mnt"
+    require umount "$boot_mnt"
 
     log_info "==================================="
     log_info "A/B installation complete!"
@@ -1097,21 +1183,35 @@ install_secondary_slot() {
     sq="/tmp/system-${slot}.squashfs"
     generate_system_squashfs "$sq"   # builds image, wraps initramfs, saves /tmp/boot-files
     log_step "Writing image to slot $slot ($dev)..."
-    dd if="$sq" of="$dev" bs=1M conv=fsync 2>/dev/null
-    sync
+    local slot_sha slot_vmeta=""
+    if verity_enabled; then
+        slot_vmeta=$(format_verity_slot "$sq" "$dev")
+        slot_sha=$(sha256_file "$sq")
+    else
+        slot_sha=$(write_image_to_device "$sq" "$dev")
+    fi
     log_info "Slot $slot written: $(du -h "$sq" | cut -f1)"
 
     boot_dev=$(get_part_dev "$disk" 1)
     BOOT_MNT="/mnt/aa-boot"
     mkdir -p "$BOOT_MNT"
-    mount "$boot_dev" "$BOOT_MNT"
+    require mount "$boot_dev" "$BOOT_MNT"
+    assert_mounted "$BOOT_MNT"
     place_slot_kernel "$BOOT_MNT" "$slot" "/tmp/boot-files/vmlinuz" "/tmp/boot-files/initramfs"
     set_slot_meta "$slot" "VERSION" "$ALPINE_VERSION"
     set_slot_meta "$slot" "INSTALLED" "$(date -Iseconds)"
     set_slot_meta "$slot" "VERIFIED" "false"
     set_slot_meta "$slot" "BOOT_COUNT" "0"
+    set_slot_meta "$slot" "SHA256" "$slot_sha"
+    if [ -n "$slot_vmeta" ]; then
+        set -- $slot_vmeta
+        set_slot_meta "$slot" "ROOT_HASH" "$1"
+        set_slot_meta "$slot" "SALT" "$2"
+        set_slot_meta "$slot" "DATA_SIZE" "$3"
+        set_slot_meta "$slot" "HASH_OFFSET" "$4"
+    fi
     sync
-    umount "$BOOT_MNT"
+    require umount "$BOOT_MNT"
 
     rm -f "$sq"; rm -rf /tmp/boot-files
     log_info "Slot $slot installed; active slot unchanged. Boot it with: aa switch $slot && reboot"
@@ -1139,6 +1239,16 @@ slot_to_partnum() {
 # - panic=10: a dying init (PID 1 exit -> kernel panic) reboots after 10s so a
 #   broken-but-mountable slot accumulates failed boots toward rollback.
 SLOT_KERNEL_OPTS="rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs panic=10 console=tty1 quiet"
+
+# Kernel opts including the optional dm-verity toggle. Computed at use time
+# because VERITY_MODE/HARDENED_MODE are set by parse_arguments, after sourcing.
+slot_kernel_opts() {
+    if verity_enabled; then
+        echo "${SLOT_KERNEL_OPTS} aaverity=1"
+    else
+        echo "${SLOT_KERNEL_OPTS}"
+    fi
+}
 
 # Place a slot's kernel + initramfs on the boot partition as vmlinuz-<slot>/initramfs-<slot>
 place_slot_kernel() {
@@ -1183,7 +1293,7 @@ initramfs initramfs-${slot} followkernel
 [all]
 EOF
 
-        echo "root=${slot_dev} ${SLOT_KERNEL_OPTS}" > "${boot_mnt}/cmdline.txt"
+        echo "root=${slot_dev} $(slot_kernel_opts)" > "${boot_mnt}/cmdline.txt"
 
         log_info "Boot config: slot $slot, kernel vmlinuz-${slot}, root=${slot_dev}"
     else
@@ -1201,13 +1311,13 @@ LABEL alpine-A
     MENU LABEL Alpine Linux (Slot A)
     LINUX /vmlinuz-A
     INITRD /initramfs-A
-    APPEND root=${slota_dev} ${SLOT_KERNEL_OPTS}
+    APPEND root=${slota_dev} $(slot_kernel_opts)
 
 LABEL alpine-B
     MENU LABEL Alpine Linux (Slot B)
     LINUX /vmlinuz-B
     INITRD /initramfs-B
-    APPEND root=${slotb_dev} ${SLOT_KERNEL_OPTS}
+    APPEND root=${slotb_dev} $(slot_kernel_opts)
 EOF
         log_info "Boot config: extlinux default slot $slot"
     fi

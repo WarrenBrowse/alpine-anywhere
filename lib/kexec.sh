@@ -50,10 +50,17 @@ transfer_files() {
 
     log_step "Transferring files to remote host..."
 
-    # Create unique remote directory (no sudo needed, /tmp is world-writable)
-    # Using $$ for PID to avoid conflicts with previous runs
-    REMOTE_WORK_DIR="/tmp/alpine-anywhere-$$"
-    ssh_exec "mkdir -p ${REMOTE_WORK_DIR}"
+    # Create a private, unpredictable remote work dir. /tmp is world-writable,
+    # so a fixed PID-based name lets a local attacker pre-create or race the
+    # path; mktemp -d gives an O_EXCL 0700 directory.
+    if [ "$DRY_RUN" = "true" ]; then
+        REMOTE_WORK_DIR="/tmp/alpine-anywhere-dryrun"
+    else
+        REMOTE_WORK_DIR=$(ssh_exec_capture 'mktemp -d /tmp/alpine-anywhere.XXXXXX') \
+            || die "could not create remote work dir"
+        [ -n "$REMOTE_WORK_DIR" ] || die "remote mktemp returned empty path"
+    fi
+    log_debug "Remote work dir: $REMOTE_WORK_DIR"
 
     # Transfer vmlinuz
     log_info "Transferring vmlinuz..."
@@ -143,9 +150,18 @@ ensure_kexec_installed() {
 # kexec Execution
 # =============================================================================
 
-# Load and execute kexec in a single sudo session
+# Load the kernel, VERIFY it loaded, then schedule the reboot.
+#
+# Two structural fixes over the old single-line version:
+#  1. Injection-safe: the command line and paths are passed to the remote shell
+#     as positional parameters ("$1".."$4"), never interpolated into the script
+#     body, so metacharacters in the cmdline cannot break out.
+#  2. Honest failure: `kexec -l` runs synchronously and we read
+#     /sys/kernel/kexec_loaded - if the load failed we abort here with the
+#     system still on its original OS, instead of masking it behind a
+#     backgrounded `&& (... &)` that always returns success.
 load_and_execute_kexec() {
-    log_step "Loading kernel and executing kexec..."
+    log_step "Loading kernel and verifying kexec load..."
 
     local cmdline
     cmdline=$(build_kernel_cmdline)
@@ -154,22 +170,46 @@ load_and_execute_kexec() {
 
     if [ "$DRY_RUN" = "true" ]; then
         echo "[DRY-RUN] kexec -l ${REMOTE_WORK_DIR}/vmlinuz --initrd=${REMOTE_WORK_DIR}/initramfs --command-line=\"$cmdline\""
+        echo "[DRY-RUN] verify /sys/kernel/kexec_loaded == 1"
         echo "[DRY-RUN] sleep ${REBOOT_DELAY} && kexec -e"
         log_info "[DRY-RUN] Skipping actual kexec execution"
         return 0
     fi
 
+    # Phase 1: load synchronously and verify. Args: $1=vmlinuz $2=initramfs
+    # $3=cmdline. The script body is a fixed literal.
+    local load_script
+    load_script='set -e
+/sbin/kexec -l "$1" --initrd="$2" --command-line="$3"
+sleep 1
+loaded=$(cat /sys/kernel/kexec_loaded 2>/dev/null || echo 0)
+if [ "$loaded" != "1" ]; then
+    echo "kexec load did not stick (kexec_loaded=$loaded)" >&2
+    exit 1
+fi
+echo "kexec-loaded-ok"'
+
+    if ! ssh_exec_script_sudo "$load_script" \
+            "${REMOTE_WORK_DIR}/vmlinuz" \
+            "${REMOTE_WORK_DIR}/initramfs" \
+            "$cmdline" | grep -q "kexec-loaded-ok"; then
+        die "kexec load failed on remote - system is UNCHANGED and still reachable. Check kexec support and file integrity."
+    fi
+    log_info "Kernel loaded and verified (kexec_loaded=1)"
+
     log_warn "System will reboot in ${REBOOT_DELAY} seconds..."
     log_warn "The SSH connection will be lost."
     echo ""
 
-    # Combine kexec -l and kexec -e in a single sudo call
-    # This way we only need one password prompt
-    ssh_exec_sudo "sh -c '/sbin/kexec -l ${REMOTE_WORK_DIR}/vmlinuz --initrd=${REMOTE_WORK_DIR}/initramfs --command-line=\"$cmdline\" && (sleep ${REBOOT_DELAY} && /sbin/kexec -e) &'"
+    # Phase 2: schedule the detached reboot. Now that the load is confirmed,
+    # a backgrounded kexec -e is fine - we verify the new system from the
+    # control host afterwards (run_kexec -> wait_for_host/verify_alpine_boot).
+    local exec_script
+    exec_script='nohup sh -c "sleep $1; /sbin/kexec -e" >/dev/null 2>&1 &
+echo started'
+    ssh_exec_script_sudo "$exec_script" "$REBOOT_DELAY" >/dev/null 2>&1 || true
 
     log_info "kexec scheduled, waiting for system to reboot..."
-
-    # Wait a moment for the command to be scheduled
     sleep 2
 }
 

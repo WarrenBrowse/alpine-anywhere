@@ -131,7 +131,7 @@ Describe 'upgrade.sh'
         End
     End
 
-    Describe 'sed_inplace()'
+    Describe 'sed_inplace_checked()'
         setup() {
             F=$(mktemp)
             printf 'kernel=vmlinuz-A\nother=1\n' > "$F"
@@ -140,9 +140,16 @@ Describe 'upgrade.sh'
         Before 'setup'
         After 'cleanup'
 
-        It 'edits a file in place portably'
-            When call sed_inplace "$F" -e 's|vmlinuz-A|vmlinuz-B|'
+        It 'edits a file in place portably and verifies the result'
+            When call sed_inplace_checked "$F" "^kernel=vmlinuz-B\$" -e 's|^kernel=vmlinuz-[AB].*|kernel=vmlinuz-B|'
             The contents of file "$F" should include "vmlinuz-B"
+        End
+
+        It 'aborts (leaving file intact) on a no-op edit'
+            When run sed_inplace_checked "$F" "^kernel=vmlinuz-B\$" -e 's|^nomatch$|x|'
+            The status should be failure
+            The stderr should include "expected state"
+            The contents of file "$F" should include "vmlinuz-A"
         End
     End
 

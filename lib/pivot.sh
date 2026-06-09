@@ -219,6 +219,8 @@ OVERLAY_DEVICE="${OVERLAY_DEVICE}"
 TARGET_DISK="${TARGET_DISK}"
 INIT_SYSTEM="${INIT_SYSTEM}"
 EXTRA_PACKAGES="${EXTRA_PACKAGES}"
+VERITY_MODE="${VERITY_MODE}"
+NO_VERIFY="${NO_VERIFY}"
 FORCE="${FORCE}"
 VERBOSE="${VERBOSE}"
 INSTALL_CACHE_DIR="/root/.local/share/alpine-anywhere/cache"
@@ -231,6 +233,10 @@ EOF
         run_privileged cp "${INSTALL_BASE_DIR}/alpine-anywhere" "${aa_dest}/" 2>/dev/null || true
     run_privileged cp "${SCRIPT_DIR}"/lib/*.sh "${aa_dest}/lib/" 2>/dev/null || \
         run_privileged cp "${INSTALL_BASE_DIR}"/lib/*.sh "${aa_dest}/lib/" 2>/dev/null || true
+    # initramfs payloads (init.aa boot-guard, aa-verity-open) for the in-RAM build
+    run_privileged mkdir -p "${aa_dest}/lib/initramfs"
+    run_privileged cp "${SCRIPT_DIR}"/lib/initramfs/* "${aa_dest}/lib/initramfs/" 2>/dev/null || \
+        run_privileged cp "${INSTALL_BASE_DIR}"/lib/initramfs/* "${aa_dest}/lib/initramfs/" 2>/dev/null || true
     run_privileged chmod +x "${aa_dest}/alpine-anywhere" 2>/dev/null || true
 
     # Copy cache files for install mode (objective 2/3)
@@ -265,20 +271,19 @@ EOF
     # When systemd re-execs (telinit u), it loads THIS instead of the real binary.
     # It runs as PID 1, so it can do pivot_root and unmount the old root.
     #
-    # NOTE: This shebang MUST remain #!/bin/bash (not #!/bin/sh) because fakeinit
-    # runs on the OLD system before pivot_root occurs. At that point, bash is
-    # available from the old root filesystem, and the fakeinit needs bash features
-    # (or at minimum, the known bash binary path) to function correctly as PID 1
-    # during the transition. After pivot_root completes, the old root is unmounted.
+    # NOTE: shebang is #!/bin/sh. The body is strict POSIX (no [[ ]], arrays, or
+    # declare), and the shebang is resolved against the OLD root at exec time -
+    # where /bin/sh always exists but /bin/bash may NOT (e.g. an Alpine origin
+    # host). Using bash here would panic PID 1 (and brick an unattended box)
+    # whenever the original system lacks bash. The generating code probes the
+    # origin for a usable interpreter before committing to the takeover.
     run_privileged tee "${PIVOT_DIR}/sbin/fakeinit" > /dev/null << 'FAKEINIT'
-#!/bin/bash
+#!/bin/sh
 # fakeinit - Runs as PID 1 after systemd re-execs
 # Based on marcan/takeover.sh technique
 #
-# This script intentionally uses #!/bin/bash because it executes on the OLD
-# system (before pivot_root) where bash is the known-available shell from the
-# original root filesystem. It must use bash to function as PID 1 during the
-# transition period.
+# Strict POSIX sh: this runs as PID 1 on the OLD system before pivot_root,
+# where only /bin/sh is guaranteed to exist.
 
 PIVOT_DIR="/mnt/alpine"
 OLD_ROOT="/mnt/oldroot"
@@ -307,7 +312,14 @@ mkdir -p ".${OLD_ROOT}"
 echo "[fakeinit] Executing pivot_root..."
 if ! pivot_root . ".${OLD_ROOT}"; then
     echo "[fakeinit] ERROR: pivot_root failed!"
-    exec /bin/bash
+    # The old root is still mounted and reachable. Rather than dropping to a
+    # local-only shell (useless on a headless remote box), try to bring SSH
+    # back up from the OLD root so the operator can reconnect and recover, then
+    # fall back to a console shell.
+    /sbin/ifconfig lo 127.0.0.1 up 2>/dev/null || true
+    /usr/sbin/sshd 2>/dev/null || /usr/sbin/dropbear -R 2>/dev/null || true
+    echo "[fakeinit] pivot_root failed - SSH recovery attempted; dropping to /bin/sh"
+    exec /bin/sh
 fi
 
 echo "[fakeinit] Pivot successful! Now in Alpine root."
@@ -665,8 +677,12 @@ INSTALL_CMD="sh /root/.local/share/alpine-anywhere/alpine-anywhere --local --ins
 [ -n "$ALPINE_VERSION" ] && INSTALL_CMD="$INSTALL_CMD -V $ALPINE_VERSION"
 [ -n "$ALPINE_MIRROR" ] && INSTALL_CMD="$INSTALL_CMD -m $ALPINE_MIRROR"
 echo "[ram-installer] $INSTALL_CMD"
-$INSTALL_CMD 2>&1 | tee /dev/console
-rc=$?
+# Capture the INSTALLER's exit code, not tee's. In a pipeline `rc=$?` reflects
+# the last element (tee), which is ~always 0 - so a failed A/B install would
+# report success and reboot into a possibly-unbootable disk. BusyBox ash has no
+# PIPESTATUS, so stash the real rc through a file.
+{ $INSTALL_CMD 2>&1; echo $? > /tmp/aa-install.rc; } | tee /dev/console
+rc=$(cat /tmp/aa-install.rc 2>/dev/null || echo 1)
 echo "[ram-installer] install finished rc=$rc"
 sync
 if [ "$rc" -eq 0 ]; then
@@ -692,15 +708,26 @@ INSTALLERINIT
     part1=$(get_part_dev "$disk" 1)
     run_privileged mkdir -p "$boot_mnt"
     run_privileged mount "$part1" "$boot_mnt" || die "cannot mount boot partition $part1"
+    assert_mounted "$boot_mnt"
 
     log_info "Building installer initramfs onto ${part1}..."
-    ( cd "$PIVOT_DIR" && run_privileged sh -c "find . -path ./old_root -prune -o -print0 | cpio -0 -o -H newc 2>/dev/null | gzip -1 > '${boot_mnt}/installer.img'" )
-    log_info "installer.img: $(run_privileged du -h "${boot_mnt}/installer.img" | cut -f1)"
+    # Capture the cpio/gzip status (no 2>/dev/null swallowing) so a failed pack
+    # is caught BEFORE we repoint the bootloader at a corrupt installer.img.
+    ( cd "$PIVOT_DIR" && run_privileged sh -c "set -o pipefail 2>/dev/null; find . -path ./old_root -prune -o -print0 | cpio -0 -o -H newc | gzip -1 > '${boot_mnt}/installer.img'" ) \
+        || die "failed to build installer.img (cpio/gzip error)"
 
-    # 4. Point config.txt at vmlinuz + installer.img for the next boot
-    #    (back up the current boot config so a failed install can be recovered)
-    run_privileged cp "${boot_mnt}/config.txt" "${boot_mnt}/config.txt.preinstall" 2>/dev/null || true
-    run_privileged cp "${boot_mnt}/cmdline.txt" "${boot_mnt}/cmdline.txt.preinstall" 2>/dev/null || true
+    # Validate the artifact: gzip integrity + the cpio actually contains ./init.
+    run_privileged sh -c "gzip -t '${boot_mnt}/installer.img'" \
+        || die "installer.img failed gzip integrity check"
+    run_privileged sh -c "gzip -dc '${boot_mnt}/installer.img' | cpio -t 2>/dev/null | grep -qx './init'" \
+        || die "installer.img does not contain ./init - refusing to repoint bootloader"
+    log_info "installer.img: $(run_privileged du -h "${boot_mnt}/installer.img" | cut -f1) (validated)"
+
+    # 4. Point config.txt at vmlinuz + installer.img for the next boot.
+    #    The .preinstall backups are the ONLY rollback if the installer is bad,
+    #    so they are mandatory (require), not best-effort.
+    require run_privileged cp "${boot_mnt}/config.txt" "${boot_mnt}/config.txt.preinstall"
+    require run_privileged cp "${boot_mnt}/cmdline.txt" "${boot_mnt}/cmdline.txt.preinstall"
     local kimg
     kimg=$(ls "${boot_mnt}"/vmlinuz* 2>/dev/null | head -1)
     kimg=$(basename "${kimg:-vmlinuz}")

@@ -97,4 +97,58 @@ Describe 'download.sh'
             The result of 'count()' should equal 4
         End
     End
+
+    Describe 'verify_sha512() / enforce_integrity()'
+        setup() {
+            TESTDIR=$(mktemp -d)
+            CHECKSUM_DIR="$TESTDIR"
+            NO_VERIFY=false
+            printf 'payload\n' > "$TESTDIR/artifact"
+        }
+        cleanup_dir() { rm -rf "$TESTDIR"; }
+        BeforeEach 'setup'
+        AfterEach 'cleanup_dir'
+
+        It 'verifies a matching checksum from CHECKSUM_DIR'
+            write_sum() {
+                sha512_file "$TESTDIR/artifact" > "$TESTDIR/artifact.sha512"
+                verify_sha512 "https://example/artifact" "$TESTDIR/artifact"
+            }
+            When call write_sum
+            The status should be success
+            The stderr should include "Integrity verified"
+        End
+
+        It 'dies on a mismatching checksum'
+            write_bad_sum() {
+                echo "deadbeef" > "$TESTDIR/artifact.sha512"
+                verify_sha512 "https://example/artifact" "$TESTDIR/artifact"
+            }
+            When run write_bad_sum
+            The status should be failure
+            The stderr should include "CHECKSUM MISMATCH"
+        End
+
+        It 'enforce_integrity is fatal when no checksum is available'
+            no_sum() {
+                CHECKSUM_DIR="$TESTDIR/empty"; mkdir -p "$CHECKSUM_DIR"
+                # Force the HTTP fallback to yield nothing
+                http_fetch_stdout() { return 1; }
+                enforce_integrity "https://example/artifact" "$TESTDIR/artifact"
+            }
+            When run no_sum
+            The status should be failure
+            The stderr should include "No checksum available"
+        End
+
+        It 'enforce_integrity skips verification under --no-verify'
+            skipped() {
+                NO_VERIFY=true
+                enforce_integrity "https://example/artifact" "$TESTDIR/artifact"
+            }
+            When call skipped
+            The status should be success
+            The stderr should include "SKIPPED"
+        End
+    End
 End

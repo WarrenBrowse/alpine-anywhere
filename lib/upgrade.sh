@@ -124,13 +124,21 @@ set_slot_meta() {
     local meta="${BOOT_MNT}/slots.meta"
     local full="SLOT_${slot}_${key}"
     touch "$meta"
-    # Rewrite via temp file (portable; avoids GNU/BSD `sed -i` differences)
-    if grep -q "^${full}=" "$meta" 2>/dev/null; then
-        # `|| true`: grep -v exits 1 when it removes the only line (not an error here)
-        grep -v "^${full}=" "$meta" > "${meta}.tmp" || true
-        mv "${meta}.tmp" "$meta"
-    fi
-    echo "${full}=${value}" >> "$meta"
+    # Rebuild the whole file in one pass and write it atomically (tmp+fsync+
+    # rename+dir sync). The previous "grep -v > tmp; mv; then >> append" had a
+    # window where a crash between the mv and the append lost the key entirely,
+    # and never fsync'd - dangerous on the FAT boot partition under power loss.
+    { grep -v "^${full}=" "$meta" 2>/dev/null || true; echo "${full}=${value}"; } \
+        | atomic_write "$meta"
+}
+
+# Set a non-slot (global) key in slots.meta, e.g. ROLLBACK_COUNT / BOOT_HALTED.
+set_global_meta() {
+    local key="$1" value="$2"
+    local meta="${BOOT_MNT}/slots.meta"
+    touch "$meta"
+    { grep -v "^${key}=" "$meta" 2>/dev/null || true; echo "${key}=${value}"; } \
+        | atomic_write "$meta"
 }
 
 # =============================================================================
@@ -156,8 +164,13 @@ install_to_slot() {
     generate_system_squashfs "$squashfs"
 
     log_step "Writing image to slot $target_slot ($slot_dev)..."
-    dd if="$squashfs" of="$slot_dev" bs=1M conv=fsync 2>/dev/null
-    sync
+    local slot_sha slot_vmeta=""
+    if verity_enabled; then
+        slot_vmeta=$(format_verity_slot "$squashfs" "$slot_dev")
+        slot_sha=$(sha256_file "$squashfs")
+    else
+        slot_sha=$(write_image_to_device "$squashfs" "$slot_dev")
+    fi
     log_info "Slot $target_slot written: $(du -h "$squashfs" | cut -f1)"
 
     # Per-slot kernel on the boot partition (rollback-safe: kernel + userspace
@@ -169,6 +182,14 @@ install_to_slot() {
     set_slot_meta "$target_slot" "INSTALLED" "$(date -Iseconds)"
     set_slot_meta "$target_slot" "BOOT_COUNT" "0"
     set_slot_meta "$target_slot" "VERIFIED" "false"
+    set_slot_meta "$target_slot" "SHA256" "$slot_sha"
+    if [ -n "$slot_vmeta" ]; then
+        set -- $slot_vmeta
+        set_slot_meta "$target_slot" "ROOT_HASH" "$1"
+        set_slot_meta "$target_slot" "SALT" "$2"
+        set_slot_meta "$target_slot" "DATA_SIZE" "$3"
+        set_slot_meta "$target_slot" "HASH_OFFSET" "$4"
+    fi
 
     rm -f "$squashfs"
     rm -rf /tmp/boot-files
@@ -187,28 +208,27 @@ switch_slot() {
 
     log_step "Switching boot to slot $new_slot..."
     if [ -f "${BOOT_MNT}/config.txt" ]; then
-        # Raspberry Pi: select the slot's kernel/initramfs + root device
-        sed_inplace "${BOOT_MNT}/config.txt" \
-            -e "s|^kernel=vmlinuz-.*|kernel=vmlinuz-${new_slot}|" \
-            -e "s|^initramfs initramfs-.*|initramfs initramfs-${new_slot} followkernel|"
-        echo "root=${slot_dev} ${SLOT_KERNEL_OPTS}" > "${BOOT_MNT}/cmdline.txt"
+        # Raspberry Pi: select the slot's kernel/initramfs + root device.
+        # Patterns are ANCHORED to the slot letter ([AB]) so a trailing comment
+        # or a partial match can't eat the rest of the line, and the post-edit
+        # state is verified - a no-op edit (slot not actually switched) would
+        # otherwise leave the bootloader pointing at the old slot after an
+        # upgrade: a brick path. Atomic write protects the FAT partition.
+        sed_inplace_checked "${BOOT_MNT}/config.txt" "^kernel=vmlinuz-${new_slot}\$" \
+            -e "s|^kernel=vmlinuz-[AB].*|kernel=vmlinuz-${new_slot}|" \
+            -e "s|^initramfs initramfs-[AB].*|initramfs initramfs-${new_slot} followkernel|"
+        printf 'root=%s %s\n' "$slot_dev" "$(slot_kernel_opts)" | atomic_write "${BOOT_MNT}/cmdline.txt"
     elif [ -f "${BOOT_MNT}/extlinux/extlinux.conf" ]; then
-        sed_inplace "${BOOT_MNT}/extlinux/extlinux.conf" \
-            -e "s|^DEFAULT alpine-.*|DEFAULT alpine-${new_slot}|"
+        sed_inplace_checked "${BOOT_MNT}/extlinux/extlinux.conf" "^DEFAULT alpine-${new_slot}\$" \
+            -e "s|^DEFAULT alpine-[AB].*|DEFAULT alpine-${new_slot}|"
     else
         die "No known bootloader config on ${BOOT_MNT} (config.txt / extlinux.conf)"
     fi
-    echo "$new_slot" > "${BOOT_MNT}/current_slot"
+    # Only flip current_slot AFTER the bootloader config was confirmed changed.
+    printf '%s\n' "$new_slot" | atomic_write "${BOOT_MNT}/current_slot"
     sync
     aa_log "switch: boot slot set to $new_slot (root=${slot_dev})"
     log_info "Boot slot switched to $new_slot (reboot to activate)"
-}
-
-# Portable in-place sed: sed_inplace FILE -e EXPR [-e EXPR ...]
-# Avoids `sed -i` which differs between GNU, BSD and busybox.
-sed_inplace() {
-    local f="$1"; shift
-    sed "$@" "$f" > "${f}.aatmp" && mv "${f}.aatmp" "$f"
 }
 
 # =============================================================================
@@ -222,7 +242,11 @@ verify_current_slot() {
     current=$(get_current_slot)
     set_slot_meta "$current" "VERIFIED" "true"
     set_slot_meta "$current" "BOOT_COUNT" "0"
-    aa_log "verify: slot $current marked VERIFIED, boot_count reset"
+    # A healthy, operator-confirmed boot clears the global rollback guard so a
+    # future genuine failure gets a fresh retry budget (and lifts any halt).
+    set_global_meta "ROLLBACK_COUNT" "0"
+    set_global_meta "BOOT_HALTED" "0"
+    aa_log "verify: slot $current marked VERIFIED, boot_count + rollback guard reset"
     umount_boot
     log_info "Slot $current marked verified"
 }

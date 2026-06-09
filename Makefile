@@ -1,6 +1,6 @@
 # Makefile for alpine-anywhere
 
-.PHONY: all test test-unit test-integration install uninstall lint shellcheck help clean
+.PHONY: all test test-unit test-integration install uninstall lint shellcheck syntax help clean
 
 # Installation prefix
 PREFIX ?= /usr/local
@@ -10,6 +10,8 @@ LIBDIR ?= $(PREFIX)/lib/alpine-anywhere
 # Project files
 MAIN_SCRIPT := alpine-anywhere
 LIB_FILES := $(wildcard lib/*.sh)
+# Standalone initramfs payloads (not *.sh; run before switch_root in BusyBox ash)
+INITRAMFS_FILES := lib/initramfs/init.aa lib/initramfs/aa-verity-open
 
 # Default target
 all: lint test
@@ -37,12 +39,27 @@ test-tap:
 	@shellspec --format tap
 
 # Lint shell scripts
-lint: shellcheck
+lint: shellcheck syntax
 
-# Run shellcheck on all shell scripts
+# Syntax-check every script with the POSIX shell (catches parse errors in the
+# initramfs payloads too). Always runs even if shellcheck is absent.
+syntax:
+	@echo "Checking shell syntax (sh -n)..."
+	@for f in $(MAIN_SCRIPT) $(LIB_FILES) $(INITRAMFS_FILES); do \
+		sh -n "$$f" || exit 1; \
+	done
+	@echo "Syntax OK"
+
+# Run shellcheck on all shell scripts. CI-gating (no `|| true`): a finding at
+# --severity=warning or above fails the build. Skips cleanly if shellcheck is
+# not installed so `make test` still works locally.
 shellcheck:
-	@echo "Running shellcheck..."
-	@shellcheck -x $(MAIN_SCRIPT) $(LIB_FILES) || true
+	@if command -v shellcheck >/dev/null 2>&1; then \
+		echo "Running shellcheck..."; \
+		shellcheck -x -s sh -S warning $(MAIN_SCRIPT) $(LIB_FILES) $(INITRAMFS_FILES); \
+	else \
+		echo "shellcheck not installed; skipping (install it for CI gating)"; \
+	fi
 
 # Install alpine-anywhere
 install:

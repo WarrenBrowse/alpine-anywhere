@@ -381,6 +381,33 @@ apply_hardening_to_image() {
         chroot "$root" /sbin/rc-update add sysctl boot 2>/dev/null || true
     fi
 
+    # 7b. aa-lockdown: freeze kernel module loading once everything needed is up.
+    #     This is the realistic substitute for module signature enforcement -
+    #     Alpine kernels are not signed by us, so modules.sig_enforce=1 would
+    #     refuse to load ALL modules and is infeasible without a self-built
+    #     kernel. Setting kernel.modules_disabled=1 LAST (after net/nftables/
+    #     dropbear/dm-verity modules are loaded) blocks any later module load,
+    #     closing a major post-exploit persistence/escalation vector.
+    log_info "Installing aa-lockdown (kernel.modules_disabled) service..."
+    cat > "${root}/etc/init.d/aa-lockdown" << 'EOF'
+#!/sbin/openrc-run
+description="Alpine Anywhere: freeze kernel module loading after boot"
+# Must run LAST: after every service that might still load a module.
+depend() {
+    after sshd dropbear nftables net
+    keyword -timeout
+}
+start() {
+    ebegin "Freezing kernel module loading (modules_disabled=1)"
+    sysctl -w kernel.modules_disabled=1 >/dev/null 2>&1
+    eend $?
+}
+EOF
+    chmod +x "${root}/etc/init.d/aa-lockdown"
+    if [ "$INIT_SYSTEM" = "openrc" ]; then
+        chroot "$root" /sbin/rc-update add aa-lockdown default 2>/dev/null || true
+    fi
+
     # 8. Secure permissions
     log_info "Setting secure permissions..."
     chmod 700 "${root}/root"

@@ -59,21 +59,43 @@ check_takeover_support() {
     log_info "Takeover method is supported"
 }
 
-# Download Alpine minirootfs
+# Download Alpine minirootfs (on the remote) and verify its integrity there
+# before it is ever extracted/chrooted.
 download_alpine_minirootfs() {
     log_info "Downloading Alpine minirootfs..."
 
     local minirootfs_url="${ALPINE_MIRROR}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/alpine-minirootfs-${ALPINE_VERSION}.0-${DETECTED_ARCH}.tar.gz"
 
-    ssh_exec "echo '[$(date -Iseconds)] Downloading minirootfs...' >> ${REMOTE_WORK_DIR}/install.log"
-    ssh_exec "echo 'URL: ${minirootfs_url}' >> ${REMOTE_WORK_DIR}/install.log"
+    # Resolve the expected sha512 on the control host (HTTPS), so the check on
+    # the remote cannot be satisfied by a tampered mirror serving a matching
+    # bad checksum from the same compromised origin chosen by the attacker.
+    local want_sum=""
+    if [ "$NO_VERIFY" != "true" ]; then
+        if [ -n "$CHECKSUM_DIR" ] && [ -f "${CHECKSUM_DIR}/alpine-minirootfs-${ALPINE_VERSION}.0-${DETECTED_ARCH}.tar.gz.sha512" ]; then
+            want_sum=$(awk '{print $1}' "${CHECKSUM_DIR}/alpine-minirootfs-${ALPINE_VERSION}.0-${DETECTED_ARCH}.tar.gz.sha512")
+        else
+            want_sum=$(http_fetch_stdout "${minirootfs_url}.sha512" 2>/dev/null | awk '{print $1}' || true)
+        fi
+        [ -n "$want_sum" ] || die "No checksum available for minirootfs. Use --checksum-dir or (unsafe) --no-verify."
+    fi
 
-    # Download to work dir first
-    if ! ssh_exec "curl -fSL --progress-bar -o ${REMOTE_WORK_DIR}/minirootfs.tar.gz '${minirootfs_url}' 2>&1 | tee -a ${REMOTE_WORK_DIR}/install.log"; then
+    # Download on the remote (injection-safe: URL and dest passed as args).
+    local dl_script='set -e
+curl -fSL --progress-bar -o "$2/minirootfs.tar.gz" "$1" 2>&1'
+    if ! ssh_exec_script "$dl_script" "$minirootfs_url" "$REMOTE_WORK_DIR"; then
         die "Failed to download Alpine minirootfs"
     fi
 
-    ssh_exec "echo '[$(date -Iseconds)] Minirootfs downloaded' >> ${REMOTE_WORK_DIR}/install.log"
+    # Verify on the remote against the control-host-resolved checksum.
+    if [ "$NO_VERIFY" != "true" ]; then
+        local verify_script='got=$(sha512sum "$2/minirootfs.tar.gz" | awk "{print \$1}")
+if [ "$got" != "$1" ]; then echo "MINIROOTFS CHECKSUM MISMATCH" >&2; exit 1; fi
+echo verified-ok'
+        if ! ssh_exec_script "$verify_script" "$want_sum" "$REMOTE_WORK_DIR" | grep -q verified-ok; then
+            die "minirootfs integrity check failed on remote - refusing to proceed"
+        fi
+        log_info "Integrity verified (sha512): minirootfs"
+    fi
 }
 
 # Setup Alpine in tmpfs - generates and executes a single setup script
@@ -99,30 +121,36 @@ iface ${DETECTED_INTERFACE} inet static
     gateway ${DETECTED_GATEWAY}"
     fi
 
-    # Create the setup script that will run with sudo
+    # Generate the setup script LOCALLY (control host), then transfer it as a
+    # file and execute it by path. This avoids embedding it in a double-quoted
+    # ssh command string, so interpolated values (hostname, network config,
+    # mirror) can never break out into the remote shell. The local heredoc is
+    # unquoted so ${VAR} expands into the file; runtime variables use \$ /
+    # \${...} so they are evaluated on the remote at run time.
     log_info "Generating setup script..."
-    ssh_exec "cat > ${REMOTE_WORK_DIR}/setup_takeover.sh << 'SETUPSCRIPT'
+    local setup_local="${WORK_DIR}/setup_takeover.sh"
+    cat > "$setup_local" << SETUPSCRIPT
 #!/bin/sh
 set -e
 
-TAKEOVER_DIR=\"${TAKEOVER_DIR}\"
-OLD_ROOT=\"${OLD_ROOT}\"
-WORK_DIR=\"${REMOTE_WORK_DIR}\"
-LOG=\"\${WORK_DIR}/install.log\"
+TAKEOVER_DIR="${TAKEOVER_DIR}"
+OLD_ROOT="${OLD_ROOT}"
+WORK_DIR="${REMOTE_WORK_DIR}"
+LOG="\${WORK_DIR}/install.log"
 
 log() {
-    echo \"[\$(date '+%Y-%m-%d %H:%M:%S')] \$*\" | tee -a \"\$LOG\"
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] \$*" | tee -a "\$LOG"
 }
 
-log \"=== Setting up takeover environment ===\"
+log "=== Setting up takeover environment ==="
 
 # Create and mount tmpfs
-log \"Creating tmpfs at \${TAKEOVER_DIR}...\"
+log "Creating tmpfs at \${TAKEOVER_DIR}..."
 mkdir -p \${TAKEOVER_DIR}
 mount -t tmpfs -o size=512M tmpfs \${TAKEOVER_DIR}
 
 # Extract minirootfs
-log \"Extracting Alpine minirootfs...\"
+log "Extracting Alpine minirootfs..."
 tar -xzf \${WORK_DIR}/minirootfs.tar.gz -C \${TAKEOVER_DIR}
 
 # Create old_root mount point
@@ -132,7 +160,7 @@ mkdir -p \${TAKEOVER_DIR}\${OLD_ROOT}
 cp /etc/resolv.conf \${TAKEOVER_DIR}/etc/resolv.conf
 
 # Setup APK repositories
-log \"Configuring APK repositories...\"
+log "Configuring APK repositories..."
 mkdir -p \${TAKEOVER_DIR}/etc/apk
 cat > \${TAKEOVER_DIR}/etc/apk/repositories << 'APKREPOS'
 ${ALPINE_MIRROR}/v${ALPINE_VERSION}/main
@@ -140,18 +168,18 @@ ${ALPINE_MIRROR}/v${ALPINE_VERSION}/community
 APKREPOS
 
 # Mount filesystems needed for chroot
-log \"Mounting filesystems for chroot...\"
+log "Mounting filesystems for chroot..."
 mkdir -p \${TAKEOVER_DIR}/dev \${TAKEOVER_DIR}/proc
 mount --bind /dev \${TAKEOVER_DIR}/dev
 mount --bind /proc \${TAKEOVER_DIR}/proc 2>/dev/null || mount -t proc proc \${TAKEOVER_DIR}/proc
 
 # Install essential packages
-log \"Installing essential packages (this may take a moment)...\"
+log "Installing essential packages (this may take a moment)..."
 chroot \${TAKEOVER_DIR} /sbin/apk update
 chroot \${TAKEOVER_DIR} /sbin/apk add --no-cache openssh-server openrc busybox-openrc
 
 # Setup SSH
-log \"Configuring SSH...\"
+log "Configuring SSH..."
 mkdir -p \${TAKEOVER_DIR}/root/.ssh
 chmod 700 \${TAKEOVER_DIR}/root/.ssh
 
@@ -167,7 +195,7 @@ fi
 chmod 600 \${TAKEOVER_DIR}/root/.ssh/authorized_keys 2>/dev/null || true
 
 # Generate SSH host keys
-log \"Generating SSH host keys...\"
+log "Generating SSH host keys..."
 chroot \${TAKEOVER_DIR} /usr/bin/ssh-keygen -A
 
 # Configure sshd
@@ -181,7 +209,7 @@ Subsystem sftp /usr/lib/ssh/sftp-server
 SSHDCONFIG
 
 # Setup network configuration
-log \"Configuring network...\"
+log "Configuring network..."
 mkdir -p \${TAKEOVER_DIR}/etc/network
 cat > \${TAKEOVER_DIR}/etc/network/interfaces << 'NETCONFIG'
 ${network_interfaces}
@@ -191,28 +219,34 @@ NETCONFIG
 echo '${DETECTED_HOSTNAME}' > \${TAKEOVER_DIR}/etc/hostname
 
 # Enable services
-log \"Enabling services...\"
+log "Enabling services..."
 chroot \${TAKEOVER_DIR} /sbin/rc-update add networking boot 2>/dev/null || true
 chroot \${TAKEOVER_DIR} /sbin/rc-update add sshd default 2>/dev/null || true
 
 # Unmount chroot filesystems
-log \"Unmounting chroot filesystems...\"
+log "Unmounting chroot filesystems..."
 umount \${TAKEOVER_DIR}/proc 2>/dev/null || true
 umount \${TAKEOVER_DIR}/dev 2>/dev/null || true
 
-log \"=== Takeover environment setup complete ===\"
-log \"Alpine root is at \${TAKEOVER_DIR}\"
+log "=== Takeover environment setup complete ==="
+log "Alpine root is at \${TAKEOVER_DIR}"
 
 # List what we have
-log \"--- Installed files ---\"
-ls -la \${TAKEOVER_DIR}/ >> \"\$LOG\"
-SETUPSCRIPT"
+log "--- Installed files ---"
+ls -la \${TAKEOVER_DIR}/ >> "\$LOG"
+SETUPSCRIPT
 
-    ssh_exec "chmod +x ${REMOTE_WORK_DIR}/setup_takeover.sh"
+    if [ "$DRY_RUN" = "true" ]; then
+        log_info "[DRY-RUN] Would transfer and run setup_takeover.sh"
+        return 0
+    fi
+
+    scp_to_remote "$setup_local" "${REMOTE_WORK_DIR}/setup_takeover.sh"
+    ssh_exec "chmod +x $(shell_quote "${REMOTE_WORK_DIR}/setup_takeover.sh")"
 
     # Execute the setup script with sudo (single password prompt)
     log_info "Executing setup script (sudo)..."
-    ssh_exec_sudo "${REMOTE_WORK_DIR}/setup_takeover.sh"
+    ssh_exec_sudo "$(shell_quote "${REMOTE_WORK_DIR}/setup_takeover.sh")"
 
     log_info "Takeover environment setup complete"
 }
@@ -230,30 +264,32 @@ generate_takeover_script() {
 /sbin/route add default gw ${DETECTED_GATEWAY} 2>/dev/null || true"
     fi
 
-    # Create the takeover script (will be written by setup script with sudo)
-    ssh_exec "cat > ${REMOTE_WORK_DIR}/takeover_script.sh << 'TAKEOVERSCRIPT'
+    # Generate the takeover script LOCALLY then transfer it (same rationale as
+    # setup_takeover_environment: no interpolation into a remote shell string).
+    local takeover_local="${WORK_DIR}/takeover_script.sh"
+    cat > "$takeover_local" << TAKEOVERSCRIPT
 #!/bin/sh
 # Alpine Anywhere Takeover Script
 # This script starts Alpine services in chroot
 
 set -e
 
-TAKEOVER_DIR=\"${TAKEOVER_DIR}\"
-LOG=\"/dev/console\"
+TAKEOVER_DIR="${TAKEOVER_DIR}"
+LOG="/dev/console"
 
 log() {
-    echo \"[takeover] \$*\" | tee -a \$LOG 2>/dev/null || echo \"[takeover] \$*\"
+    echo "[takeover] \$*" | tee -a \$LOG 2>/dev/null || echo "[takeover] \$*"
 }
 
-log \"=== Alpine Anywhere Takeover ===\"
-log \"Starting takeover process...\"
+log "=== Alpine Anywhere Takeover ==="
+log "Starting takeover process..."
 
 # Sync filesystems
-log \"Syncing filesystems...\"
+log "Syncing filesystems..."
 sync
 
 # Mount necessary filesystems in chroot
-log \"Mounting virtual filesystems...\"
+log "Mounting virtual filesystems..."
 mount -t proc proc \${TAKEOVER_DIR}/proc 2>/dev/null || true
 mount -t sysfs sys \${TAKEOVER_DIR}/sys 2>/dev/null || true
 mount -t devtmpfs dev \${TAKEOVER_DIR}/dev 2>/dev/null || mount --bind /dev \${TAKEOVER_DIR}/dev 2>/dev/null || true
@@ -262,25 +298,32 @@ mount -t devpts devpts \${TAKEOVER_DIR}/dev/pts 2>/dev/null || true
 mount --bind /run \${TAKEOVER_DIR}/run 2>/dev/null || mkdir -p \${TAKEOVER_DIR}/run
 
 # Start networking in chroot
-log \"Starting Alpine networking...\"
+log "Starting Alpine networking..."
 chroot \${TAKEOVER_DIR} /sbin/ifconfig lo 127.0.0.1 up 2>/dev/null || true
 chroot \${TAKEOVER_DIR} /bin/sh -c '${network_setup}'
 
 # Start SSH daemon in chroot on port 2222
-log \"Starting Alpine SSH daemon on port 2222...\"
+log "Starting Alpine SSH daemon on port 2222..."
 chroot \${TAKEOVER_DIR} /bin/mkdir -p /run/sshd
 chroot \${TAKEOVER_DIR} /usr/sbin/sshd -p 2222
 
-log \"=== Takeover complete ===\"
-log \"Alpine Linux SSH running in chroot on port 2222\"
-log \"Connect via: ssh -p 2222 root@${DETECTED_IP_ADDRESS}\"
-log \"\"
-log \"Host SSH remains on port 22\"
-log \"To fully enter Alpine: sudo chroot /takeover /bin/sh\"
-TAKEOVERSCRIPT"
+log "=== Takeover complete ==="
+log "Alpine Linux SSH running in chroot on port 2222"
+log "Connect via: ssh -p 2222 root@${DETECTED_IP_ADDRESS}"
+log ""
+log "Host SSH remains on port 22"
+log "To fully enter Alpine: sudo chroot /takeover /bin/sh"
+TAKEOVERSCRIPT
+
+    if [ "$DRY_RUN" = "true" ]; then
+        log_info "[DRY-RUN] Would transfer and install takeover script"
+        return 0
+    fi
+
+    scp_to_remote "$takeover_local" "${REMOTE_WORK_DIR}/takeover_script.sh"
 
     # Copy takeover script to /takeover with sudo
-    ssh_exec_sudo "cp ${REMOTE_WORK_DIR}/takeover_script.sh ${TAKEOVER_DIR}/takeover.sh && chmod +x ${TAKEOVER_DIR}/takeover.sh"
+    ssh_exec_sudo "cp $(shell_quote "${REMOTE_WORK_DIR}/takeover_script.sh") $(shell_quote "${TAKEOVER_DIR}/takeover.sh") && chmod +x $(shell_quote "${TAKEOVER_DIR}/takeover.sh")"
 
     log_info "Takeover script generated"
 }

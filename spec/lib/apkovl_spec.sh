@@ -154,6 +154,21 @@ Describe 'apkovl.sh'
             When call generate_sshd_config
             The output should include 'HostKey /etc/ssh/ssh_host_ed25519_key'
         End
+
+        It 'is ed25519-only in hardened mode (drops RSA/ECDSA)'
+            BeforeCall 'HARDENED_MODE=true'
+            When call generate_sshd_config
+            The output should include 'HostKey /etc/ssh/ssh_host_ed25519_key'
+            The output should not include 'ssh_host_rsa_key'
+            The output should not include 'ssh_host_ecdsa_key'
+        End
+
+        It 'keeps RSA for compatibility in non-hardened mode'
+            BeforeCall 'HARDENED_MODE=false'
+            When call generate_sshd_config
+            The output should include 'ssh_host_rsa_key'
+            The output should not include 'ssh_host_ecdsa_key'
+        End
     End
 
     Describe 'generate_local_start()'

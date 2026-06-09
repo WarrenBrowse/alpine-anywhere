@@ -48,6 +48,15 @@ deploy_scripts_to_remote() {
         scp_to_remote "$lib" "${INSTALL_LIB_DIR}/"
     done
 
+    # Copy initramfs payloads (init.aa boot-guard, aa-verity-open) - these are
+    # not *.sh but must reach the target so wrap_boot_initramfs can embed them.
+    if [ -d "${SCRIPT_DIR}/lib/initramfs" ]; then
+        ssh_exec "mkdir -p '${INSTALL_LIB_DIR}/initramfs'"
+        for f in "${SCRIPT_DIR}"/lib/initramfs/*; do
+            [ -f "$f" ] && scp_to_remote "$f" "${INSTALL_LIB_DIR}/initramfs/"
+        done
+    fi
+
     # Make executable
     ssh_exec "chmod +x '${INSTALL_BASE_DIR}/alpine-anywhere'"
 
@@ -162,22 +171,27 @@ run_on_remote() {
     # Build the command line to pass to remote
     local remote_cmd="${remote_aa} --local"
 
-    # Pass through relevant options
+    # Pass through relevant options. Values are shell_quote'd (defence in depth
+    # on top of validate_safe_inputs) so a metacharacter in any value cannot
+    # break out of the remote command line.
     [ "$VERBOSE" = "true" ] && remote_cmd="$remote_cmd -v"
     [ "$DRY_RUN" = "true" ] && remote_cmd="$remote_cmd -n"
     [ "$FORCE" = "true" ] && remote_cmd="$remote_cmd -f"
-    [ -n "$ALPINE_VERSION" ] && remote_cmd="$remote_cmd -V '$ALPINE_VERSION'"
-    [ -n "$ALPINE_MIRROR" ] && remote_cmd="$remote_cmd -m '$ALPINE_MIRROR'"
-    [ -n "$KERNEL_FLAVOR" ] && remote_cmd="$remote_cmd -k '$KERNEL_FLAVOR'"
-    [ "$INSTALL_METHOD" != "auto" ] && remote_cmd="$remote_cmd --method='$INSTALL_METHOD'"
-    [ -n "$EXTRA_PACKAGES" ] && remote_cmd="$remote_cmd --extra-packages='$EXTRA_PACKAGES'"
+    [ -n "$ALPINE_VERSION" ] && remote_cmd="$remote_cmd -V $(shell_quote "$ALPINE_VERSION")"
+    [ -n "$ALPINE_MIRROR" ] && remote_cmd="$remote_cmd -m $(shell_quote "$ALPINE_MIRROR")"
+    [ -n "$KERNEL_FLAVOR" ] && remote_cmd="$remote_cmd -k $(shell_quote "$KERNEL_FLAVOR")"
+    [ "$INSTALL_METHOD" != "auto" ] && remote_cmd="$remote_cmd --method=$(shell_quote "$INSTALL_METHOD")"
+    [ -n "$EXTRA_PACKAGES" ] && remote_cmd="$remote_cmd --extra-packages=$(shell_quote "$EXTRA_PACKAGES")"
     [ "$HARDENED_MODE" = "true" ] && remote_cmd="$remote_cmd --hardened"
-    [ -n "$OVERLAY_DEVICE" ] && remote_cmd="$remote_cmd --overlay='$OVERLAY_DEVICE'"
-    [ -n "$TARGET_DISK" ] && remote_cmd="$remote_cmd --disk='$TARGET_DISK'"
-    [ -n "$INIT_SYSTEM" ] && remote_cmd="$remote_cmd --init='$INIT_SYSTEM'"
-    [ -n "$TARGET_SLOT" ] && remote_cmd="$remote_cmd --slot='$TARGET_SLOT'"
-    [ -n "$remote_custom_script" ] && remote_cmd="$remote_cmd --custom-script='$remote_custom_script'"
-    [ -n "$remote_host_key_dir" ] && remote_cmd="$remote_cmd --ssh-host-keys='$remote_host_key_dir'"
+    [ "$VERITY_MODE" = "on" ] && remote_cmd="$remote_cmd --verity"
+    [ "$VERITY_MODE" = "off" ] && remote_cmd="$remote_cmd --no-verity"
+    [ "$NO_VERIFY" = "true" ] && remote_cmd="$remote_cmd --no-verify"
+    [ -n "$OVERLAY_DEVICE" ] && remote_cmd="$remote_cmd --overlay=$(shell_quote "$OVERLAY_DEVICE")"
+    [ -n "$TARGET_DISK" ] && remote_cmd="$remote_cmd --disk=$(shell_quote "$TARGET_DISK")"
+    [ -n "$INIT_SYSTEM" ] && remote_cmd="$remote_cmd --init=$(shell_quote "$INIT_SYSTEM")"
+    [ -n "$TARGET_SLOT" ] && remote_cmd="$remote_cmd --slot=$(shell_quote "$TARGET_SLOT")"
+    [ -n "$remote_custom_script" ] && remote_cmd="$remote_cmd --custom-script=$(shell_quote "$remote_custom_script")"
+    [ -n "$remote_host_key_dir" ] && remote_cmd="$remote_cmd --ssh-host-keys=$(shell_quote "$remote_host_key_dir")"
     [ "$KEEP_EXISTING" = "true" ] && remote_cmd="$remote_cmd --keep"
     [ -n "$extra_args" ] && remote_cmd="$remote_cmd $extra_args"
 
@@ -273,6 +287,9 @@ detect_local_network() {
             log_info "Detected platform: Raspberry Pi ${DETECTED_RPI_VERSION}"
             ;;
     esac
+
+    # Reject crafted values before they reach the kernel cmdline / remote shell.
+    validate_safe_inputs
 }
 
 # =============================================================================

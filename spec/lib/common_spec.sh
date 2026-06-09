@@ -256,4 +256,95 @@ Describe 'common.sh'
             The variable BOOT_SLOT should equal "A"
         End
     End
+
+    Describe 'shell_quote()'
+        # The contract: the output, when eval'd by a POSIX shell, must
+        # reproduce the original value byte-for-byte (minus trailing newlines).
+        roundtrip() {
+            # shellcheck disable=SC2046
+            eval "set -- $(shell_quote "$1")"
+            printf '%s' "$1"
+        }
+
+        It 'preserves a plain value'
+            When call roundtrip "hello-world"
+            The output should equal "hello-world"
+        End
+
+        It 'neutralizes command substitution'
+            When call roundtrip '$(touch /tmp/pwned)'
+            The output should equal '$(touch /tmp/pwned)'
+        End
+
+        It 'neutralizes single quotes'
+            When call roundtrip "it's a trap"
+            The output should equal "it's a trap"
+        End
+
+        It 'neutralizes mixed metacharacters'
+            When call roundtrip 'a"b;c|d&e`f$g'
+            The output should equal 'a"b;c|d&e`f$g'
+        End
+
+        It 'neutralizes spaces and globs'
+            When call roundtrip 'a b *.sh ?x'
+            The output should equal 'a b *.sh ?x'
+        End
+    End
+
+    Describe 'require() / try_warn()'
+        It 'require succeeds silently on a passing command'
+            When call require true
+            The status should be success
+        End
+
+        It 'require aborts on a failing command'
+            When run require false
+            The status should be failure
+            The stderr should include "command failed"
+        End
+
+        It 'try_warn returns the failing status but does not abort'
+            When run try_warn false
+            The status should be failure
+            The stderr should include "non-fatal"
+        End
+    End
+
+    Describe 'atomic_write() / sed_inplace_checked()'
+        setup() { TESTDIR=$(mktemp -d); }
+        cleanup_dir() { rm -rf "$TESTDIR"; }
+        BeforeEach 'setup'
+        AfterEach 'cleanup_dir'
+
+        It 'atomic_write replaces file content and leaves no temp file'
+            write_it() { printf 'NEW\n' | atomic_write "$TESTDIR/f"; }
+            When call write_it
+            The status should be success
+            The contents of file "$TESTDIR/f" should equal "NEW"
+            The path "$TESTDIR/f.aatmp.$$" should not be exist
+        End
+
+        It 'sed_inplace_checked applies the edit when the expected state appears'
+            do_edit() {
+                printf 'kernel=vmlinuz-A\n' > "$TESTDIR/c"
+                sed_inplace_checked "$TESTDIR/c" '^kernel=vmlinuz-B$' -e 's|^kernel=vmlinuz-[AB]$|kernel=vmlinuz-B|'
+            }
+            When call do_edit
+            The status should be success
+            The contents of file "$TESTDIR/c" should equal "kernel=vmlinuz-B"
+        End
+
+        It 'sed_inplace_checked aborts when the expected state never appears (no-op edit)'
+            do_edit() {
+                printf 'kernel=vmlinuz-A\n' > "$TESTDIR/c"
+                sed_inplace_checked "$TESTDIR/c" '^kernel=vmlinuz-B$' -e 's|^nomatch$|x|'
+            }
+            When run do_edit
+            The status should be failure
+            The stderr should include "expected state"
+            # Original file must be left untouched
+            The contents of file "$TESTDIR/c" should equal "kernel=vmlinuz-A"
+        End
+    End
 End

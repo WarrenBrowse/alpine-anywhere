@@ -1,0 +1,97 @@
+#!/bin/sh
+# aa-verity-open - open the dm-verity device for the A/B root BEFORE switch_root.
+#
+# Invoked by the patched Alpine initramfs init when the kernel cmdline carries
+# aaverity=1, as:  aa-verity-open "$KOPT_root"
+# On success it prints the mapper device to stdout (/dev/mapper/aa-root) and the
+# init rewrites $KOPT_root to that, so the stock mount logic mounts the verified
+# device. On failure it prints nothing and returns non-zero; the init then falls
+# through to the A/B boot-guard (init.aa) which counts a failed boot and rolls
+# back to the known-good slot.
+#
+# The data device and hash device are the SAME slot partition: the squashfs
+# lives at offset 0 and the verity hash tree at SLOT_<x>_HASH_OFFSET (read from
+# the signed slots.meta on the FAT boot partition).
+#
+# Strict POSIX sh / BusyBox ash. Best-effort logging to /dev/kmsg.
+ROOTARG="$1"; SYSROOT="$2"
+AA_BOOT_DIR="${AA_BOOT_DIR:-/aa-vboot}"
+MAPPER="${AA_MAPPER:-aa-root}"
+
+KMSG=/dev/kmsg; [ -w "$KMSG" ] || KMSG="${SYSROOT}/dev/kmsg"
+vlog() { echo "aa-verity: $*" > "$KMSG" 2>/dev/null; }
+
+case "$ROOTARG" in
+    *2) slot=A ;;
+    *3) slot=B ;;
+    *) vlog "root '$ROOTARG' not an A/B slot; cannot verity-open"; exit 1 ;;
+esac
+case "$ROOTARG" in *mmcblk*|*nvme*) pfx="p" ;; *) pfx="" ;; esac
+disk=${ROOTARG%${pfx}[0-9]}
+base=${disk##*/}
+
+# Locate + mount the FAT boot partition read-only to read slots.meta.
+bootname="${base}${pfx}1"
+boot=""
+for c in "/dev/${bootname}" "${SYSROOT}/dev/${bootname}"; do
+    [ -b "$c" ] && { boot="$c"; break; }
+done
+[ -z "$boot" ] && boot="/dev/${bootname}"
+mkdir -p "$AA_BOOT_DIR" 2>/dev/null
+if ! mount -t vfat -o ro "$boot" "$AA_BOOT_DIR" 2>/dev/null && ! mount -o ro "$boot" "$AA_BOOT_DIR" 2>/dev/null; then
+    vlog "cannot mount boot $boot to read verity meta"
+    exit 1
+fi
+meta="$AA_BOOT_DIR/slots.meta"
+meta_get() { sed -n "s/^SLOT_${slot}_$1=//p" "$meta" 2>/dev/null | head -n1; }
+
+root_hash=$(meta_get ROOT_HASH)
+data_size=$(meta_get DATA_SIZE)
+
+# Optional minisign signature of the root hash (Phase 8 upgrade-auth key).
+# If a public key was embedded in the initramfs AND a signature is present,
+# the hash must verify or we refuse (fail closed). If neither is present we
+# proceed on the hash alone (verity still defends corruption + offline tamper).
+pubkey="/etc/alpine-anywhere/verity.pub"
+sig=$(meta_get ROOT_HASH_SIG)
+if [ -f "$pubkey" ] && [ -n "$sig" ] && command -v minisign >/dev/null 2>&1; then
+    tmpd=$(mktemp -d 2>/dev/null || echo /tmp)
+    printf '%s' "$root_hash" > "$tmpd/rh"
+    printf '%s\n' "$sig" > "$tmpd/rh.minisig"
+    if ! minisign -Vm "$tmpd/rh" -p "$pubkey" -x "$tmpd/rh.minisig" >/dev/null 2>&1; then
+        vlog "root hash signature INVALID for slot $slot - refusing"
+        umount "$AA_BOOT_DIR" 2>/dev/null
+        exit 1
+    fi
+    vlog "root hash signature verified for slot $slot"
+fi
+
+umount "$AA_BOOT_DIR" 2>/dev/null
+
+if [ -z "$root_hash" ] || [ -z "$data_size" ]; then
+    vlog "missing ROOT_HASH/DATA_SIZE for slot $slot in slots.meta"
+    exit 1
+fi
+
+# Ensure the dm modules are present (mkinitfs cryptsetup feature ships them).
+modprobe dm-mod 2>/dev/null
+modprobe dm-verity 2>/dev/null
+
+# Resolve the slot's own device node (may be under $SYSROOT/dev).
+slotdev=""
+for c in "$ROOTARG" "${SYSROOT}${ROOTARG}"; do
+    [ -b "$c" ] && { slotdev="$c"; break; }
+done
+[ -z "$slotdev" ] && slotdev="$ROOTARG"
+
+# data device == hash device, hash tree at --hash-offset.
+if ! veritysetup open "$slotdev" "$MAPPER" "$slotdev" "$root_hash" \
+        --hash-offset="$data_size" --data-block-size=4096 --hash-block-size=4096 \
+        >/dev/null 2>&1; then
+    vlog "veritysetup open FAILED for slot $slot ($slotdev) - root is corrupt or tampered"
+    exit 1
+fi
+
+vlog "verity OK: /dev/mapper/${MAPPER} (slot $slot)"
+echo "/dev/mapper/${MAPPER}"
+exit 0

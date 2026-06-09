@@ -245,6 +245,10 @@ detect_all_network_config() {
     detect_hostname
     detect_dhcp_status
     detect_architecture
+
+    # Detected values feed the kernel cmdline (root=, ip=, ...) where quoting
+    # offers no protection; a compromised remote could return crafted values.
+    validate_safe_inputs
 }
 
 # =============================================================================

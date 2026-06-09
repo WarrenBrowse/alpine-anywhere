@@ -17,6 +17,33 @@ detect_remote_home() {
 # Alpine File Downloads
 # =============================================================================
 
+# Verify a file already downloaded on the REMOTE against its published sha512.
+# The expected sum is resolved on the control host (HTTPS / CHECKSUM_DIR) and
+# compared on the remote. Fail-closed unless --no-verify. Args:
+#   $1 = remote file path (under REMOTE_WORK_DIR)
+#   $2 = the artifact URL whose .sha512 holds the expected digest
+#   $3 = checksum basename to look up in CHECKSUM_DIR (optional)
+remote_verify_sha512() {
+    _rvs_path="$1"; _rvs_url="$2"; _rvs_name="${3:-$(basename "$_rvs_path")}"
+    [ "$NO_VERIFY" = "true" ] && { log_warn "Integrity check SKIPPED for ${_rvs_name} (--no-verify)"; return 0; }
+
+    _rvs_want=""
+    if [ -n "$CHECKSUM_DIR" ] && [ -f "${CHECKSUM_DIR}/${_rvs_name}.sha512" ]; then
+        _rvs_want=$(awk '{print $1}' "${CHECKSUM_DIR}/${_rvs_name}.sha512")
+    else
+        _rvs_want=$(http_fetch_stdout "${_rvs_url}.sha512" 2>/dev/null | awk '{print $1}' || true)
+    fi
+    [ -n "$_rvs_want" ] || die "No checksum available for ${_rvs_name}. Use --checksum-dir or (unsafe) --no-verify."
+
+    _rvs_script='got=$(sha512sum "$2" | awk "{print \$1}")
+if [ "$got" != "$1" ]; then echo "CHECKSUM MISMATCH for $2 (got $got)" >&2; exit 1; fi
+echo verified-ok'
+    if ! ssh_exec_script "$_rvs_script" "$_rvs_want" "$_rvs_path" | grep -q verified-ok; then
+        die "Integrity check failed on remote for ${_rvs_name} - refusing to proceed"
+    fi
+    log_info "Integrity verified (sha512): ${_rvs_name}"
+}
+
 # Download standard netboot files (for generic x86_64 and EFI aarch64)
 download_alpine_netboot_files() {
     local base_url="${ALPINE_MIRROR}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/netboot"
@@ -28,14 +55,17 @@ download_alpine_netboot_files() {
     # Download with logging
     ssh_exec "echo '['\"$(date -Iseconds)\"'] Downloading vmlinuz-${KERNEL_FLAVOR}...' >> ${REMOTE_WORK_DIR}/install.log"
     ssh_exec "cd ${REMOTE_WORK_DIR} && curl -fSL --progress-bar -o vmlinuz '${base_url}/vmlinuz-${KERNEL_FLAVOR}' 2>&1 | tee -a install.log"
+    remote_verify_sha512 "${REMOTE_WORK_DIR}/vmlinuz" "${base_url}/vmlinuz-${KERNEL_FLAVOR}" "vmlinuz-${KERNEL_FLAVOR}"
     ssh_exec "echo '['\"$(date -Iseconds)\"'] vmlinuz download complete' >> ${REMOTE_WORK_DIR}/install.log"
 
     ssh_exec "echo '['\"$(date -Iseconds)\"'] Downloading initramfs-${KERNEL_FLAVOR}...' >> ${REMOTE_WORK_DIR}/install.log"
     ssh_exec "cd ${REMOTE_WORK_DIR} && curl -fSL --progress-bar -o initramfs '${base_url}/initramfs-${KERNEL_FLAVOR}' 2>&1 | tee -a install.log"
+    remote_verify_sha512 "${REMOTE_WORK_DIR}/initramfs" "${base_url}/initramfs-${KERNEL_FLAVOR}" "initramfs-${KERNEL_FLAVOR}"
     ssh_exec "echo '['\"$(date -Iseconds)\"'] initramfs download complete' >> ${REMOTE_WORK_DIR}/install.log"
 
     ssh_exec "echo '['\"$(date -Iseconds)\"'] Downloading modloop-${KERNEL_FLAVOR}...' >> ${REMOTE_WORK_DIR}/install.log"
     ssh_exec "cd ${REMOTE_WORK_DIR} && curl -fSL --progress-bar -o modloop '${base_url}/modloop-${KERNEL_FLAVOR}' 2>&1 | tee -a install.log"
+    remote_verify_sha512 "${REMOTE_WORK_DIR}/modloop" "${base_url}/modloop-${KERNEL_FLAVOR}" "modloop-${KERNEL_FLAVOR}"
     ssh_exec "echo '['\"$(date -Iseconds)\"'] modloop download complete' >> ${REMOTE_WORK_DIR}/install.log"
 }
 
@@ -79,6 +109,7 @@ download_alpine_rpi_files() {
     # Download tarball
     ssh_exec "echo '['\"$(date -Iseconds)\"'] Downloading ${tarball_name}...' >> ${REMOTE_WORK_DIR}/install.log"
     ssh_exec "cd ${REMOTE_WORK_DIR} && curl -fSL --progress-bar -o alpine-rpi.tar.gz '${tarball_url}' 2>&1 | tee -a install.log"
+    remote_verify_sha512 "${REMOTE_WORK_DIR}/alpine-rpi.tar.gz" "${tarball_url}" "${tarball_name}"
     ssh_exec "echo '['\"$(date -Iseconds)\"'] Tarball download complete' >> ${REMOTE_WORK_DIR}/install.log"
 
     # Extract required files

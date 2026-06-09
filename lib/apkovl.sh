@@ -107,9 +107,16 @@ generate_sshd_config() {
 # Alpine-anywhere generated sshd_config
 Port 22
 Protocol 2
-HostKey /etc/ssh/ssh_host_rsa_key
-HostKey /etc/ssh/ssh_host_ecdsa_key
-HostKey /etc/ssh/ssh_host_ed25519_key
+EOF
+    # Hardened: ed25519 host key only (drop the weaker RSA/ECDSA). Non-hardened
+    # keeps RSA + ed25519 for client compatibility.
+    if [ "$HARDENED_MODE" = "true" ]; then
+        echo "HostKey /etc/ssh/ssh_host_ed25519_key"
+    else
+        echo "HostKey /etc/ssh/ssh_host_rsa_key"
+        echo "HostKey /etc/ssh/ssh_host_ed25519_key"
+    fi
+    cat <<'EOF'
 
 PermitRootLogin prohibit-password
 PubkeyAuthentication yes
