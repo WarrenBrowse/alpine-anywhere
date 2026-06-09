@@ -80,6 +80,38 @@ Describe 'install.sh'
             End
         End
 
+        Describe 'assert_rpi_bootable_kernel()'
+            setup() {
+                KDIR=$(mktemp -d)
+                # Flat ARM64 Image: "ARMd" magic at offset 56.
+                { printf 'MZ%54s' ''; printf 'ARMd'; } > "$KDIR/img-flat"
+                # Compressed EFI-zboot vmlinuz: MZ header, "gzip" at offset 56.
+                { printf 'MZ%54s' ''; printf 'gzip'; } > "$KDIR/img-zboot"
+            }
+            cleanup_dir() { rm -rf "$KDIR"; }
+            BeforeEach 'setup'
+            AfterEach 'cleanup_dir'
+
+            It 'accepts a flat ARM64 Image on rpi'
+                BeforeCall 'DETECTED_PLATFORM=rpi'
+                When call assert_rpi_bootable_kernel "$KDIR/img-flat"
+                The status should be success
+            End
+
+            It 'rejects a compressed vmlinuz on rpi'
+                BeforeRun 'DETECTED_PLATFORM=rpi; KERNEL_PKG=linux-lts'
+                When run assert_rpi_bootable_kernel "$KDIR/img-zboot"
+                The status should be failure
+                The stderr should include "flat ARM64 Image"
+            End
+
+            It 'is a no-op on non-rpi platforms'
+                BeforeCall 'DETECTED_PLATFORM=generic'
+                When call assert_rpi_bootable_kernel "$KDIR/img-zboot"
+                The status should be success
+            End
+        End
+
         Describe 'kernel_supports_verity()'
             setup() { KROOT=$(mktemp -d); mkdir -p "$KROOT/boot"; }
             cleanup_dir() { rm -rf "$KROOT"; }

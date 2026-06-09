@@ -340,6 +340,23 @@ get_part_dev() {
     fi
 }
 
+# Refuse a kernel image the Raspberry Pi firmware cannot boot. The RPi firmware
+# loads a flat ARM64 `Image`, identified by the magic bytes "ARMd" (0x41 52 4d
+# 64) at offset 56. A compressed EFI-zboot vmlinuz (e.g. Alpine linux-lts) lacks
+# it and the firmware fails to start it - producing a slot that never boots.
+# No-op on non-RPi platforms (UEFI/extlinux handle compressed kernels fine).
+assert_rpi_bootable_kernel() {
+    _arbk_vmlinuz="$1"
+    [ "$DETECTED_PLATFORM" = "rpi" ] || return 0
+    [ -f "$_arbk_vmlinuz" ] || die "kernel image missing: $_arbk_vmlinuz"
+
+    _arbk_magic=$(dd if="$_arbk_vmlinuz" bs=1 skip=56 count=4 2>/dev/null)
+    if [ "$_arbk_magic" != "ARMd" ]; then
+        die "kernel '${KERNEL_PKG:-linux-rpi}' is not a flat ARM64 Image (RPi firmware can't boot it: magic '${_arbk_magic}' != 'ARMd'). On a Raspberry Pi use linux-rpi, or a kernel built as a flat Image with CONFIG_DM_VERITY for --verity."
+    fi
+    log_debug "RPi kernel image is a bootable flat ARM64 Image (ARMd magic OK)"
+}
+
 # True if the kernel installed in the build chroot supports dm-verity, either
 # builtin (CONFIG_DM_VERITY=y) or as a loadable module (=m / a dm-verity.ko).
 # Checked against the real /boot/config-* so we never enable verity on a kernel
@@ -645,6 +662,16 @@ EOF
     cp "${build_dir}"/boot/start*.elf /tmp/boot-files/ 2>/dev/null || true
     cp "${build_dir}"/boot/fixup*.dat /tmp/boot-files/ 2>/dev/null || true
     cp "${build_dir}"/boot/bootcode.bin /tmp/boot-files/ 2>/dev/null || true
+
+    # On a Raspberry Pi, refuse a kernel the firmware can't boot. The RPi
+    # firmware (non-UEFI) only loads a FLAT arm64 `Image` (magic "ARMd" at
+    # offset 56); Alpine's linux-lts ships a COMPRESSED EFI-zboot vmlinuz which
+    # the firmware silently fails to start -> the slot would never boot (no
+    # rollback, since the kernel never reaches the initramfs). Catch it here at
+    # build time instead of producing an unbootable slot. linux-rpi ships the
+    # flat Image, so the default path is unaffected; this only bites a
+    # --kernel-pkg override like linux-lts/linux-edge on a Pi.
+    assert_rpi_bootable_kernel /tmp/boot-files/vmlinuz
 
     # A/B boot-guard: patch this slot's initramfs so a failed/unverified boot
     # rolls back to the other slot. Runs in the initramfs right before
