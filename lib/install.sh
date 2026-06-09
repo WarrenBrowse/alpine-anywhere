@@ -517,14 +517,20 @@ EOF
     mount -t sysfs sysfs "${build_dir}/sys"
     mount --bind /dev "${build_dir}/dev"
 
-    # Determine kernel package based on platform. Alpine 3.20+ unified the RPi
-    # flavors into a single `linux-rpi` (the old linux-rpi4 no longer exists).
-    # NOTE: linux-rpi has `# CONFIG_DM_VERITY is not set` (verified on a real
-    # 6.6.49-r0 Pi), so --verity is NOT available there; linux-lts (x86_64) is.
-    # The feasibility gate below enforces this.
+    # Determine kernel package. --kernel-pkg overrides the platform default,
+    # which lets you pick a verity-capable kernel on a Pi (linux-lts/linux-edge)
+    # or a self-built linux-hardened published in a custom apk repo.
+    # NOTE: the stock linux-rpi has `# CONFIG_DM_VERITY is not set` (verified on
+    # a real Pi 4), so --verity is NOT available there; linux-lts/virt/edge have
+    # CONFIG_DM_VERITY=m. The feasibility gate below enforces this against the
+    # ACTUAL installed kernel config, whatever package was chosen.
     local kernel_pkg="linux-lts"
     if [ "$DETECTED_PLATFORM" = "rpi" ]; then
         kernel_pkg="linux-rpi"
+    fi
+    if [ -n "$KERNEL_PKG" ]; then
+        kernel_pkg="$KERNEL_PKG"
+        log_info "Using overridden kernel package: $kernel_pkg"
     fi
 
     # Configure mkinitfs to include squashfs BEFORE installing kernel.

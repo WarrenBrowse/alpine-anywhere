@@ -180,6 +180,7 @@ run_on_remote() {
     [ -n "$ALPINE_VERSION" ] && remote_cmd="$remote_cmd -V $(shell_quote "$ALPINE_VERSION")"
     [ -n "$ALPINE_MIRROR" ] && remote_cmd="$remote_cmd -m $(shell_quote "$ALPINE_MIRROR")"
     [ -n "$KERNEL_FLAVOR" ] && remote_cmd="$remote_cmd -k $(shell_quote "$KERNEL_FLAVOR")"
+    [ -n "$KERNEL_PKG" ] && remote_cmd="$remote_cmd --kernel-pkg=$(shell_quote "$KERNEL_PKG")"
     [ "$INSTALL_METHOD" != "auto" ] && remote_cmd="$remote_cmd --method=$(shell_quote "$INSTALL_METHOD")"
     [ -n "$EXTRA_PACKAGES" ] && remote_cmd="$remote_cmd --extra-packages=$(shell_quote "$EXTRA_PACKAGES")"
     [ "$HARDENED_MODE" = "true" ] && remote_cmd="$remote_cmd --hardened"

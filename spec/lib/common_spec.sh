@@ -257,6 +257,23 @@ Describe 'common.sh'
         End
     End
 
+    Describe '--kernel-pkg / --verity parsing'
+        It 'parses --kernel-pkg space form'
+            When call parse_arguments --kernel-pkg linux-edge --install --local
+            The variable KERNEL_PKG should equal "linux-edge"
+        End
+
+        It 'parses --kernel-pkg= form'
+            When call parse_arguments --kernel-pkg=linux-lts --install --local
+            The variable KERNEL_PKG should equal "linux-lts"
+        End
+
+        It 'parses --verity / --no-verity'
+            When call parse_arguments --no-verity --install --local
+            The variable VERITY_MODE should equal "off"
+        End
+    End
+
     Describe 'shell_quote()'
         # The contract: the output, when eval'd by a POSIX shell, must
         # reproduce the original value byte-for-byte (minus trailing newlines).

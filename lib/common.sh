@@ -10,6 +10,7 @@ set -eu
 ALPINE_VERSION="${ALPINE_VERSION:-3.20}"
 ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
 KERNEL_FLAVOR="${KERNEL_FLAVOR:-lts}"
+KERNEL_PKG="${KERNEL_PKG:-}"              # Override the install kernel apk (e.g. linux-lts, linux-edge, a custom linux-hardened); empty = auto by platform
 SSH_PORT="${SSH_PORT:-22}"
 SSH_IDENTITY="${SSH_IDENTITY:-}"
 SSH_KNOWN_HOSTS="${SSH_KNOWN_HOSTS:-}"    # Pinned known_hosts file (enforces StrictHostKeyChecking=yes)
@@ -445,6 +446,12 @@ Options:
   -V, --alpine-version VERSION   Alpine version (default: 3.20)
   -m, --mirror URL               Alpine mirror URL
   -k, --kernel FLAVOR            Kernel flavor: lts or virt (default: lts)
+  --kernel-pkg PKG               Override the install kernel apk package
+                                   (default: linux-rpi on Pi, else linux-lts).
+                                   Use to enable dm-verity on a Pi (linux-lts/
+                                   linux-edge have CONFIG_DM_VERITY; linux-rpi
+                                   does not), or to install a custom hardened
+                                   kernel published in your own apk repo.
   -p, --port PORT                SSH port (default: 22)
   -i, --identity FILE            SSH private key file
   --known-hosts FILE             Pin the target's host key via this known_hosts
@@ -679,6 +686,14 @@ parse_arguments() {
                 ;;
             --ssh-fingerprint=*)
                 SSH_FINGERPRINT="${1#*=}"
+                shift
+                ;;
+            --kernel-pkg)
+                KERNEL_PKG="$2"
+                shift 2
+                ;;
+            --kernel-pkg=*)
+                KERNEL_PKG="${1#*=}"
                 shift
                 ;;
             --verity)
