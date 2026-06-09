@@ -370,7 +370,13 @@ kernel_supports_verity() {
 # which the caller persists into slots.meta. Dies on any failure.
 format_verity_slot() {
     _fvs_src="$1"; _fvs_dev="$2"
-    command_exists veritysetup || die "veritysetup not found (install cryptsetup) - required for --verity"
+    # veritysetup runs on the BUILDER (the running system / RAM env doing the
+    # install), not in the image chroot - ensure it is present here.
+    if ! command_exists veritysetup; then
+        log_info "Installing cryptsetup on the builder for veritysetup..."
+        apk add --no-cache cryptsetup >/dev/null 2>&1 || true
+    fi
+    command_exists veritysetup || die "veritysetup not found (apk add cryptsetup) - required for --verity"
     [ -f "$_fvs_src" ] || die "format_verity_slot: source $_fvs_src missing"
     is_block_device "$_fvs_dev" || die "format_verity_slot: $_fvs_dev is not a block device"
 

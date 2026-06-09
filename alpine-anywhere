@@ -335,6 +335,30 @@ run_local_ab_install() {
         fi
     fi
 
+    # Installing into a specific slot of an EXISTING A/B layout: write that
+    # (inactive) slot directly - NO pivot, NO repartition. This is safe even on
+    # the same disk we booted from, because install_secondary_slot only touches
+    # the target slot partition + that slot's boot entry, never the running
+    # slot. Guard: never overwrite the slot we are running from.
+    if [ -n "$TARGET_SLOT" ]; then
+        local ab_disk cur_slot slot_partdev
+        ab_disk="${TARGET_DISK:-$(get_boot_disk 2>/dev/null)}"
+        cur_slot=$(get_current_slot 2>/dev/null || echo "")
+        if [ -n "$ab_disk" ]; then
+            slot_partdev=$(get_part_dev "$ab_disk" "$(slot_to_partnum "$TARGET_SLOT")")
+            if [ -b "$slot_partdev" ]; then
+                if [ "$TARGET_SLOT" = "$cur_slot" ]; then
+                    die "Refusing to overwrite the running slot ($cur_slot). Install into the other slot."
+                fi
+                log_info "Installing into existing layout: slot $TARGET_SLOT on $ab_disk (no pivot; running slot ${cur_slot:-?} preserved)"
+                resolve_init_system
+                install_secondary_slot "$ab_disk" "$TARGET_SLOT"
+                show_install_completion_message
+                return 0
+            fi
+        fi
+    fi
+
     # If the target disk is NOT the disk we're booted from, no pivot is needed:
     # partition + install directly (e.g. a Debian/Armbian SD installing onto an
     # attached USB/SSD). The pivot only exists to free the disk you run from.
