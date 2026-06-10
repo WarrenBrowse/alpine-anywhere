@@ -936,8 +936,13 @@ setup_persistence_image() {
         sed -i "s#/dev/mapper/${DATA_MAPPER}#LABEL=ALPINE_DATA#g" "${root}/etc/fstab"
     fi
 
-    # 3. Workhorse + operator commands.
-    mkdir -p "${root}/usr/local/sbin" "${root}/usr/local/bin"
+    # 3. Workhorse + operator commands. Ensure /usr/local/{sbin,bin} are on PATH
+    #    for interactive logins (minimal s6 images don't include them), so the
+    #    operator can just type `aa-unlock` / `aa-snapshot`.
+    mkdir -p "${root}/usr/local/sbin" "${root}/usr/local/bin" "${root}/etc/profile.d"
+    cat > "${root}/etc/profile.d/aa-path.sh" << 'EOF'
+case ":$PATH:" in *:/usr/local/sbin:*) ;; *) PATH="/usr/local/sbin:/usr/local/bin:$PATH"; export PATH ;; esac
+EOF
     install_aa_data_helper "$root"
     install_aa_unlock "$root"
     install_aa_snapshot "$root"
@@ -1073,12 +1078,13 @@ install_aa_unlock() {
     cat > "${root}/usr/local/bin/aa-unlock" << 'AAUNLOCK'
 #!/bin/sh
 # Unlock + mount the persistent data partition (run after SSHing in).
+# Calls aa-data by ABSOLUTE path (/usr/local/sbin may not be in PATH).
 set -u
 if [ "${1:-}" = "--key-file" ] && [ -n "${2:-}" ]; then
-    aa-data open "$2"
+    /usr/local/sbin/aa-data open "$2"
 else
     echo "Enter data passphrase to unlock /var:" >&2
-    aa-data open -          # cryptsetup prompts on the controlling terminal
+    /usr/local/sbin/aa-data open -   # cryptsetup reads the passphrase from the tty/stdin
 fi
 AAUNLOCK
     chmod +x "${root}/usr/local/bin/aa-unlock"
