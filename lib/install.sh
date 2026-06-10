@@ -225,9 +225,15 @@ create_partition_layout() {
     log_info "Creating GPT partition table..."
     require parted -s "$disk" mklabel gpt
 
-    log_info "Creating boot partition (${PART_BOOT_SIZE_MB}MB, FAT32)..."
+    log_info "Creating boot partition (${PART_BOOT_SIZE_MB}MB)..."
     require parted -s "$disk" mkpart boot fat32 1MiB "${PART_BOOT_SIZE_MB}MiB"
     require parted -s "$disk" set 1 boot on
+    # x86_64 BIOS: gptmbr.bin chainloads the partition carrying the GPT
+    # "legacy BIOS bootable" attribute (bit 2). extlinux's VBR lives there.
+    if [ "$DETECTED_PLATFORM" != "rpi" ]; then
+        parted -s "$disk" set 1 legacy_boot on 2>/dev/null \
+            || log_warn "could not set legacy_boot attribute on ${disk}1"
+    fi
 
     log_info "Creating slot A partition (${PART_SLOT_SIZE_MB}MB)..."
     require parted -s "$disk" mkpart slota ext4 "${PART_BOOT_SIZE_MB}MiB" "$((PART_BOOT_SIZE_MB + PART_SLOT_SIZE_MB))MiB"
@@ -435,8 +441,16 @@ format_partitions() {
     local boot_dev slota_dev data_dev
     boot_dev=$(get_part_dev "$disk" 1)
 
-    log_info "Formatting boot partition ($boot_dev, FAT32)..."
-    require mkfs.vfat -F 32 -n ALPINE_BOOT "$boot_dev"
+    # RPi firmware reads the boot files from a FAT partition; x86_64 boots via
+    # extlinux, which installs onto an ext filesystem (not FAT), so use ext4
+    # there. install_boot_config + init.aa + upgrade.sh all key off extlinux.conf.
+    if [ "$DETECTED_PLATFORM" = "rpi" ]; then
+        log_info "Formatting boot partition ($boot_dev, FAT32)..."
+        require mkfs.vfat -F 32 -n ALPINE_BOOT "$boot_dev"
+    else
+        log_info "Formatting boot partition ($boot_dev, ext4)..."
+        require mkfs.ext4 -q -L ALPINE_BOOT -F "$boot_dev"
+    fi
 
     # Slot A and B are raw (squashfs written directly), no formatting needed
     log_info "Slot A and B: raw partitions (squashfs will be written directly)"
@@ -1641,6 +1655,8 @@ run_ab_install() {
 
     # Step 5: Configure bootloader
     install_boot_config "$boot_mnt" "$disk"
+    # x86_64 BIOS: write the actual boot code (extlinux + gptmbr). No-op on RPi.
+    install_bios_bootloader "$disk" "$boot_mnt"
 
     # Copy alpine-anywhere scripts to boot partition for future upgrades
     mkdir -p "${boot_mnt}/alpine-anywhere/lib"
@@ -1899,4 +1915,55 @@ LABEL alpine-B
 EOF
         log_info "Boot config: extlinux default slot $slot"
     fi
+}
+
+# Install the extlinux bootloader so an x86_64 BIOS firmware can actually boot
+# the disk. install_boot_config only WRITES extlinux.conf; without this the disk
+# has no boot code. No-op on RPi (firmware reads the FAT directly). The boot
+# partition must be mounted at $boot_mnt (ext4) and hold extlinux/extlinux.conf.
+# Layout: GPT + "legacy BIOS bootable" attr on part 1 (set in partition_disk) +
+# gptmbr.bin in the protective MBR bootstrap, which chainloads that partition's
+# extlinux VBR.
+install_bios_bootloader() {
+    local disk="$1" boot_mnt="$2"
+    [ "$DETECTED_PLATFORM" = "rpi" ] && return 0
+
+    # Ensure an extlinux installer is present (host tool: apk on Alpine, apt on
+    # Debian-family installers running without a pivot).
+    local extlinux_bin
+    extlinux_bin=$(command -v extlinux 2>/dev/null || true)
+    if [ -z "$extlinux_bin" ]; then
+        if command -v apk >/dev/null 2>&1; then
+            apk add --no-cache syslinux >/dev/null 2>&1 || true
+        elif command -v apt-get >/dev/null 2>&1; then
+            DEBIAN_FRONTEND=noninteractive apt-get -qq install -y extlinux syslinux-common >/dev/null 2>&1 || true
+        fi
+        extlinux_bin=$(command -v extlinux 2>/dev/null || true)
+    fi
+    [ -n "$extlinux_bin" ] || { log_warn "extlinux not available; x86_64 boot code NOT installed (disk will not boot)"; return 1; }
+
+    # Locate gptmbr.bin + .c32 modules across distro layouts.
+    local gptmbr="" c32dir="" d
+    for d in /usr/share/syslinux /usr/lib/syslinux/mbr /usr/lib/syslinux/bios \
+             /usr/lib/syslinux/modules/bios /usr/lib/SYSLINUX /usr/lib/syslinux; do
+        [ -z "$gptmbr" ] && [ -f "$d/gptmbr.bin" ] && gptmbr="$d/gptmbr.bin"
+        [ -z "$c32dir" ] && [ -f "$d/ldlinux.c32" ] && c32dir="$d"
+    done
+
+    # ldlinux.c32 must sit next to extlinux.conf for extlinux >= 5.
+    [ -n "$c32dir" ] && cp "$c32dir"/*.c32 "${boot_mnt}/extlinux/" 2>/dev/null || true
+
+    log_info "Installing extlinux bootloader to ${boot_mnt}/extlinux ..."
+    "$extlinux_bin" --install "${boot_mnt}/extlinux" >/dev/null 2>&1 \
+        || { log_warn "extlinux --install failed; disk may not boot"; return 1; }
+
+    if [ -n "$gptmbr" ]; then
+        log_info "Writing GPT MBR bootstrap ($(basename "$gptmbr")) to $disk ..."
+        dd if="$gptmbr" of="$disk" bs=440 count=1 conv=notrunc 2>/dev/null \
+            || log_warn "failed to write gptmbr.bin to $disk MBR"
+    else
+        log_warn "gptmbr.bin not found; BIOS may not find the boot partition"
+    fi
+    sync
+    log_info "x86_64 BIOS bootloader installed (extlinux + gptmbr, legacy_boot on part 1)"
 }
