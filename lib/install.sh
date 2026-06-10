@@ -491,6 +491,10 @@ format_data_partition() {
     if [ "$DATA_FS" = "btrfs" ] && ! command_exists mkfs.btrfs; then
         log_info "Installing btrfs-progs on the builder..."; apk add --no-cache btrfs-progs >/dev/null 2>&1 || true
     fi
+    # The filesystem/crypto kernel modules may be modules not yet loaded on the
+    # builder (e.g. linux-rpi BTRFS_FS=m) - mount -t btrfs would fail with EINVAL.
+    encrypt_enabled && modprobe dm-crypt 2>/dev/null || true
+    [ "$DATA_FS" = "btrfs" ] && modprobe btrfs 2>/dev/null || true
 
     local fs_dev="$_fdp_dev" luks_uuid=""
     if encrypt_enabled; then
