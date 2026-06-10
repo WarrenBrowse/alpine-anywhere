@@ -55,6 +55,17 @@ validate_safe_inputs() {
             *) die "target disk must be a /dev path: '$TARGET_DISK'" ;;
         esac
     fi
+
+    # Data-persistence inputs
+    assert_safe_token "key-url" "$KEY_URL"
+    assert_safe_token "key-file" "$KEY_FILE"
+    case "$DATA_FS" in btrfs|ext4) ;; *) die "invalid --data-fs '$DATA_FS' (btrfs|ext4)" ;; esac
+    case "$UNLOCK_METHOD" in ssh|keyfile|passphrase) ;; *) die "invalid --unlock-method '$UNLOCK_METHOD' (ssh|keyfile|passphrase)" ;; esac
+    case "$CONTAINERS" in none|podman|docker|both) ;; *) die "invalid --containers '$CONTAINERS' (none|podman|docker|both)" ;; esac
+    case "$CONTAINER_RUNTIME" in crun|runsc) ;; *) die "invalid --container-runtime '$CONTAINER_RUNTIME' (crun|runsc)" ;; esac
+    if [ "$UNLOCK_METHOD" = "keyfile" ] && [ -z "$KEY_URL" ] && [ -z "$KEY_FILE" ]; then
+        die "--unlock-method keyfile requires --key-url or --key-file"
+    fi
 }
 
 # =============================================================================

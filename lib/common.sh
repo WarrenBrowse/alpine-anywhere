@@ -41,6 +41,16 @@ NO_VERIFY="${NO_VERIFY:-false}"           # Skip artifact checksum verification 
 CHECKSUM_DIR="${CHECKSUM_DIR:-}"          # Local dir of *.sha512 files (air-gapped mirror)
 VERITY_MODE="${VERITY_MODE:-auto}"        # dm-verity on slots: auto|on|off (auto = on iff hardened)
 
+# Data persistence (immutable A/B root stays RAM; only the data partition persists)
+PERSIST_DATA="${PERSIST_DATA:-false}"     # Persist /var (+ /srv /home) on the data partition (sda4)
+DATA_FS="${DATA_FS:-btrfs}"               # Data partition filesystem: btrfs|ext4 (btrfs = snapshots)
+ENCRYPT_DATA="${ENCRYPT_DATA:-false}"     # LUKS-encrypt the data partition
+UNLOCK_METHOD="${UNLOCK_METHOD:-ssh}"     # LUKS unlock: ssh|keyfile|passphrase (ssh = manual aa-unlock, no key at rest)
+KEY_URL="${KEY_URL:-}"                     # keyfile method: URL to fetch the LUKS key (mTLS)
+KEY_FILE="${KEY_FILE:-}"                   # keyfile method: local key file baked to boot FAT
+CONTAINERS="${CONTAINERS:-none}"          # Container runtime baked in: none|podman|docker|both (podman = rootless)
+CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-crun}"  # OCI runtime: crun|runsc (runsc = gVisor, fetched in custom-script)
+
 # Working directories (set by setup_install_dirs in exec.sh)
 WORK_DIR=""
 INSTALL_BASE_DIR=""
@@ -155,6 +165,19 @@ ensure_sane_clock() {
         log_warn "Could not sync clock automatically. HTTPS/integrity checks may fail."
         log_warn "Fix manually (e.g. 'date -s \"YYYY-MM-DD HH:MM:SS\"') and retry."
     fi
+}
+
+# Data-persistence predicates.
+persist_enabled() { [ "$PERSIST_DATA" = "true" ]; }
+encrypt_enabled() { [ "$ENCRYPT_DATA" = "true" ]; }
+containers_enabled() { [ "$CONTAINERS" != "none" ] && [ -n "$CONTAINERS" ]; }
+# True if the chosen container set includes a given runtime (podman|docker).
+container_is() {
+    case "$CONTAINERS" in
+        both) return 0 ;;
+        "$1") return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # Is dm-verity protection of the A/B slots enabled? auto => on iff --hardened.
@@ -530,6 +553,22 @@ Integrity options:
                                    verified block-by-block at boot
   --no-verity                    Disable dm-verity (debug / unsupported kernels)
 
+Data persistence options (immutable A/B root stays RAM; only data persists):
+  --persist                      Persist /var (+ /srv /home) on the data partition
+                                   (sda4). Survives reboots and A/B upgrades.
+  --data-fs btrfs|ext4           Data filesystem (default btrfs: snapshots/backups)
+  --encrypt-data                 LUKS-encrypt the data partition (implies --persist)
+  --unlock-method ssh|keyfile|passphrase
+                                   How the encrypted data is unlocked (default ssh:
+                                   manual `aa-unlock` after boot, no key at rest;
+                                   the OS still boots & is reachable while locked)
+  --key-url URL                  keyfile method: fetch the LUKS key from URL (mTLS)
+  --key-file FILE                keyfile method: bake a local key onto the boot FAT
+  --containers podman|docker|both
+                                   Bake a container runtime, data on the persistent
+                                   volume (default none; podman = rootless)
+  --container-runtime crun|runsc  OCI runtime (runsc = gVisor, fetched at build)
+
 Security options:
   --hardened                     Security hardened mode:
                                    - linux-hardened kernel (KSPP)
@@ -732,6 +771,63 @@ parse_arguments() {
                 ;;
             --no-verity)
                 VERITY_MODE=off
+                shift
+                ;;
+            --persist)
+                PERSIST_DATA=true
+                shift
+                ;;
+            --data-fs)
+                DATA_FS="$2"
+                shift 2
+                ;;
+            --data-fs=*)
+                DATA_FS="${1#*=}"
+                shift
+                ;;
+            --encrypt-data)
+                ENCRYPT_DATA=true
+                PERSIST_DATA=true
+                shift
+                ;;
+            --unlock-method)
+                UNLOCK_METHOD="$2"
+                shift 2
+                ;;
+            --unlock-method=*)
+                UNLOCK_METHOD="${1#*=}"
+                shift
+                ;;
+            --key-url)
+                KEY_URL="$2"; UNLOCK_METHOD=keyfile
+                shift 2
+                ;;
+            --key-url=*)
+                KEY_URL="${1#*=}"; UNLOCK_METHOD=keyfile
+                shift
+                ;;
+            --key-file)
+                KEY_FILE="$2"; UNLOCK_METHOD=keyfile
+                shift 2
+                ;;
+            --key-file=*)
+                KEY_FILE="${1#*=}"; UNLOCK_METHOD=keyfile
+                shift
+                ;;
+            --containers)
+                CONTAINERS="$2"; PERSIST_DATA=true
+                shift 2
+                ;;
+            --containers=*)
+                CONTAINERS="${1#*=}"; PERSIST_DATA=true
+                shift
+                ;;
+            --container-runtime)
+                CONTAINER_RUNTIME="$2"
+                shift 2
+                ;;
+            --container-runtime=*)
+                CONTAINER_RUNTIME="${1#*=}"
                 shift
                 ;;
             --checksum-dir)
