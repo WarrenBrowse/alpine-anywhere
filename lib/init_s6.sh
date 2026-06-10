@@ -76,6 +76,12 @@ for f in /etc/sysctl.d/*.conf /etc/sysctl.conf; do
     [ -f "$f" ] && sysctl -p "$f" >/dev/null 2>&1 || true
 done
 EOF
+    # Persistent data: only acts for automatic unlock methods; the default ssh
+    # method stays locked until the operator runs aa-unlock.
+    cat > "${hd}/mount-data-up" << 'EOF'
+#!/bin/sh
+[ -x /usr/local/sbin/aa-data ] && /usr/local/sbin/aa-data autoboot || true
+EOF
     chmod +x "${hd}"/*
 
     # --- s6-rc source services --------------------------------------------
@@ -88,6 +94,14 @@ EOF
     _s6_dep "$src" network mounts
 
     local contents="mounts network aa-verify"
+
+    # Persistent data unlock+mount (auto methods) - runs after mounts.
+    if [ "$PERSIST_DATA" = "true" ]; then
+        _s6_oneshot "$src" mount-data "/usr/local/libexec/aa-s6/mount-data-up"
+        _s6_dep "$src" mount-data mounts
+        _s6_dep "$src" network mount-data
+        contents="$contents mount-data"
+    fi
 
     # SSH daemon (supervised longrun)
     if [ "$HARDENED_MODE" = "true" ]; then

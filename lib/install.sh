@@ -443,11 +443,113 @@ format_partitions() {
 
     if [ "$with_data" = "true" ]; then
         data_dev=$(get_part_dev "$disk" 4)
-        log_info "Formatting data partition ($data_dev, ext4)..."
-        require mkfs.ext4 -L ALPINE_DATA -q -F "$data_dev"
+        if persist_enabled; then
+            format_data_partition "$disk" "$data_dev"
+        else
+            log_info "Formatting data partition ($data_dev, ext4)..."
+            require mkfs.ext4 -L ALPINE_DATA -q -F "$data_dev"
+        fi
     fi
 
     log_info "Partitions formatted"
+}
+
+# Path to the LUKS key material (the passphrase bytes) staged by the control
+# host; used at format time and never left on the installed system.
+DATA_KEYFILE="${DATA_KEYFILE:-/tmp/aa-data.key}"
+# Mapper name for the unlocked data device.
+DATA_MAPPER="${DATA_MAPPER:-aa-data}"
+
+# True if the kernel supports the chosen data filesystem (btrfs/ext4) and, when
+# encrypting, dm-crypt. Guards against building an unmountable data partition.
+data_stack_supported() {
+    _dss_root="$1"
+    if encrypt_enabled && ! grep -hqs '^CONFIG_DM_CRYPT=[ym]' "${_dss_root}"/boot/config-* 2>/dev/null \
+        && ! ls "${_dss_root}"/lib/modules/*/kernel/drivers/md/dm-crypt.ko* >/dev/null 2>&1; then
+        return 1
+    fi
+    if [ "$DATA_FS" = "btrfs" ] && ! grep -hqs '^CONFIG_BTRFS_FS=[ym]' "${_dss_root}"/boot/config-* 2>/dev/null \
+        && ! ls "${_dss_root}"/lib/modules/*/kernel/fs/btrfs/btrfs.ko* >/dev/null 2>&1; then
+        return 1
+    fi
+    return 0
+}
+
+# Format the data partition for persistence: optional LUKS2, then the chosen FS
+# (btrfs with subvolumes, or ext4), and write data.meta onto the boot FAT so the
+# boot-time mount service knows the layout deterministically.
+# Subvolumes: @var @srv @home @containers @snapshots (btrfs only).
+format_data_partition() {
+    _fdp_disk="$1"; _fdp_dev="$2"
+    is_block_device "$_fdp_dev" || die "format_data_partition: $_fdp_dev is not a block device"
+
+    local fs_dev="$_fdp_dev" luks_uuid=""
+    if encrypt_enabled; then
+        command_exists cryptsetup || die "cryptsetup not found (needed for --encrypt-data)"
+        # Resolve key material. For ssh/passphrase methods the control host staged
+        # the passphrase bytes at DATA_KEYFILE; for keyfile+URL we fetch it now.
+        if [ "$UNLOCK_METHOD" = "keyfile" ] && [ -n "$KEY_URL" ] && [ ! -f "$DATA_KEYFILE" ]; then
+            log_info "Fetching LUKS key from $KEY_URL..."
+            http_fetch_file "$KEY_URL" "$DATA_KEYFILE" || die "could not fetch LUKS key from $KEY_URL"
+        fi
+        [ -f "$DATA_KEYFILE" ] || die "LUKS key material not found at $DATA_KEYFILE (control host must stage it)"
+        log_info "Creating LUKS2 container on $_fdp_dev..."
+        require cryptsetup luksFormat --type luks2 --batch-mode --key-file "$DATA_KEYFILE" "$_fdp_dev"
+        require cryptsetup open --key-file "$DATA_KEYFILE" "$_fdp_dev" "$DATA_MAPPER"
+        fs_dev="/dev/mapper/${DATA_MAPPER}"
+        luks_uuid=$(cryptsetup luksUUID "$_fdp_dev" 2>/dev/null)
+    fi
+
+    if [ "$DATA_FS" = "btrfs" ]; then
+        command_exists mkfs.btrfs || die "mkfs.btrfs not found (install btrfs-progs)"
+        log_info "Creating BTRFS on $fs_dev with subvolumes..."
+        require mkfs.btrfs -q -L ALPINE_DATA -f "$fs_dev"
+        local m="/mnt/aa-data-fmt"; mkdir -p "$m"
+        require mount "$fs_dev" "$m"
+        assert_mounted "$m"
+        local sv
+        for sv in @var @srv @home @containers @snapshots; do
+            require btrfs subvolume create "${m}/${sv}"
+        done
+        # nodatacow on container storage to avoid CoW fragmentation
+        chattr +C "${m}/@containers" 2>/dev/null || true
+        require umount "$m"
+    else
+        log_info "Creating ext4 on $fs_dev..."
+        require mkfs.ext4 -L ALPINE_DATA -q -F "$fs_dev"
+    fi
+
+    # Close LUKS; the boot service / aa-unlock will reopen it.
+    if encrypt_enabled; then
+        require cryptsetup close "$DATA_MAPPER"
+        # Securely remove the staged key material from the builder.
+        if command_exists shred; then shred -u "$DATA_KEYFILE" 2>/dev/null || true; else rm -f "$DATA_KEYFILE"; fi
+    fi
+
+    write_data_meta "$_fdp_disk" "$_fdp_dev" "$luks_uuid"
+    log_info "Data partition ready (fs=${DATA_FS}, encrypted=$(encrypt_enabled && echo yes || echo no))"
+}
+
+# Write data.meta onto the FAT boot partition (partition 1), alongside slots.meta.
+# Read by aa-mount-data / aa-unlock at boot.
+write_data_meta() {
+    _wdm_disk="$1"; _wdm_dev="$2"; _wdm_uuid="$3"
+    local boot_dev boot_mnt="/mnt/aa-bootmeta"
+    boot_dev=$(get_part_dev "$_wdm_disk" 1)
+    mkdir -p "$boot_mnt"
+    require mount "$boot_dev" "$boot_mnt"
+    assert_mounted "$boot_mnt"
+    cat <<EOF | atomic_write "${boot_mnt}/data.meta"
+DATA_DEV=${_wdm_dev}
+DATA_FS=${DATA_FS}
+DATA_ENCRYPTED=$(encrypt_enabled && echo true || echo false)
+DATA_LUKS_UUID=${_wdm_uuid}
+DATA_UNLOCK=${UNLOCK_METHOD}
+DATA_MAPPER=${DATA_MAPPER}
+KEY_URL=${KEY_URL}
+CONTAINERS=${CONTAINERS}
+EOF
+    require umount "$boot_mnt"
 }
 
 # =============================================================================
@@ -590,6 +692,20 @@ EOF
     local verity_pkg=""
     verity_enabled && verity_pkg="cryptsetup"
 
+    # Data persistence: cryptsetup (LUKS unlock) + btrfs-progs (subvolumes,
+    # snapshots) must be on the INSTALLED system for the boot-mount service and
+    # aa-snapshot. cryptsetup dedups with verity_pkg via apk.
+    local persist_pkg=""
+    if persist_enabled; then
+        persist_pkg="cryptsetup"
+        [ "$DATA_FS" = "btrfs" ] && persist_pkg="$persist_pkg btrfs-progs"
+    fi
+
+    # Container runtime baked onto the image (data-root on the persistent volume).
+    local container_pkg=""
+    container_is podman && container_pkg="podman crun fuse-overlayfs"
+    container_is docker && container_pkg="$container_pkg docker docker-cli"
+
     # squashfs-tools is needed on the installed system so `alpine-anywhere
     # upgrade` can build the next slot's image in place.
     chroot "$build_dir" /sbin/apk add --no-cache \
@@ -598,6 +714,7 @@ EOF
         mkinitfs \
         $ssh_pkg \
         e2fsprogs dosfstools squashfs-tools $verity_pkg \
+        $persist_pkg $container_pkg \
         chrony ca-certificates curl
 
     # RPi: install firmware package
@@ -618,6 +735,12 @@ EOF
         log_warn "Kernel ($kernel_pkg) lacks CONFIG_DM_VERITY; disabling dm-verity for this build."
         log_warn "(The hardened root will NOT be verity-protected on this platform.)"
         VERITY_MODE=off
+    fi
+
+    # Data-persistence feasibility: the kernel must support the chosen data FS
+    # (and dm-crypt when encrypting), or the data partition would be unmountable.
+    if persist_enabled && ! data_stack_supported "$build_dir"; then
+        die "data persistence requested but the kernel ($kernel_pkg) lacks support for ${DATA_FS}$(encrypt_enabled && echo ' / dm-crypt'). Use --data-fs ext4 / drop --encrypt-data, or a kernel with that support."
     fi
 
     # Extra packages
@@ -641,6 +764,13 @@ EOF
 
     # Bake the management CLI + A/B auto-rollback services into the image
     bake_management_tools "$build_dir"
+
+    # Data persistence: bake the persistence services + a factory copy of /var so
+    # the boot-time mount can seed an empty @var (first boot) and `cp -n` missing
+    # skeleton dirs after an OS upgrade, without clobbering existing data.
+    if persist_enabled; then
+        setup_persistence_image "$build_dir"
+    fi
 
     # s6 init: build s6-rc db + s6-linux-init basedir, make s6 PID 1
     if [ "$INIT_SYSTEM" = "s6" ]; then
@@ -758,6 +888,272 @@ bake_management_tools() {
     # install the userspace aa-verify service that COMMITS a healthy boot
     # (resets the boot counter), which is what stops init.aa from rolling back.
     install_ab_services "$root"
+}
+
+# Bake the data-persistence machinery into the image: a factory copy of /var
+# (to seed an empty @var / fill in new skeleton dirs after an OS upgrade), the
+# /etc/fstab entries (noauto: mounted explicitly by our service/command, never
+# by localmount - sidesteps the /var ordering problem), the workhorse
+# /usr/local/sbin/aa-data (read data.meta, unlock, mount subvols, seed), the
+# operator commands aa-unlock / aa-snapshot, and the OpenRC boot service. The s6
+# oneshot is added by setup_s6_init. Hardened mount opts: nodev,nosuid
+# everywhere; noexec only where safe (/srv, /var/log).
+setup_persistence_image() {
+    local root="$1"
+    log_info "Baking data-persistence (/var on ${DATA_FS}$(encrypt_enabled && echo '+LUKS'))..."
+
+    # 1. Factory copy of the pristine /var so the runtime can seed @var.
+    mkdir -p "${root}/usr/share/factory"
+    cp -a "${root}/var" "${root}/usr/share/factory/var" 2>/dev/null || true
+
+    # 2. fstab (noauto - mounted by aa-data, not localmount). Container storage
+    #    only when containers are baked in.
+    {
+        echo "# Alpine Anywhere - persistent data (mounted by aa-data / aa-unlock)"
+        echo "/dev/mapper/${DATA_MAPPER} /var   ${DATA_FS} subvol=@var,noatime,nodev,nosuid,noauto 0 0"
+        echo "/dev/mapper/${DATA_MAPPER} /srv   ${DATA_FS} subvol=@srv,noatime,nodev,nosuid,noexec,noauto 0 0"
+        echo "/dev/mapper/${DATA_MAPPER} /home  ${DATA_FS} subvol=@home,noatime,nodev,nosuid,noauto 0 0"
+        if containers_enabled; then
+            echo "/dev/mapper/${DATA_MAPPER} /var/lib/containers ${DATA_FS} subvol=@containers,noatime,nodev,nosuid,noauto 0 0"
+        fi
+    } >> "${root}/etc/fstab"
+    # When NOT encrypted the data device is the raw partition, not a mapper.
+    if ! encrypt_enabled; then
+        sed -i "s#/dev/mapper/${DATA_MAPPER}#LABEL=ALPINE_DATA#g" "${root}/etc/fstab"
+    fi
+
+    # 3. Workhorse + operator commands.
+    mkdir -p "${root}/usr/local/sbin" "${root}/usr/local/bin"
+    install_aa_data_helper "$root"
+    install_aa_unlock "$root"
+    install_aa_snapshot "$root"
+
+    # 4. OpenRC boot service for AUTOMATIC unlock methods (keyfile/passphrase).
+    #    With the default ssh method it is a no-op at boot (aa-unlock does it).
+    if [ "$INIT_SYSTEM" = "openrc" ]; then
+        cat > "${root}/etc/init.d/aa-mount-data" << 'EOF'
+#!/sbin/openrc-run
+description="Alpine Anywhere: unlock + mount persistent data (auto methods)"
+depend() {
+    before bootmisc localmount sshd dropbear nftables net
+    keyword -timeout
+}
+start() {
+    ebegin "Mounting persistent data"
+    /usr/local/sbin/aa-data autoboot || true
+    eend 0
+}
+EOF
+        chmod +x "${root}/etc/init.d/aa-mount-data"
+        chroot "$root" /sbin/rc-update add aa-mount-data boot 2>/dev/null || true
+    fi
+
+    # 5. Container setup (graphroot/data-root on the persistent subvol).
+    containers_enabled && setup_container_image "$root"
+}
+
+# /usr/local/sbin/aa-data — the workhorse. Standalone POSIX (no lib deps): it
+# re-derives the boot disk from /proc/cmdline, reads data.meta from the FAT boot
+# partition, and unlocks/mounts/seeds. Subcommands:
+#   autoboot   - boot service: only acts for non-ssh unlock methods
+#   open KEY?  - open LUKS (KEY from stdin/file) and mount everything
+#   mount      - mount subvolumes (assumes already unlocked / unencrypted)
+#   status     - print state
+install_aa_data_helper() {
+    local root="$1"
+    cat > "${root}/usr/local/sbin/aa-data" << 'AADATA'
+#!/bin/sh
+# Persistent-data workhorse (reads data.meta from the FAT boot partition).
+set -u
+BOOT_MNT=/run/aa-boot
+READY=/run/aa-data-ready
+
+_boot_disk() {
+    r=$(sed -n 's/.*[ ]root=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null | head -n1)
+    case "$r" in
+        *mmcblk*|*nvme*) echo "${r%p[0-9]}" ;;
+        *) echo "$r" | sed 's/[0-9]*$//' ;;
+    esac
+}
+_part() {
+    d=$(_boot_disk)
+    case "$d" in *mmcblk*|*nvme*) echo "${d}p$1" ;; *) echo "${d}$1" ;; esac
+}
+_read_meta() {
+    DATA_ENCRYPTED=false; DATA_UNLOCK=ssh; DATA_MAPPER=aa-data; DATA_DEV=""; DATA_FS=btrfs; KEY_URL=""; CONTAINERS=none
+    mkdir -p "$BOOT_MNT"
+    mount -o ro "$(_part 1)" "$BOOT_MNT" 2>/dev/null || mount "$(_part 1)" "$BOOT_MNT" 2>/dev/null || return 1
+    [ -f "$BOOT_MNT/data.meta" ] && . "$BOOT_MNT/data.meta"
+    umount "$BOOT_MNT" 2>/dev/null || true
+    [ -n "$DATA_DEV" ] || DATA_DEV=$(_part 4)
+}
+_unlock() {
+    # $1 = path to key material (file) or "-" for stdin; only for encrypted data.
+    [ "$DATA_ENCRYPTED" = "true" ] || return 0
+    [ -b "/dev/mapper/${DATA_MAPPER}" ] && return 0
+    if [ "${1:-}" = "-" ]; then
+        cryptsetup open "$DATA_DEV" "$DATA_MAPPER"            # prompt / stdin passphrase
+    else
+        cryptsetup open --key-file "$1" "$DATA_DEV" "$DATA_MAPPER"
+    fi
+}
+_seed_var() {
+    [ -d /usr/share/factory/var ] || return 0
+    cp -an /usr/share/factory/var/. /var/ 2>/dev/null || true
+}
+_mount_all() {
+    # /etc/fstab has the persist mounts as noauto; mount them explicitly.
+    for m in /var /srv /home /var/lib/containers; do
+        grep -q " $m " /etc/fstab 2>/dev/null || continue
+        mkdir -p "$m" 2>/dev/null || true
+        mountpoint -q "$m" 2>/dev/null || mount "$m" 2>/dev/null || \
+            echo "aa-data: WARN could not mount $m" >&2
+    done
+    _seed_var
+    touch "$READY"
+}
+_start_data_services() {
+    # Bring up services that need /var (containers, app services) post-unlock.
+    if command -v rc-service >/dev/null 2>&1; then
+        for s in aa-container-setup docker; do
+            [ -f "/etc/init.d/$s" ] && rc-service "$s" start 2>/dev/null || true
+        done
+    fi
+    [ -x /usr/local/sbin/aa-data-deps ] && /usr/local/sbin/aa-data-deps 2>/dev/null || true
+}
+
+cmd="${1:-status}"
+_read_meta || { echo "aa-data: no data.meta; persistence not configured" >&2; exit 0; }
+
+case "$cmd" in
+    autoboot)
+        # Boot service: only auto methods act here. ssh stays locked until aa-unlock.
+        case "$DATA_UNLOCK" in
+            ssh) echo "aa-data: data is encrypted; run 'aa-unlock' to mount /var" >&2; exit 0 ;;
+            keyfile)
+                kf=/run/aa.key
+                if [ -n "$KEY_URL" ]; then curl -fsS "$KEY_URL" -o "$kf" 2>/dev/null || true; fi
+                [ -f "$BOOT_MNT.key" ] && kf="$BOOT_MNT.key"
+                _unlock "$kf" && _mount_all || echo "aa-data: auto unlock failed (system stays up)" >&2
+                rm -f "$kf" 2>/dev/null || true
+                ;;
+            passphrase) _unlock - && _mount_all || true ;;
+        esac
+        ;;
+    open)  _unlock "${2:--}" && _mount_all && _start_data_services ;;
+    mount) _mount_all && _start_data_services ;;
+    status)
+        echo "encrypted=$DATA_ENCRYPTED unlock=$DATA_UNLOCK fs=$DATA_FS dev=$DATA_DEV"
+        [ -e "$READY" ] && echo "data: MOUNTED" || echo "data: not mounted"
+        ;;
+    *) echo "usage: aa-data {autoboot|open [keyfile|-]|mount|status}" >&2; exit 1 ;;
+esac
+AADATA
+    chmod +x "${root}/usr/local/sbin/aa-data"
+}
+
+# /usr/local/bin/aa-unlock — operator command (ssh method). Prompts for the
+# passphrase (or reads --key-file), opens LUKS, mounts /var, starts data services.
+install_aa_unlock() {
+    local root="$1"
+    cat > "${root}/usr/local/bin/aa-unlock" << 'AAUNLOCK'
+#!/bin/sh
+# Unlock + mount the persistent data partition (run after SSHing in).
+set -u
+if [ "${1:-}" = "--key-file" ] && [ -n "${2:-}" ]; then
+    aa-data open "$2"
+else
+    echo "Enter data passphrase to unlock /var:" >&2
+    aa-data open -          # cryptsetup prompts on the controlling terminal
+fi
+AAUNLOCK
+    chmod +x "${root}/usr/local/bin/aa-unlock"
+}
+
+# Container runtime config: storage on the persistent volume, rootless-friendly.
+setup_container_image() {
+    local root="$1"
+    log_info "Configuring containers (${CONTAINERS}, runtime ${CONTAINER_RUNTIME})..."
+
+    if container_is podman; then
+        mkdir -p "${root}/etc/containers"
+        # graphroot on the persistent @containers subvol; fuse-overlayfs for rootless.
+        cat > "${root}/etc/containers/storage.conf" << 'EOF'
+[storage]
+driver = "overlay"
+graphroot = "/var/lib/containers/storage"
+runroot = "/run/containers/storage"
+[storage.options.overlay]
+mount_program = "/usr/bin/fuse-overlayfs"
+EOF
+        # subuid/subgid for rootless podman (a dedicated user is the operator's job;
+        # seed root's range so `podman` works out of the box).
+        echo "root:100000:65536" > "${root}/etc/subuid"
+        echo "root:100000:65536" > "${root}/etc/subgid"
+        if [ "$CONTAINER_RUNTIME" = "runsc" ]; then
+            mkdir -p "${root}/etc/containers"
+            cat > "${root}/etc/containers/containers.conf" << 'EOF'
+[engine]
+runtime = "runsc"
+[engine.runtimes]
+runsc = ["/usr/local/bin/runsc"]
+EOF
+        fi
+    fi
+
+    # aa-container-setup: prepare the data-root on the persistent volume (run by
+    # aa-data after /var is mounted).
+    cat > "${root}/etc/init.d/aa-container-setup" << 'EOF'
+#!/sbin/openrc-run
+description="Alpine Anywhere: prepare container storage on persistent data"
+depend() { after net; }
+start() {
+    ebegin "Preparing container storage"
+    mkdir -p /var/lib/containers/storage /var/lib/docker 2>/dev/null
+    eend 0
+}
+EOF
+    chmod +x "${root}/etc/init.d/aa-container-setup"
+    if container_is docker && [ "$INIT_SYSTEM" = "openrc" ]; then
+        # docker daemon: data-root on the persistent subvol (set via conf.d).
+        mkdir -p "${root}/etc/conf.d"
+        echo 'DOCKER_OPTS="--data-root=/var/lib/docker"' > "${root}/etc/conf.d/docker"
+        chroot "$root" /sbin/rc-update add docker default 2>/dev/null || true
+    fi
+}
+
+# /usr/local/bin/aa-snapshot — BTRFS snapshot + optional incremental send.
+install_aa_snapshot() {
+    local root="$1"
+    cat > "${root}/usr/local/bin/aa-snapshot" << 'AASNAP'
+#!/bin/sh
+# Read-only BTRFS snapshots of the persistent subvolumes (+ optional send).
+# Usage: aa-snapshot [create|list|send <ssh-dest>]
+set -u
+SNAPROOT=/var/.snapshots   # @snapshots is mounted here if you add it to fstab
+[ -d "$SNAPROOT" ] || SNAPROOT=/.snapshots
+ts=$(date +%Y%m%d-%H%M%S 2>/dev/null || cat /proc/uptime | cut -d. -f1)
+case "${1:-create}" in
+    create)
+        mkdir -p "$SNAPROOT"
+        for sv in /var /srv /home; do
+            mountpoint -q "$sv" || continue
+            btrfs subvolume snapshot -r "$sv" "$SNAPROOT/$(basename "$sv")-$ts" 2>/dev/null \
+                && echo "snapshot: $SNAPROOT/$(basename "$sv")-$ts" || true
+        done
+        ;;
+    list) ls -1 "$SNAPROOT" 2>/dev/null ;;
+    send)
+        dest="${2:?usage: aa-snapshot send user@host:/path}"
+        for s in "$SNAPROOT"/*; do
+            [ -d "$s" ] || continue
+            btrfs send "$s" 2>/dev/null | ssh "${dest%%:*}" "btrfs receive ${dest#*:}" 2>/dev/null || true
+        done
+        ;;
+    *) echo "usage: aa-snapshot {create|list|send <ssh-dest>}" >&2; exit 1 ;;
+esac
+AASNAP
+    chmod +x "${root}/usr/local/bin/aa-snapshot"
 }
 
 # Wrap the Alpine mkinitfs initramfs with the A/B boot-guard, in place.
@@ -1196,8 +1592,10 @@ run_ab_install() {
         cp "${SCRIPT_DIR}"/lib/initramfs/* "${boot_mnt}/alpine-anywhere/lib/initramfs/" 2>/dev/null || true
     chmod +x "${boot_mnt}/alpine-anywhere/alpine-anywhere" 2>/dev/null || true
 
-    # Step 6: Setup data partition (phase 3 prep)
-    if [ "$with_data" = "true" ]; then
+    # Step 6: Setup data partition. With --persist, format_partitions already
+    # built the LUKS/BTRFS persistence stack (+ data.meta), so skip the legacy
+    # ext4 overlay-dir prep here.
+    if [ "$with_data" = "true" ] && ! persist_enabled; then
         local data_dev
         data_dev=$(get_part_dev "$disk" 4)
         mkdir -p /mnt/data
@@ -1250,6 +1648,28 @@ EOF
     log_info "==================================="
 }
 
+# Ensure the data partition (sda4) is set up for persistence on an EXISTING
+# layout. If data.meta already exists on the boot FAT, assume it's configured
+# and do nothing. Otherwise format sda4 as the persistence stack - this WIPES
+# sda4, so confirm unless --force.
+ensure_persist_data_partition() {
+    local disk="$1" data_dev boot_dev boot_mnt="/mnt/aa-datachk" has_meta=""
+    boot_dev=$(get_part_dev "$disk" 1)
+    mkdir -p "$boot_mnt"
+    if mount -o ro "$boot_dev" "$boot_mnt" 2>/dev/null; then
+        [ -f "$boot_mnt/data.meta" ] && has_meta=1
+        umount "$boot_mnt" 2>/dev/null || true
+    fi
+    if [ -n "$has_meta" ]; then
+        log_info "Data partition already configured for persistence (data.meta present)"
+        return 0
+    fi
+    data_dev=$(get_part_dev "$disk" 4)
+    [ -b "$data_dev" ] || die "no data partition ($data_dev) to set up for persistence"
+    confirm_action "Persistence requested: this will FORMAT $data_dev (sda4) as ${DATA_FS}$(encrypt_enabled && echo '+LUKS') and ERASE its current contents."
+    format_data_partition "$disk" "$data_dev"
+}
+
 # Install an image into a specific slot of an EXISTING A/B layout, without
 # repartitioning and without changing the active slot. Used for `--install
 # --slot B` (e.g. building a second variant alongside the current one).
@@ -1263,6 +1683,14 @@ install_secondary_slot() {
     [ -b "$dev" ] || die "Slot $slot partition ($dev) not found — run a full install first"
 
     log_step "Installing to slot $slot ($dev) on the existing layout (init: ${INIT_SYSTEM})..."
+
+    # Persistence on an existing layout: the data partition (sda4) was formatted
+    # by the ORIGINAL install (likely plain ext4). If persistence is requested
+    # and not already set up, format it now (DESTROYS sda4 - confirm first).
+    if persist_enabled; then
+        ensure_persist_data_partition "$disk"
+    fi
+
     sq="/tmp/system-${slot}.squashfs"
     generate_system_squashfs "$sq"   # builds image, wraps initramfs, saves /tmp/boot-files
     log_step "Writing image to slot $slot ($dev)..."

@@ -136,6 +136,29 @@ copy_to_target() {
 # Remote Execution of Local Script
 # =============================================================================
 
+# Prompt (no echo) for the data-encryption passphrase on the control host and
+# stage the bytes to the remote's DATA_KEYFILE (default /tmp/aa-data.key). The
+# passphrase is what the operator will type at `aa-unlock`. No newline is
+# written so the keyfile bytes match the interactively-entered passphrase.
+stage_data_passphrase() {
+    local p1 p2 tmp
+    if [ -n "${AA_DATA_PASSPHRASE:-}" ]; then
+        p1="$AA_DATA_PASSPHRASE"
+    else
+        printf 'Set the data-encryption passphrase (you will type this at aa-unlock): ' >&2
+        stty -echo 2>/dev/null; read -r p1; stty echo 2>/dev/null; printf '\n' >&2
+        printf 'Confirm passphrase: ' >&2
+        stty -echo 2>/dev/null; read -r p2; stty echo 2>/dev/null; printf '\n' >&2
+        [ "$p1" = "$p2" ] || die "passphrases do not match"
+    fi
+    [ -n "$p1" ] || die "empty data passphrase"
+    tmp="${WORK_DIR}/aa-data.key"
+    printf '%s' "$p1" > "$tmp"
+    scp_to_remote "$tmp" "/tmp/aa-data.key"
+    secure_wipe_dir "$WORK_DIR" 2>/dev/null || true
+    rm -f "$tmp" 2>/dev/null || true
+}
+
 # Execute alpine-anywhere on the remote server
 run_on_remote() {
     local extra_args="${1:-}"
@@ -166,6 +189,13 @@ run_on_remote() {
         ssh_exec "mkdir -p '${stage_dir}/aa-host-keys'"
         scp_dir_to_remote "$SSH_HOST_KEY_DIR" "${stage_dir}/aa-host-keys"
         remote_host_key_dir="${stage_dir}/aa-host-keys"
+    fi
+    # Stage the LUKS key material for encrypted persistence. For ssh/passphrase
+    # methods we prompt on the control host (no echo) and scp the bytes to the
+    # remote's default DATA_KEYFILE path; format_data_partition uses then shreds
+    # it. The operator types this same passphrase later at `aa-unlock`.
+    if [ "$ENCRYPT_DATA" = "true" ] && { [ "$UNLOCK_METHOD" = "ssh" ] || [ "$UNLOCK_METHOD" = "passphrase" ]; } && [ -z "$KEY_URL" ]; then
+        stage_data_passphrase
     fi
 
     # Build the command line to pass to remote
