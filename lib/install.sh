@@ -483,6 +483,15 @@ format_data_partition() {
     _fdp_disk="$1"; _fdp_dev="$2"
     is_block_device "$_fdp_dev" || die "format_data_partition: $_fdp_dev is not a block device"
 
+    # These tools run on the BUILDER (the running system doing the install),
+    # which may not have them yet - install on demand.
+    if encrypt_enabled && ! command_exists cryptsetup; then
+        log_info "Installing cryptsetup on the builder..."; apk add --no-cache cryptsetup >/dev/null 2>&1 || true
+    fi
+    if [ "$DATA_FS" = "btrfs" ] && ! command_exists mkfs.btrfs; then
+        log_info "Installing btrfs-progs on the builder..."; apk add --no-cache btrfs-progs >/dev/null 2>&1 || true
+    fi
+
     local fs_dev="$_fdp_dev" luks_uuid=""
     if encrypt_enabled; then
         command_exists cryptsetup || die "cryptsetup not found (needed for --encrypt-data)"
