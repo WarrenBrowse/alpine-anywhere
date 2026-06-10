@@ -180,10 +180,19 @@ run_on_remote() {
 
     # Stage control-host customization inputs onto the remote, then point the
     # remote CLI at the remote copies.
-    local remote_custom_script="" remote_host_key_dir=""
+    local remote_custom_script="" remote_host_key_dir="" remote_custom_files=""
     if [ -n "$CUSTOM_SCRIPT" ]; then
         scp_to_remote "$CUSTOM_SCRIPT" "${stage_dir}/aa-custom-script.sh"
         remote_custom_script="${stage_dir}/aa-custom-script.sh"
+    fi
+    if [ -n "$CUSTOM_FILES" ]; then
+        ssh_exec "rm -rf '${stage_dir}/aa-custom-files'; mkdir -p '${stage_dir}/aa-custom-files'"
+        if [ -d "$CUSTOM_FILES" ]; then
+            scp_dir_to_remote "$CUSTOM_FILES" "${stage_dir}/aa-custom-files"
+        else
+            scp_to_remote "$CUSTOM_FILES" "${stage_dir}/aa-custom-files/"
+        fi
+        remote_custom_files="${stage_dir}/aa-custom-files"
     fi
     if [ -n "$SSH_HOST_KEY_DIR" ]; then
         ssh_exec "mkdir -p '${stage_dir}/aa-host-keys'"
@@ -229,6 +238,7 @@ run_on_remote() {
     [ -n "$INIT_SYSTEM" ] && remote_cmd="$remote_cmd --init=$(shell_quote "$INIT_SYSTEM")"
     [ -n "$TARGET_SLOT" ] && remote_cmd="$remote_cmd --slot=$(shell_quote "$TARGET_SLOT")"
     [ -n "$remote_custom_script" ] && remote_cmd="$remote_cmd --custom-script=$(shell_quote "$remote_custom_script")"
+    [ -n "$remote_custom_files" ] && remote_cmd="$remote_cmd --custom-files=$(shell_quote "$remote_custom_files")"
     [ -n "$remote_host_key_dir" ] && remote_cmd="$remote_cmd --ssh-host-keys=$(shell_quote "$remote_host_key_dir")"
     [ "$KEEP_EXISTING" = "true" ] && remote_cmd="$remote_cmd --keep"
     [ -n "$extra_args" ] && remote_cmd="$remote_cmd $extra_args"

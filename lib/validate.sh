@@ -66,6 +66,16 @@ validate_safe_inputs() {
     if [ "$UNLOCK_METHOD" = "keyfile" ] && [ -z "$KEY_URL" ] && [ -z "$KEY_FILE" ]; then
         die "--unlock-method keyfile requires --key-url or --key-file"
     fi
+
+    # Customization inputs: fail early on the control host if the path is missing
+    # (run_custom_script re-checks inside the chroot, but a clear message here
+    # avoids deploying only to abort mid-build).
+    if [ -n "$CUSTOM_SCRIPT" ] && [ ! -f "$CUSTOM_SCRIPT" ]; then
+        die "custom script not found: '$CUSTOM_SCRIPT'"
+    fi
+    if [ -n "$CUSTOM_FILES" ] && [ ! -e "$CUSTOM_FILES" ]; then
+        die "custom files path not found: '$CUSTOM_FILES'"
+    fi
 }
 
 # =============================================================================

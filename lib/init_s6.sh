@@ -136,6 +136,22 @@ EOF
     local c
     for c in $contents; do touch "${src}/default/contents.d/${c}"; done
 
+    # Custom services declared by --custom-script (the source dir was wiped by
+    # the rm -rf above, so these live under /etc/aa/custom-services.d and are
+    # slurped in here). Each <name>/ is a raw s6-rc definition (type + run/up +
+    # dependencies.d); it is copied verbatim and added to the default bundle.
+    if [ -d "${root}/etc/aa/custom-services.d" ]; then
+        local svc name
+        for svc in "${root}/etc/aa/custom-services.d"/*/; do
+            [ -d "$svc" ] || continue
+            name=$(basename "$svc")
+            rm -rf "${src}/${name}"
+            cp -R "$svc" "${src}/${name}"
+            touch "${src}/default/contents.d/${name}"
+            log_info "Wired custom s6 service: ${name}"
+        done
+    fi
+
     # --- compile the database (in chroot so paths/users resolve) -----------
     log_info "Compiling s6-rc database..."
     rm -rf "${root}/etc/s6-rc/compiled"

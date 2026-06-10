@@ -789,6 +789,10 @@ EOF
     # s6 init: build s6-rc db + s6-linux-init basedir, make s6 PID 1
     if [ "$INIT_SYSTEM" = "s6" ]; then
         setup_s6_init "$build_dir"
+    else
+        # OpenRC: wire any custom services declared by --custom-script (the s6
+        # path does the equivalent slurp inside setup_s6_init).
+        wire_custom_openrc_services "$build_dir"
     fi
 
     # Cleanup chroot mounts
@@ -849,15 +853,54 @@ run_custom_script() {
     [ -n "$CUSTOM_SCRIPT" ] || return 0
     [ -f "$CUSTOM_SCRIPT" ] || die "Custom script not found: $CUSTOM_SCRIPT"
 
+    # Stage --custom-files (file or dir) into the chroot and expose its location
+    # to the hook via $AA_CUSTOM_FILES_DIR. Lets a build hook install a pre-built
+    # artifact (e.g. a binary) without needing network access at build time.
+    local files_env=""
+    if [ -n "$CUSTOM_FILES" ]; then
+        [ -e "$CUSTOM_FILES" ] || die "Custom files path not found: $CUSTOM_FILES"
+        rm -rf "${root}/tmp/aa-custom-files"
+        mkdir -p "${root}/tmp/aa-custom-files"
+        if [ -d "$CUSTOM_FILES" ]; then
+            cp -R "$CUSTOM_FILES"/. "${root}/tmp/aa-custom-files/"
+        else
+            cp "$CUSTOM_FILES" "${root}/tmp/aa-custom-files/"
+        fi
+        files_env="AA_CUSTOM_FILES_DIR=/tmp/aa-custom-files"
+        log_info "Staged custom files into chroot: $CUSTOM_FILES"
+    fi
+
     log_info "Running custom build hook: $CUSTOM_SCRIPT"
     cp "$CUSTOM_SCRIPT" "${root}/tmp/aa-custom.sh"
     chmod +x "${root}/tmp/aa-custom.sh"
-    if ! chroot "$root" /bin/sh /tmp/aa-custom.sh; then
+    if ! chroot "$root" /usr/bin/env $files_env /bin/sh /tmp/aa-custom.sh; then
         rm -f "${root}/tmp/aa-custom.sh"
+        rm -rf "${root}/tmp/aa-custom-files"
         die "Custom script failed: $CUSTOM_SCRIPT"
     fi
     rm -f "${root}/tmp/aa-custom.sh"
+    rm -rf "${root}/tmp/aa-custom-files"
     log_info "Custom build hook completed"
+}
+
+# Wire custom OpenRC services declared by --custom-script. Each file
+# /etc/aa/custom-services.d/<name>.openrc is installed as /etc/init.d/<name>
+# (executable) and added to the default runlevel. The s6 equivalent lives in
+# setup_s6_init (which slurps /etc/aa/custom-services.d/<name>/ directories).
+wire_custom_openrc_services() {
+    local root="$1"
+    local dir="${root}/etc/aa/custom-services.d"
+    [ -d "$dir" ] || return 0
+    local f name
+    for f in "$dir"/*.openrc; do
+        [ -f "$f" ] || continue
+        name=$(basename "$f" .openrc)
+        cp "$f" "${root}/etc/init.d/${name}"
+        chmod +x "${root}/etc/init.d/${name}"
+        chroot "$root" /sbin/rc-update add "$name" default 2>/dev/null \
+            || log_warn "could not enable custom OpenRC service: $name"
+        log_info "Wired custom OpenRC service: ${name}"
+    done
 }
 
 # Locate the alpine-anywhere CLI source base dir (control-host deploy or repo).

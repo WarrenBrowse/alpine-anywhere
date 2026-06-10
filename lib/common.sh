@@ -20,6 +20,7 @@ VERBOSE="${VERBOSE:-false}"
 FORCE="${FORCE:-false}"
 EXTRA_PACKAGES="${EXTRA_PACKAGES:-}"
 CUSTOM_SCRIPT="${CUSTOM_SCRIPT:-}"        # User script run inside the image chroot at build
+CUSTOM_FILES="${CUSTOM_FILES:-}"          # File or dir staged into the chroot ($AA_CUSTOM_FILES_DIR) for the custom script
 SSH_HOST_KEY_DIR="${SSH_HOST_KEY_DIR:-}"  # Control-host dir holding SSH host keys to bake in
 REBOOT_DELAY="${REBOOT_DELAY:-5}"
 TARGET_HOST="${TARGET_HOST:-}"
@@ -535,6 +536,9 @@ Image customization:
                                    software or fetch a project, e.g.:
                                      wget -O- https://github.com/aya/myos/...tar.gz \\
                                        | tar -xz -C /usr/local/share
+  --custom-files PATH            File or directory staged into the chroot and exposed
+                                   to --custom-script via \$AA_CUSTOM_FILES_DIR (e.g. a
+                                   pre-built binary to install without network at build)
   --ssh-host-keys DIR            Bake these SSH host keys into the image (control-host
                                    override). Default: reuse the keys already in use on
                                    the building system so identity is stable across A/B.
@@ -659,6 +663,14 @@ parse_arguments() {
                 ;;
             --custom-script=*)
                 CUSTOM_SCRIPT="${1#*=}"
+                shift
+                ;;
+            --custom-files)
+                CUSTOM_FILES="$2"
+                shift 2
+                ;;
+            --custom-files=*)
+                CUSTOM_FILES="${1#*=}"
                 shift
                 ;;
             --ssh-host-keys)
