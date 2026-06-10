@@ -534,7 +534,8 @@ format_data_partition() {
 # Read by aa-mount-data / aa-unlock at boot.
 write_data_meta() {
     _wdm_disk="$1"; _wdm_dev="$2"; _wdm_uuid="$3"
-    local boot_dev boot_mnt="/mnt/aa-bootmeta"
+    # Mount point overridable for tests (AA_BOOTMETA_MNT).
+    local boot_dev boot_mnt="${AA_BOOTMETA_MNT:-/mnt/aa-bootmeta}"
     boot_dev=$(get_part_dev "$_wdm_disk" 1)
     mkdir -p "$boot_mnt"
     require mount "$boot_dev" "$boot_mnt"
