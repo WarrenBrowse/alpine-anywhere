@@ -26,6 +26,17 @@ root="$ROOTARG"
 [ -z "$root" ] && [ -n "$SYSROOT" ] && root=$(sed -n 's/.*[ ]root=\([^ ]*\).*/\1/p' "${SYSROOT}/proc/cmdline" 2>/dev/null | head -n1)
 [ -z "$root" ] && root=$(sed -n 's/.*[ ]root=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null | head -n1)
 klog "enter root='$root' sysroot='$SYSROOT'"
+# Resolve a tag-style root (PARTUUID=/UUID=/LABEL=) to a /dev node so the slot
+# + disk derivation below works. x86_64 installs use root=PARTUUID because
+# kernel device names (sda/sdb) can swap by probe order across boots. If findfs
+# is unavailable or fails, fall through unresolved - the case below then skips
+# and the boot continues normally (just without the A/B guard this boot).
+case "$root" in
+    PARTUUID=*|UUID=*|LABEL=*)
+        rdev=$(findfs "$root" 2>/dev/null)
+        [ -n "$rdev" ] && { klog "resolved $root -> $rdev"; root="$rdev"; }
+        ;;
+esac
 case "$root" in
     *2) slot=A ;;
     *3) slot=B ;;

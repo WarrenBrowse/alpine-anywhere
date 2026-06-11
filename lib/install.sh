@@ -1891,10 +1891,21 @@ EOF
 
         log_info "Boot config: slot $slot, kernel vmlinuz-${slot}, root=${slot_dev}"
     else
-        # x86_64 / generic: extlinux with per-slot kernels
-        local slota_dev slotb_dev
+        # x86_64 / generic: extlinux with per-slot kernels. Use root=PARTUUID
+        # rather than /dev/sdaX: kernel device naming (sda/sdb) is assigned by
+        # probe order and can swap between boots on multi-disk machines, which
+        # would point root= at the wrong disk. PARTUUID is the GPT partition's
+        # stable id; the kernel resolves it without udev. init.aa resolves it
+        # back to a device via findfs for its A/B logic.
+        local slota_dev slotb_dev slota_root slotb_root pu
         slota_dev=$(get_part_dev "$disk" 2)
         slotb_dev=$(get_part_dev "$disk" 3)
+        pu=""
+        command -v blkid >/dev/null 2>&1 && pu=$(blkid -s PARTUUID -o value "$slota_dev" 2>/dev/null)
+        slota_root="${pu:+PARTUUID=$pu}"; slota_root="${slota_root:-$slota_dev}"
+        pu=""
+        command -v blkid >/dev/null 2>&1 && pu=$(blkid -s PARTUUID -o value "$slotb_dev" 2>/dev/null)
+        slotb_root="${pu:+PARTUUID=$pu}"; slotb_root="${slotb_root:-$slotb_dev}"
         mkdir -p "${boot_mnt}/extlinux"
         cat > "${boot_mnt}/extlinux/extlinux.conf" << EOF
 DEFAULT alpine-${slot}
@@ -1905,15 +1916,15 @@ LABEL alpine-A
     MENU LABEL Alpine Linux (Slot A)
     LINUX /vmlinuz-A
     INITRD /initramfs-A
-    APPEND root=${slota_dev} $(slot_kernel_opts)
+    APPEND root=${slota_root} $(slot_kernel_opts)
 
 LABEL alpine-B
     MENU LABEL Alpine Linux (Slot B)
     LINUX /vmlinuz-B
     INITRD /initramfs-B
-    APPEND root=${slotb_dev} $(slot_kernel_opts)
+    APPEND root=${slotb_root} $(slot_kernel_opts)
 EOF
-        log_info "Boot config: extlinux default slot $slot"
+        log_info "Boot config: extlinux default slot $slot (root=${slota_root})"
     fi
 }
 

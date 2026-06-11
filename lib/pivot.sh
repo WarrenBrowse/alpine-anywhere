@@ -257,11 +257,25 @@ EOF
     # Transfer image-customization inputs (control-host paths -> pivoted paths).
     # The build runs after pivot, so these files must travel into the pivot env.
     local pivot_aa="/root/.local/share/alpine-anywhere"
-    local custom_dest="" hostkeys_dest=""
+    local custom_dest="" hostkeys_dest="" customfiles_dest=""
     if [ -n "$CUSTOM_SCRIPT" ] && [ -f "$CUSTOM_SCRIPT" ]; then
         run_privileged cp "$CUSTOM_SCRIPT" "${aa_dest}/custom-script.sh"
         custom_dest="${pivot_aa}/custom-script.sh"
         log_info "Custom script staged for pivoted build"
+    fi
+    # --custom-files: the post-pivot build runs run_custom_script, which needs
+    # these staged into the pivot env too (else a --custom-script that consumes
+    # them fails AFTER the disk is repartitioned). Mirror run_custom_script:
+    # a directory's contents (or a single file) land under custom-files/.
+    if [ -n "$CUSTOM_FILES" ] && [ -e "$CUSTOM_FILES" ]; then
+        run_privileged mkdir -p "${aa_dest}/custom-files"
+        if [ -d "$CUSTOM_FILES" ]; then
+            run_privileged cp -R "$CUSTOM_FILES"/. "${aa_dest}/custom-files/"
+        else
+            run_privileged cp "$CUSTOM_FILES" "${aa_dest}/custom-files/"
+        fi
+        customfiles_dest="${pivot_aa}/custom-files"
+        log_info "Custom files staged for pivoted build"
     fi
     if [ -n "$SSH_HOST_KEY_DIR" ] && [ -d "$SSH_HOST_KEY_DIR" ]; then
         run_privileged mkdir -p "${aa_dest}/host-keys"
@@ -271,6 +285,7 @@ EOF
     fi
     run_privileged tee -a "${PIVOT_DIR}/etc/alpine-anywhere/config.env" > /dev/null << EOF
 CUSTOM_SCRIPT="${custom_dest}"
+CUSTOM_FILES="${customfiles_dest}"
 SSH_HOST_KEY_DIR="${hostkeys_dest}"
 EOF
 
