@@ -316,15 +316,30 @@ OLD_ROOT="/mnt/oldroot"
 # Redirect to console
 exec > /dev/console 2>&1
 
-echo "[fakeinit] === PID 1 Takeover ==="
-echo "[fakeinit] PID: $$"
+# Persistent breadcrumb log. It lives on the OLD root (the disk we booted from),
+# which survives a failed takeover because the install never reaches the
+# partition step before the network is confirmed. After rebooting back to the
+# prior OS, read /aa-fakeinit.log to see EXACTLY how far the takeover got - even
+# when console output is buffered or lost. Each write is fsync'd so the last
+# breadcrumb is on disk even if PID 1 then hangs. Pre-pivot the OLD root is "/";
+# post-pivot it is /mnt/oldroot (same physical fs) - bc() switches automatically.
+BCLOG=/aa-fakeinit.log
+: > "$BCLOG" 2>/dev/null
+bc() {
+    _t=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)
+    echo "[fakeinit+${_t}] $*"
+    [ -n "$BCLOG" ] && { echo "[${_t}] $*" >> "$BCLOG" 2>/dev/null; sync 2>/dev/null; }
+}
+
+bc "=== PID 1 Takeover === PID:$$"
 
 # Load the install config EARLY (network values etc.) so even the pivot_root
-# failure path below can bring real networking up for recovery. Before pivot it
-# lives under the staged root; after, at /etc. Loading twice is harmless.
+# failure path below can bring real networking up for recovery.
+bc "loading config.env"
 for _cfg in /etc/alpine-anywhere/config.env /mnt/alpine/etc/alpine-anywhere/config.env; do
     [ -f "$_cfg" ] && . "$_cfg" && break
 done
+bc "config: iface=$NETWORK_INTERFACE ip=$NETWORK_IP mask=$NETWORK_NETMASK gw=$NETWORK_GATEWAY dhcp=$NETWORK_DHCP target=$TARGET_DISK"
 
 # Best-effort: bring the detected interface up with its static IP (or DHCP) and
 # start SSH. Used by the recovery paths so a headless box stays reachable.
@@ -339,49 +354,50 @@ _recover_net() {
         /sbin/route add default gw "$NETWORK_GATEWAY" 2>/dev/null || true
     fi
     /usr/sbin/dropbear -R -p 22 2>/dev/null || { mkdir -p /run/sshd; /usr/sbin/sshd 2>/dev/null; } || true
-    echo "[fakeinit] recovery net: iface=$_ri ip=$NETWORK_IP"
+    bc "recovery net: iface=$_ri ip=$NETWORK_IP"
 }
 
-# Close all file descriptors > 2 to release old root references
-for fd in $(ls /proc/self/fd 2>/dev/null); do
-    [ "$fd" -gt 2 ] && eval "exec ${fd}>&-" 2>/dev/null || true
-done
+# NOTE: deliberately NO mass fd-closing here. systemd re-execs this script by
+# execve'ing /usr/lib/systemd/systemd (bind-mounted to it), and the shell keeps
+# reading the script from that descriptor; closing fds > 2 can close that very
+# descriptor, so the interpreter cannot read the rest of the script and the
+# takeover dies silently right after the banner. The old root does not need fds
+# closed - pivot_root + lazy umount (below) detach it regardless.
+bc "skipping fd-close (pivot_root + lazy umount free the old root)"
 
-# Remount all as private to prevent mount propagation issues
+bc "mount --make-rprivate /"
 mount --make-rprivate / 2>/dev/null || true
 
-# Move the tmpfs mount to be directly accessible
-# (It was mounted under the old root)
-echo "[fakeinit] Preparing pivot_root..."
-cd "${PIVOT_DIR}"
+bc "preparing pivot_root: cd $PIVOT_DIR; mkdir .$OLD_ROOT"
+cd "${PIVOT_DIR}" || bc "WARN cd $PIVOT_DIR failed"
 mkdir -p ".${OLD_ROOT}"
 
-# The actual pivot_root - changes / for entire system
-echo "[fakeinit] Executing pivot_root..."
+bc "executing pivot_root . .${OLD_ROOT}"
 if ! pivot_root . ".${OLD_ROOT}"; then
     rc=$?
-    echo "[fakeinit] ERROR: pivot_root FAILED (rc=$rc) - this is the takeover failure point"
+    bc "pivot_root FAILED (rc=$rc) - THIS is the takeover failure point"
     # Still on the OLD root. Bring REAL networking + SSH up (not just lo) so the
     # operator can reconnect, and keep PID 1 alive with a console shell. Never
     # `exec` a shell here: if its stdin EOFs, PID 1 exits and the kernel panics
     # (reboots the box) before anyone can look.
     _recover_net
-    echo "[fakeinit] pivot_root failed; SSH + console shell up. Reboot to recover the prior OS."
+    bc "pivot_root failed; SSH + console shell up. Reboot to recover the prior OS."
     setsid sh -c 'exec sh </dev/console >/dev/console 2>&1' 2>/dev/null &
     while true; do wait -n 2>/dev/null || sleep 1; done
 fi
 
-echo "[fakeinit] Pivot successful! Now in Alpine root."
+# Past pivot_root: the OLD root (our breadcrumb disk) is now at /mnt/oldroot.
+# Keep logging there (same physical fs) until it is unmounted below.
+BCLOG="${OLD_ROOT}/aa-fakeinit.log"
+bc "pivot_root OK; now PID 1 in the RAM root"
 
-# We are now PID 1 in the new root
-# Old root is at /mnt/oldroot
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Remount proc to see correct process info
 mount -t proc proc /proc 2>/dev/null || true
 
 # Kill ALL processes except PID 1 (us)
-echo "[fakeinit] Killing processes on old root..."
+bc "killing old-root processes (TERM then KILL)"
 for sig in TERM KILL; do
     for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$' | sort -n); do
         [ "$pid" = "1" ] && continue
@@ -391,15 +407,18 @@ for sig in TERM KILL; do
     done
     [ "$sig" = "TERM" ] && sleep 3
 done
+bc "processes killed"
 
 sleep 2
 
-# Now unmount everything on old root
-echo "[fakeinit] Unmounting old root filesystems..."
+# Now unmount everything on old root (this is the LAST point breadcrumbs persist
+# to disk; afterwards only the console has output).
+bc "unmounting old root (final persisted breadcrumb)"
 for mnt in $(awk '{print $2}' /proc/mounts | grep "^${OLD_ROOT}" | sort -r); do
     echo "[fakeinit]   umount $mnt"
     umount -l "$mnt" 2>/dev/null || true
 done
+BCLOG=""   # old root gone - stop trying to persist (console only from here)
 
 # Final unmount of old root itself
 umount -l "${OLD_ROOT}" 2>/dev/null || true
