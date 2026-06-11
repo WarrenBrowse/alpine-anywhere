@@ -1647,7 +1647,17 @@ run_ab_install() {
     local squashfs="/tmp/system.squashfs"
     generate_system_squashfs "$squashfs"
 
-    # Step 2: Partition disk (DESTRUCTIVE - reached only once the image built ok)
+    # Step 2: Partition disk (DESTRUCTIVE - reached only once the image built ok).
+    # First release anything still holding the target disk. After a pivot the old
+    # root's filesystems are unmounted, but SWAP is not a mount and is missed - an
+    # active swap partition keeps parted from informing the kernel of the new
+    # table ("Partition(s) ... in use ... reboot now"). Turn swap off and lazily
+    # unmount any lingering mounts on the target before partitioning.
+    swapoff -a 2>/dev/null || true
+    local _p
+    for _p in $(awk -v d="$disk" '$1 ~ ("^" d) {print $2}' /proc/mounts 2>/dev/null | sort -r); do
+        umount -l "$_p" 2>/dev/null || true
+    done
     create_partition_layout "$disk" "$with_data"
     format_partitions "$disk" "$with_data"
 
