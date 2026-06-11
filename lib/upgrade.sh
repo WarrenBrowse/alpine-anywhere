@@ -53,9 +53,24 @@ strip_partition() {
     esac
 }
 
-# Device the running system was booted from (root=... in the kernel cmdline)
+# Device the running system was booted from (root=... in the kernel cmdline).
+# x86_64 slots boot with root=PARTUUID=..., which busybox cannot resolve to a
+# /dev node (no PARTUUID support) — strip_partition on the raw tag would yield
+# garbage and mount_boot then fails. The running immutable root IS a squashfs
+# mounted from the slot partition, so its source is the real device we booted;
+# use that for any tag-style (or absent) root. Paths are overridable for tests.
 get_root_device() {
-    sed -n 's/.*root=\([^ ]*\).*/\1/p' /proc/cmdline
+    local cmdline="${AA_CMDLINE_FILE:-/proc/cmdline}" mounts="${AA_MOUNTS_FILE:-/proc/mounts}" r s
+    r=$(sed -n 's/.*[ ]root=\([^ ]*\).*/\1/p' "$cmdline" 2>/dev/null | head -n1)
+    case "$r" in
+        ""|PARTUUID=*|UUID=*|LABEL=*)
+            s=$(awk '$3=="squashfs"{print $1; exit}' "$mounts" 2>/dev/null)
+            [ -n "$s" ] && { echo "$s"; return; }
+            s=$(findmnt -no SOURCE /media/root-ro 2>/dev/null)
+            [ -n "$s" ] && { echo "$s"; return; }
+            ;;
+    esac
+    echo "$r"
 }
 
 # Whole disk that holds the install (derived from the running root device)

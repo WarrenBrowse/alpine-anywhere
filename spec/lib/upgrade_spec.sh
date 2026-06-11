@@ -13,6 +13,35 @@ Describe 'upgrade.sh'
         get_boot_disk() { return 1; }
     }
 
+    Describe 'get_root_device()'
+        setup_cmdline() {
+            RDDIR=$(mktemp -d)
+            export AA_CMDLINE_FILE="$RDDIR/cmdline" AA_MOUNTS_FILE="$RDDIR/mounts"
+            printf '/dev/sda2 /media/root-ro squashfs ro 0 0\n' > "$AA_MOUNTS_FILE"
+        }
+        cleanup_cmdline() { rm -rf "$RDDIR"; }
+        Before 'setup_cmdline'
+        After 'cleanup_cmdline'
+
+        It 'returns a plain /dev root verbatim'
+            printf 'BOOT_IMAGE=/vmlinuz root=/dev/sda2 rootfstype=squashfs\n' > "$AA_CMDLINE_FILE"
+            When call get_root_device
+            The output should equal "/dev/sda2"
+        End
+
+        It 'resolves root=PARTUUID to the live squashfs slot device'
+            printf 'BOOT_IMAGE=/vmlinuz root=PARTUUID=81a9efcc-fcca-46e6-bdb7-ff77e8cfce61 rootfstype=squashfs\n' > "$AA_CMDLINE_FILE"
+            When call get_root_device
+            The output should equal "/dev/sda2"
+        End
+
+        It 'falls back to the squashfs source when cmdline has no root='
+            printf 'BOOT_IMAGE=/vmlinuz quiet\n' > "$AA_CMDLINE_FILE"
+            When call get_root_device
+            The output should equal "/dev/sda2"
+        End
+    End
+
     Describe 'strip_partition()'
         It 'strips a plain sdX partition'
             When call strip_partition "/dev/sda3"

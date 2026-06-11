@@ -44,6 +44,24 @@ setup_s6_init() {
 mountpoint -q /proc 2>/dev/null || mount -t proc proc /proc
 mountpoint -q /sys  2>/dev/null || mount -t sysfs sysfs /sys
 mount -o remount,rw / 2>/dev/null || true
+# Coldplug hardware: load a driver for every present device by modalias, exactly
+# like OpenRC's hwdrivers. Without this the minimal s6 image never autoloads the
+# NIC driver (ixgbe/igb/tg3/...) and the box comes up with NO network. mdev.conf's
+# $MODALIAS->modprobe rule only fires on hotplug uevents, not for hardware already
+# present at boot, and nothing else in the s6 path triggers a coldplug.
+find /sys -name modalias -type f -print0 2>/dev/null \
+    | xargs -0 sort -u 2>/dev/null | xargs modprobe -b -a 2>/dev/null
+# Load explicitly-requested modules (/etc/modules) plus the filesystem drivers
+# needed to mount the ext4/vfat boot+data partitions. busybox mount only tries
+# filesystems already in /proc/filesystems and will NOT autoload a fs module, so
+# an ext4 partition otherwise fails to mount with "Invalid argument".
+if [ -f /etc/modules ]; then
+    sed 's/#.*//' /etc/modules | while read -r m _; do
+        [ -n "$m" ] && modprobe -b "$m" 2>/dev/null || true
+    done
+fi
+for m in ext4 vfat; do modprobe -b "$m" 2>/dev/null || true; done
+true
 EOF
 
     # Network helper baked from detected config. The interface NAME is resolved
