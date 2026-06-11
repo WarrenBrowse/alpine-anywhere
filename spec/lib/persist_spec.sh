@@ -47,11 +47,10 @@ Describe 'data persistence'
             The stderr should include "unlock-method"
         End
 
-        It 'keyfile method requires a key source'
+        It 'accepts keyfile method with no key source (aa auto-generates one)'
             BeforeRun 'UNLOCK_METHOD=keyfile; KEY_URL=; KEY_FILE='
             When run validate_safe_inputs
-            The status should be failure
-            The stderr should include "requires --key-url or --key-file"
+            The status should be success
         End
     End
 
@@ -150,6 +149,17 @@ Describe 'data persistence'
             The contents of file "$BOOTDIR/data.meta" should include "DATA_ENCRYPTED=true"
             The contents of file "$BOOTDIR/data.meta" should include "DATA_UNLOCK=ssh"
             The contents of file "$BOOTDIR/data.meta" should include "DATA_LUKS_UUID=1111-2222"
+        End
+
+        It 'keyfile method (no key source) generates a key and stages it on the boot partition'
+            # No staged key, no URL -> aa must generate a random key and copy it
+            # to the boot partition as aa-data.key for autonomous unlock at boot.
+            BeforeCall 'UNLOCK_METHOD=keyfile; KEY_URL=; rm -f "$DATA_KEYFILE"'
+            When call format_data_partition "$T/disk" "$T/p4"
+            The status should be success
+            The stderr should be defined
+            The path "$BOOTDIR/aa-data.key" should be exist
+            The contents of file "$BOOTDIR/data.meta" should include "DATA_UNLOCK=keyfile"
         End
     End
 End

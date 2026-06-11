@@ -63,9 +63,9 @@ validate_safe_inputs() {
     case "$UNLOCK_METHOD" in ssh|keyfile|passphrase) ;; *) die "invalid --unlock-method '$UNLOCK_METHOD' (ssh|keyfile|passphrase)" ;; esac
     case "$CONTAINERS" in none|podman|docker|both) ;; *) die "invalid --containers '$CONTAINERS' (none|podman|docker|both)" ;; esac
     case "$CONTAINER_RUNTIME" in crun|runsc) ;; *) die "invalid --container-runtime '$CONTAINER_RUNTIME' (crun|runsc)" ;; esac
-    if [ "$UNLOCK_METHOD" = "keyfile" ] && [ -z "$KEY_URL" ] && [ -z "$KEY_FILE" ]; then
-        die "--unlock-method keyfile requires --key-url or --key-file"
-    fi
+    # keyfile method: --key-url fetches the key at boot, --key-file bakes a provided
+    # key onto the boot partition; with NEITHER, aa generates a random key and
+    # stages it there itself (zero-config autonomous unlock).
 
     # Customization inputs: fail early on the control host if the path is missing
     # (run_custom_script re-checks inside the chroot, but a clear message here

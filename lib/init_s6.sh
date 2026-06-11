@@ -51,16 +51,18 @@ mount -o remount,rw / 2>/dev/null || true
 # present at boot, and nothing else in the s6 path triggers a coldplug.
 find /sys -name modalias -type f -print0 2>/dev/null \
     | xargs -0 sort -u 2>/dev/null | xargs modprobe -b -a 2>/dev/null
-# Load explicitly-requested modules (/etc/modules) plus the filesystem drivers
-# needed to mount the ext4/vfat boot+data partitions. busybox mount only tries
-# filesystems already in /proc/filesystems and will NOT autoload a fs module, so
-# an ext4 partition otherwise fails to mount with "Invalid argument".
-if [ -f /etc/modules ]; then
-    sed 's/#.*//' /etc/modules | while read -r m _; do
+# Load explicitly-requested modules (/etc/modules + /etc/modules-load.d/*.conf,
+# like systemd-modules-load / OpenRC) plus the filesystem drivers needed to mount
+# the boot+data partitions. busybox mount only tries filesystems already in
+# /proc/filesystems and will NOT autoload a fs module, so an ext4/btrfs partition
+# otherwise fails to mount with "Invalid argument".
+for mf in /etc/modules /etc/modules-load.d/*.conf; do
+    [ -f "$mf" ] || continue
+    sed 's/#.*//' "$mf" | while read -r m _; do
         [ -n "$m" ] && modprobe -b "$m" 2>/dev/null || true
     done
-fi
-for m in ext4 vfat; do modprobe -b "$m" 2>/dev/null || true; done
+done
+for m in ext4 vfat btrfs; do modprobe -b "$m" 2>/dev/null || true; done
 true
 EOF
 

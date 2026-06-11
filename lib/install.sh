@@ -500,10 +500,10 @@ format_data_partition() {
     # These tools run on the BUILDER (the running system doing the install),
     # which may not have them yet - install on demand.
     if encrypt_enabled && ! command_exists cryptsetup; then
-        log_info "Installing cryptsetup on the builder..."; apk add --no-cache cryptsetup >/dev/null 2>&1 || true
+        log_info "Installing cryptsetup on the builder..."; ensure_host_pkg cryptsetup
     fi
     if [ "$DATA_FS" = "btrfs" ] && ! command_exists mkfs.btrfs; then
-        log_info "Installing btrfs-progs on the builder..."; apk add --no-cache btrfs-progs >/dev/null 2>&1 || true
+        log_info "Installing btrfs-progs on the builder..."; ensure_host_pkg btrfs-progs
     fi
     # The filesystem/crypto kernel modules may be modules not yet loaded on the
     # builder (e.g. linux-rpi BTRFS_FS=m) - mount -t btrfs would fail with EINVAL.
@@ -514,10 +514,19 @@ format_data_partition() {
     if encrypt_enabled; then
         command_exists cryptsetup || die "cryptsetup not found (needed for --encrypt-data)"
         # Resolve key material. For ssh/passphrase methods the control host staged
-        # the passphrase bytes at DATA_KEYFILE; for keyfile+URL we fetch it now.
+        # the passphrase bytes at DATA_KEYFILE; for keyfile+URL we fetch it now;
+        # for keyfile WITHOUT a URL we generate a random key here and stage it onto
+        # the (unencrypted) boot partition so the node unlocks autonomously at boot
+        # with no network (see install_aa_data_helper). The OS itself stays
+        # unencrypted, so the box always boots + is reachable even if unlock fails.
         if [ "$UNLOCK_METHOD" = "keyfile" ] && [ -n "$KEY_URL" ] && [ ! -f "$DATA_KEYFILE" ]; then
             log_info "Fetching LUKS key from $KEY_URL..."
             http_fetch_file "$KEY_URL" "$DATA_KEYFILE" || die "could not fetch LUKS key from $KEY_URL"
+        fi
+        if [ "$UNLOCK_METHOD" = "keyfile" ] && [ -z "$KEY_URL" ] && [ ! -f "$DATA_KEYFILE" ]; then
+            log_info "Generating a random LUKS keyfile (stored on the boot partition)..."
+            require dd if=/dev/urandom of="$DATA_KEYFILE" bs=512 count=8 2>/dev/null
+            chmod 0400 "$DATA_KEYFILE"
         fi
         [ -f "$DATA_KEYFILE" ] || die "LUKS key material not found at $DATA_KEYFILE (control host must stage it)"
         log_info "Creating LUKS2 container on $_fdp_dev..."
@@ -549,12 +558,37 @@ format_data_partition() {
     # Close LUKS; the boot service / aa-unlock will reopen it.
     if encrypt_enabled; then
         require cryptsetup close "$DATA_MAPPER"
+        # keyfile method without a URL: persist the key on the boot partition so
+        # the boot-time service can auto-unlock with no network. (ssh/passphrase
+        # and keyfile+URL deliberately leave NO key at rest.)
+        if [ "$UNLOCK_METHOD" = "keyfile" ] && [ -z "$KEY_URL" ]; then
+            stage_boot_keyfile "$_fdp_disk" "$DATA_KEYFILE"
+        fi
         # Securely remove the staged key material from the builder.
         if command_exists shred; then shred -u "$DATA_KEYFILE" 2>/dev/null || true; else rm -f "$DATA_KEYFILE"; fi
     fi
 
     write_data_meta "$_fdp_disk" "$_fdp_dev" "$luks_uuid"
     log_info "Data partition ready (fs=${DATA_FS}, encrypted=$(encrypt_enabled && echo yes || echo no))"
+}
+
+# Copy the LUKS keyfile onto the boot partition (partition 1) as /aa-data.key,
+# root-only. The boot partition is unencrypted, so this is the autonomous-unlock
+# tradeoff: on a single disk the key sits next to the encrypted data, so it does
+# NOT defend against theft of the whole disk — it protects a pulled/decommissioned
+# DATA disk (or a separate data disk) and avoids any network dependency at boot.
+stage_boot_keyfile() {
+    _sbk_disk="$1"; _sbk_key="$2"
+    local boot_dev boot_mnt="${AA_BOOTMETA_MNT:-/mnt/aa-bootmeta}"
+    boot_dev=$(get_part_dev "$_sbk_disk" 1)
+    mkdir -p "$boot_mnt"
+    require mount "$boot_dev" "$boot_mnt"
+    assert_mounted "$boot_mnt"
+    require cp "$_sbk_key" "${boot_mnt}/aa-data.key"
+    chmod 0400 "${boot_mnt}/aa-data.key"
+    sync
+    require umount "$boot_mnt"
+    log_info "LUKS keyfile staged on the boot partition (autonomous unlock)"
 }
 
 # Write data.meta onto the FAT boot partition (partition 1), alongside slots.meta.
@@ -1071,11 +1105,21 @@ _part() {
 }
 _read_meta() {
     DATA_ENCRYPTED=false; DATA_UNLOCK=ssh; DATA_MAPPER=aa-data; DATA_DEV=""; DATA_FS=btrfs; KEY_URL=""; CONTAINERS=none
+    LOCAL_KEY=""
     mkdir -p "$BOOT_MNT"
     mount -o ro "$(_part 1)" "$BOOT_MNT" 2>/dev/null || mount "$(_part 1)" "$BOOT_MNT" 2>/dev/null || return 1
     [ -f "$BOOT_MNT/data.meta" ] && . "$BOOT_MNT/data.meta"
+    # Grab the autonomous-unlock keyfile (keyfile method) while boot is mounted.
+    if [ -f "$BOOT_MNT/aa-data.key" ]; then
+        LOCAL_KEY=/run/aa.key
+        cp "$BOOT_MNT/aa-data.key" "$LOCAL_KEY" 2>/dev/null && chmod 0400 "$LOCAL_KEY" || LOCAL_KEY=""
+    fi
     umount "$BOOT_MNT" 2>/dev/null || true
     [ -n "$DATA_DEV" ] || DATA_DEV=$(_part 4)
+    # The minimal s6/initramfs userspace does not autoload these: dm-crypt for the
+    # LUKS open, and the data filesystem for the mount (else mount = EINVAL).
+    [ "$DATA_ENCRYPTED" = "true" ] && modprobe -b dm-crypt 2>/dev/null || true
+    modprobe -b "$DATA_FS" 2>/dev/null || true
 }
 _unlock() {
     # $1 = path to key material (file) or "-" for stdin; only for encrypted data.
@@ -1117,15 +1161,27 @@ _read_meta || { echo "aa-data: no data.meta; persistence not configured" >&2; ex
 
 case "$cmd" in
     autoboot)
-        # Boot service: only auto methods act here. ssh stays locked until aa-unlock.
+        # Boot service. Unencrypted data has nothing to unlock - just mount it.
+        if [ "$DATA_ENCRYPTED" != "true" ]; then
+            _mount_all || echo "aa-data: mount failed (system stays up)" >&2
+            exit 0
+        fi
+        # Encrypted: only automatic methods act here. ssh stays locked until aa-unlock.
         case "$DATA_UNLOCK" in
             ssh) echo "aa-data: data is encrypted; run 'aa-unlock' to mount /var" >&2; exit 0 ;;
             keyfile)
-                kf=/run/aa.key
-                if [ -n "$KEY_URL" ]; then curl -fsS "$KEY_URL" -o "$kf" 2>/dev/null || true; fi
-                [ -f "$BOOT_MNT.key" ] && kf="$BOOT_MNT.key"
-                _unlock "$kf" && _mount_all || echo "aa-data: auto unlock failed (system stays up)" >&2
-                rm -f "$kf" 2>/dev/null || true
+                # Prefer the local key staged on the boot partition (no network);
+                # fall back to a network fetch only if none was staged.
+                kf="$LOCAL_KEY"
+                if [ -z "$kf" ] && [ -n "$KEY_URL" ]; then
+                    kf=/run/aa.key; curl -fsS "$KEY_URL" -o "$kf" 2>/dev/null || kf=""
+                fi
+                if [ -n "$kf" ]; then
+                    _unlock "$kf" && _mount_all || echo "aa-data: auto unlock failed (system stays up)" >&2
+                else
+                    echo "aa-data: no keyfile available to auto-unlock /var" >&2
+                fi
+                rm -f /run/aa.key 2>/dev/null || true
                 ;;
             passphrase) _unlock - && _mount_all || true ;;
         esac

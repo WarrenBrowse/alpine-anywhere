@@ -168,6 +168,30 @@ ensure_sane_clock() {
     fi
 }
 
+# Install one or more build-host packages with whatever package manager the
+# builder has (Alpine apk / Debian apt / Arch+SystemRescue pacman / RHEL dnf|yum).
+# aa is meant to run on ANY Linux host, so builder-side deps must not assume apk.
+# Best-effort: package names are assumed identical across managers (true for
+# cryptsetup, btrfs-progs, syslinux, ...); logs and continues on failure so the
+# caller's own `command -v` check stays the authority.
+ensure_host_pkg() {
+    [ "$#" -gt 0 ] || return 0
+    if command -v apk >/dev/null 2>&1; then
+        apk add --no-cache "$@" >/dev/null 2>&1 || true
+    elif command -v apt-get >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get -qq update >/dev/null 2>&1 || true
+        DEBIAN_FRONTEND=noninteractive apt-get -qq install -y "$@" >/dev/null 2>&1 || true
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm "$@" >/dev/null 2>&1 || true
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y "$@" >/dev/null 2>&1 || true
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y "$@" >/dev/null 2>&1 || true
+    else
+        log_warn "no known package manager (apk/apt/pacman/dnf/yum); cannot install: $*"
+    fi
+}
+
 # Data-persistence predicates.
 persist_enabled() { [ "$PERSIST_DATA" = "true" ]; }
 encrypt_enabled() { [ "$ENCRYPT_DATA" = "true" ]; }
