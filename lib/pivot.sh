@@ -65,6 +65,11 @@ detect_init_system() {
         openrc-init)
             echo "openrc"
             ;;
+        s6-svscan|s6-linux-init)
+            # s6 (what alpine-anywhere's own hardened images run): PID 1 is
+            # s6-svscan; it can be told to re-exec into a takeover init.
+            echo "s6"
+            ;;
         *)
             echo "unknown:$init_comm"
             ;;
@@ -715,6 +720,39 @@ pivot_sysvinit() {
     run_privileged telinit u
 }
 
+# Strategy for s6 (s6-svscan as PID 1 - alpine-anywhere's own hardened images).
+# s6-svscan exec()s its scandir's .s6-svscan/finish script when it exits, so we
+# point finish at the takeover fakeinit and ask s6-svscan to abort: `-b` execs
+# finish IMMEDIATELY without bringing services down (the fakeinit kills leftover
+# processes itself after pivot_root, exactly like the systemd telinit-u path).
+# The fakeinit is failure-safe (never exits PID 1), so a botched pivot degrades to
+# a reachable recovery shell rather than a panic.
+pivot_s6() {
+    log_info "Using s6 strategy (s6-svscan -> .s6-svscan/finish)..."
+
+    local scandir
+    scandir=$(tr '\0' '\n' < /proc/1/cmdline 2>/dev/null | grep '^/' | tail -1)
+    [ -d "${scandir}/.s6-svscan" ] || scandir=/run/service
+    if [ ! -d "${scandir}/.s6-svscan" ]; then
+        log_error "no ${scandir}/.s6-svscan control dir; falling back to RAM installer"
+        pivot_reboot_installer
+        return
+    fi
+    if [ ! -x "${PIVOT_DIR}/sbin/fakeinit" ]; then
+        log_error "fakeinit missing at ${PIVOT_DIR}/sbin/fakeinit; falling back"
+        pivot_direct
+        return
+    fi
+
+    local fin="${scandir}/.s6-svscan/finish"
+    log_info "Pointing ${fin} at the takeover fakeinit..."
+    run_privileged sh -c "printf '#!/bin/sh\nexec %s/sbin/fakeinit\n' '${PIVOT_DIR}' > '${fin}' && chmod +x '${fin}'"
+
+    log_warn "Triggering s6-svscanctl -b ${scandir} - PID 1 (s6-svscan) will exec fakeinit..."
+    log_warn "Connection WILL be lost. Reconnect via: ssh root@${DETECTED_IP_ADDRESS}"
+    run_privileged s6-svscanctl -b "${scandir}"
+}
+
 # Strategy: reboot into a RAM installer (no runtime PID 1 takeover).
 # Used when the running init can't be re-exec'd at runtime (e.g. busybox init).
 # We turn the already-built pivot env (${PIVOT_DIR}: install tools + scripts +
@@ -938,6 +976,9 @@ execute_pivot() {
         openrc)
             # Alpine's OpenRC runs on top of busybox init (PID 1)
             pivot_reboot_installer
+            ;;
+        s6)
+            pivot_s6
             ;;
         *)
             log_warn "Unknown init system, trying direct approach"

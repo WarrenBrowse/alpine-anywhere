@@ -16,6 +16,28 @@ Describe 'pivot.sh'
         It 'defines OLD_ROOT constant'
             The variable OLD_ROOT should equal "/mnt/oldroot"
         End
+
+        # Mock the PID 1 probes (cat /proc/1/comm, readlink -f /proc/1/exe).
+        It 'detects s6 when PID 1 is s6-svscan'
+            cat() { echo "s6-svscan"; }
+            readlink() { echo "/bin/s6-svscan"; }
+            When call detect_init_system
+            The output should equal "s6"
+        End
+
+        It 'detects s6 when PID 1 is s6-linux-init'
+            cat() { echo "s6-linux-init"; }
+            readlink() { echo "/usr/bin/s6-linux-init"; }
+            When call detect_init_system
+            The output should equal "s6"
+        End
+
+        It 'still detects systemd'
+            cat() { echo "systemd"; }
+            readlink() { echo "/usr/lib/systemd/systemd"; }
+            When call detect_init_system
+            The output should equal "systemd"
+        End
     End
 
     Describe 'Constants'
