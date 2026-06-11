@@ -722,9 +722,13 @@ pivot_sysvinit() {
 
 # Strategy for s6 (s6-svscan as PID 1 - alpine-anywhere's own hardened images).
 # s6-svscan exec()s its scandir's .s6-svscan/finish script when it exits, so we
-# point finish at the takeover fakeinit and ask s6-svscan to abort: `-b` execs
-# finish IMMEDIATELY without bringing services down (the fakeinit kills leftover
-# processes itself after pivot_root, exactly like the systemd telinit-u path).
+# point finish at the takeover fakeinit and ask s6-svscan to TERMINATE (`-t`):
+# it brings ALL services down FIRST, then execs finish. The shutdown is essential
+# on an immutable aa origin: the root is an overlay whose lowerdir is the slot
+# squashfs, and the running services (dropbear, ...) map their binaries from that
+# squashfs. If they are left running (`-b` abort), they keep the slot partition
+# busy after the lazy unmount, and the subsequent `parted` on the boot disk fails
+# with "partition in use". `-t` reaps them before the fakeinit partitions.
 # The fakeinit is failure-safe (never exits PID 1), so a botched pivot degrades to
 # a reachable recovery shell rather than a panic.
 pivot_s6() {
@@ -748,9 +752,9 @@ pivot_s6() {
     log_info "Pointing ${fin} at the takeover fakeinit..."
     run_privileged sh -c "printf '#!/bin/sh\nexec %s/sbin/fakeinit\n' '${PIVOT_DIR}' > '${fin}' && chmod +x '${fin}'"
 
-    log_warn "Triggering s6-svscanctl -b ${scandir} - PID 1 (s6-svscan) will exec fakeinit..."
+    log_warn "Triggering s6-svscanctl -t ${scandir} - services down, then PID 1 execs fakeinit..."
     log_warn "Connection WILL be lost. Reconnect via: ssh root@${DETECTED_IP_ADDRESS}"
-    run_privileged s6-svscanctl -b "${scandir}"
+    run_privileged s6-svscanctl -t "${scandir}"
 }
 
 # Strategy: reboot into a RAM installer (no runtime PID 1 takeover).
