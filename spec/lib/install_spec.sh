@@ -440,6 +440,43 @@ exit 0'
             The output should include "HAS_VERITY_FILE"
             The output should include "VERITY_AFTER_NLPLUG_BEFORE_MOUNT"
         End
+
+        # The PARTUUID resolver must be embedded and called after nlplug-findfs but
+        # before the root mount, so a root=PARTUUID= becomes a real /dev node that
+        # busybox mount can use (busybox cannot resolve PARTUUID= itself).
+        wrap_resolver_inspect() {
+            VERITY_MODE=off
+            {
+                printf '#!/bin/sh\n'
+                printf 'nlplug-findfs -p /sbin/mdev $KOPT_root\n'
+                printf 'mkdir -p /media/root-ro /media/root-rw $sysroot/media/root-ro\n'
+                printf 'mount -t squashfs -o ro $KOPT_root /media/root-ro\n'
+                printf 'mount -t overlay -o lowerdir=/media/root-ro overlayfs $sysroot\n'
+                printf 'exec switch_root $sysroot /sbin/init "$@"\n'
+            } > "$SRC/init"
+            chmod +x "$SRC/init"
+            ( cd "$SRC" && find . | cpio -o -H newc 2>/dev/null | gzip ) > "$WD/initramfs"
+            wrap_boot_initramfs "$WD/initramfs" >/dev/null 2>&1
+            rm -rf "$WD/out"; mkdir -p "$WD/out"
+            ( cd "$WD/out" && gzip -dc "$WD/initramfs" | cpio -idm 2>/dev/null )
+            [ -x "$WD/out/sbin/aa-resolve-root" ] && echo "HAS_RESOLVER_FILE"
+            grep -q 'aa-resolve-root "$KOPT_root"' "$WD/out/init" && echo "ARGS_OK"
+            awk '/nlplug-findfs/{n=NR} /aa-resolve-root/{r=NR} /mount .*\/media\/root-ro/{m=NR} END{ if (n>0 && r>n && m>0 && r<m) print "RESOLVER_AFTER_NLPLUG_BEFORE_MOUNT" }' "$WD/out/init"
+            # idempotent: a second wrap must not inject the resolver call twice
+            wrap_boot_initramfs "$WD/initramfs" >/dev/null 2>&1
+            rm -rf "$WD/out"; mkdir -p "$WD/out"
+            ( cd "$WD/out" && gzip -dc "$WD/initramfs" | cpio -idm 2>/dev/null )
+            echo "RESOLVER_CALLS=$(grep -c 'aa-resolve-root "$KOPT_root"' "$WD/out/init")"
+        }
+
+        It 'embeds aa-resolve-root and calls it after nlplug-findfs, before the root mount, idempotently'
+            command -v cpio >/dev/null 2>&1 || Skip "cpio not available"
+            When call wrap_resolver_inspect
+            The output should include "HAS_RESOLVER_FILE"
+            The output should include "ARGS_OK"
+            The output should include "RESOLVER_AFTER_NLPLUG_BEFORE_MOUNT"
+            The output should include "RESOLVER_CALLS=1"
+        End
     End
 
     Describe 'persist_host_keys()'

@@ -1,0 +1,123 @@
+#!/bin/sh
+# aa-resolve-root: resolve a tag-style root spec to a concrete /dev block node,
+# for use in the Alpine mkinitfs init BEFORE it mounts the root filesystem.
+#
+# WHY THIS EXISTS
+# x86_64 installs boot with root=PARTUUID=<guid> (a GPT *partition* attribute)
+# because kernel device names (sda/sdb) swap by probe order across boots, and on
+# a multi-disk box that would point root= at the wrong disk. PARTUUID is globally
+# unique and disambiguates correctly. BUT the mkinitfs initramfs userspace is
+# busybox-only: busybox mount/findfs understand filesystem UUID=/LABEL= but NOT
+# PARTUUID=, and the mdev persistent-storage helper only creates
+# /dev/disk/by-partuuid/<guid> when a full (util-linux) blkid is present — which
+# the initramfs does not ship. So nlplug-findfs locates the device, yet nothing
+# translates the tag to a node, and the init's `mount $KOPT_root /media/root-ro`
+# gets the literal string and dies:
+#     mount: mounting PARTUUID=... on /media/root-ro failed: No such file or directory
+#     switch_root: can't execute '/sbin/init': No such file or directory
+# (squashfs slots have no filesystem UUID/LABEL either, so UUID=/LABEL= are not an
+# option for root=.)
+#
+# WHAT IT DOES
+# Reads the GPT directly with busybox dd + hexdump (no extra binaries, no udev),
+# computes each partition's PARTUUID, and prints the matching /dev node. PARTUUID
+# being unique means this picks the right partition even across identical disks.
+# Also resolves PARTLABEL= (via the kernel-exported PARTNAME uevent) as a bonus.
+# A bare /dev/ path is echoed back unchanged; UUID=/LABEL= (filesystem tags) are
+# left to the stock busybox findfs path and echoed back so the caller is a no-op.
+#
+# On any failure it prints NOTHING and exits 0, so the caller falls back to the
+# raw spec and boot behaviour is unchanged where resolution is not needed.
+#
+# Strict POSIX sh / BusyBox ash. Standalone (sh -n / shellcheck / unit-tested);
+# wrap_boot_initramfs copies it into the initramfs as /sbin/aa-resolve-root.
+#
+# Usage: aa-resolve-root "PARTUUID=95142ade-e964-4213-9373-240dba1a1f21"
+#        -> /dev/sda2   (or empty if not found)
+
+spec="$1"
+[ -n "$spec" ] || exit 0
+
+# SYSFS/DEV overridable for unit tests; default to the real initramfs paths.
+SYS="${AA_SYS:-/sys}"
+DEV="${AA_DEV:-/dev}"
+
+# gpt_partuuid DISK PARTNUM -> prints the PARTUUID of GPT entry PARTNUM on DISK.
+# The GPT header (LBA1) holds the entry-array LBA @72 and entry size @84 (both
+# little-endian); on an LE host hexdump '/N "%u"' reads them natively. Entry K
+# (1-indexed) sits at entryLBA*512 + (K-1)*entrySize; its unique GUID is at +16,
+# stored mixed-endian (first three groups byte-reversed) — reorder to the textual
+# form. Falls back to the universal defaults (LBA 2, 128-byte entries) if the
+# header reads look bogus.
+gpt_partuuid() {
+    _d="$1"; _k="$2"
+    [ -r "$_d" ] || return 1
+    _elba=$(dd if="$_d" bs=1 skip=584 count=4 2>/dev/null | hexdump -v -e '/4 "%u"' 2>/dev/null)
+    _esz=$(dd if="$_d" bs=1 skip=596 count=4 2>/dev/null | hexdump -v -e '/4 "%u"' 2>/dev/null)
+    [ "${_elba:-0}" -ge 2 ] 2>/dev/null || _elba=2
+    [ "${_esz:-0}" -ge 128 ] 2>/dev/null || _esz=128
+    _off=$(( _elba * 512 + (_k - 1) * _esz + 16 ))
+    # shellcheck disable=SC2046  # intentional word-split into positional params
+    set -- $(dd if="$_d" bs=1 skip="$_off" count=16 2>/dev/null | hexdump -v -e '/1 "%02x "' 2>/dev/null)
+    [ $# -eq 16 ] || return 1
+    # all-zero GUID = empty partition slot
+    case "$1$2$3$4$5$6$7$8$9${10}${11}${12}${13}${14}${15}${16}" in
+        00000000000000000000000000000000) return 1 ;;
+    esac
+    printf '%s%s%s%s-%s%s-%s%s-%s%s-%s%s%s%s%s%s\n' \
+        "$4" "$3" "$2" "$1" "$6" "$5" "$8" "$7" \
+        "$9" "${10}" "${11}" "${12}" "${13}" "${14}" "${15}" "${16}"
+}
+
+# Iterate every partition block device (those with a sysfs `partition` file),
+# derive its parent disk + partition number, and run BODY for each as:
+#   BODY <devnode> <disknode> <partnum>
+# Returns as soon as BODY prints something (echoes it) and exits 0.
+for_each_partition() {
+    _body="$1"
+    for _p in "$SYS"/class/block/*; do
+        [ -f "$_p/partition" ] || continue
+        _pn=$(cat "$_p/partition" 2>/dev/null)
+        case "$_pn" in ''|*[!0-9]*) continue ;; esac
+        _name=${_p##*/}
+        # Parent disk = basename of the dir holding this device's sysfs node.
+        _link=$(readlink "$_p" 2>/dev/null) || continue
+        _parent=$(basename "$(dirname "$_link")")
+        # -e (not -b) so the resolver is unit-testable against a regular-file disk
+        # image; in the real initramfs $DEV/$_parent is the block device node.
+        [ -e "$DEV/$_parent" ] || continue
+        _out=$("$_body" "$DEV/$_name" "$DEV/$_parent" "$_pn") || continue
+        if [ -n "$_out" ]; then printf '%s\n' "$_out"; return 0; fi
+    done
+    return 1
+}
+
+case "$spec" in
+    PARTUUID=*)
+        target=$(printf '%s' "${spec#PARTUUID=}" | tr 'A-F' 'a-f')
+        match_partuuid() {  # devnode disknode partnum
+            pu=$(gpt_partuuid "$2" "$3") || return 1
+            [ "$pu" = "$target" ] && printf '%s' "$1"
+        }
+        for_each_partition match_partuuid
+        ;;
+    PARTLABEL=*)
+        # Kernel exports the GPT partition name as PARTNAME in the block uevent.
+        target=${spec#PARTLABEL=}
+        match_partlabel() {  # devnode disknode partnum
+            pn=$(sed -n 's/^PARTNAME=//p' "$SYS/class/block/${1##*/}/uevent" 2>/dev/null)
+            [ "$pn" = "$target" ] && printf '%s' "$1"
+        }
+        for_each_partition match_partlabel
+        ;;
+    /dev/*)
+        # Already a device path: echo back so the caller can use it verbatim.
+        printf '%s\n' "$spec"
+        ;;
+    *)
+        # UUID=/LABEL=/ZFS=/... : filesystem tags the stock busybox findfs/mount
+        # already handle. Echo back unchanged so the caller stays a no-op.
+        printf '%s\n' "$spec"
+        ;;
+esac
+exit 0

@@ -1299,6 +1299,57 @@ wrap_boot_initramfs() {
         chmod +x "$tmp/init"
     fi
 
+    # PARTUUID resolver: copy aa-resolve-root and insert a call BEFORE the root
+    # mount so a tag-style root=PARTUUID=... is turned into a concrete /dev node.
+    # The busybox-only initramfs cannot resolve PARTUUID= (no util-linux blkid;
+    # busybox mount/findfs only grok filesystem UUID=/LABEL=), so without this the
+    # init mounts the literal "PARTUUID=..." string and dies with
+    #   mount: ... on /media/root-ro failed: No such file or directory
+    # Must run AFTER nlplug-findfs has plugged the disk nodes and BEFORE both the
+    # verity-open and the root mount, so anchor on the same root-mount line and
+    # inject this pass FIRST (verity's pass below then lands between us and the
+    # mount, using the node we resolved). On resolution failure aa-resolve-root
+    # prints nothing and KOPT_root is left as-is (boot behaviour unchanged).
+    # Locate a root-mount anchor (the real mkinitfs overlay path mounts $KOPT_root
+    # at /media/root-ro; the plain path mounts onto $sysroot). Best-effort: a fake
+    # or future init without a recognizable root mount just skips the resolver
+    # injection (boot behaviour unchanged) rather than failing the wrap.
+    local rmount_anchor=""
+    if grep -qE '^[[:space:]]*mkdir -p /media/root-ro' "$tmp/init"; then
+        rmount_anchor='^[[:space:]]*mkdir -p /media/root-ro'
+    elif grep -qE 'mount .*\$sysroot' "$tmp/init"; then
+        rmount_anchor='mount .*\$sysroot'
+    fi
+    if [ -n "$rmount_anchor" ]; then
+        local rr_src=""
+        for cand in \
+            "${SCRIPT_DIR}/lib/initramfs/aa-resolve-root" \
+            "${INSTALL_LIB_DIR}/initramfs/aa-resolve-root" \
+            "${INSTALL_BASE_DIR}/lib/initramfs/aa-resolve-root" \
+            "/boot/alpine-anywhere/lib/initramfs/aa-resolve-root"; do
+            [ -f "$cand" ] && { rr_src="$cand"; break; }
+        done
+        if [ -n "$rr_src" ]; then
+            require cp "$rr_src" "$tmp/sbin/aa-resolve-root"
+            chmod +x "$tmp/sbin/aa-resolve-root"
+            if ! grep -q '/sbin/aa-resolve-root' "$tmp/init"; then
+                awk -v anchor="$rmount_anchor" '
+                    $0 ~ anchor && !done {
+                        match($0, /^[[:space:]]*/); ind=substr($0, 1, RLENGTH)
+                        print ind "if [ -n \"$KOPT_root\" ]; then _aart=$(/sbin/aa-resolve-root \"$KOPT_root\" 2>/dev/null); [ -n \"$_aart\" ] && KOPT_root=\"$_aart\" && root=\"$_aart\"; fi"
+                        done=1
+                    }
+                    { print }
+                ' "$tmp/init" > "$tmp/init.rr.new" && mv "$tmp/init.rr.new" "$tmp/init"
+                chmod +x "$tmp/init"
+            fi
+        else
+            log_warn "aa-resolve-root source not found; root=PARTUUID may be unresolvable in the initramfs"
+        fi
+    else
+        log_warn "no root-mount anchor in init; skipping PARTUUID resolver injection"
+    fi
+
     # dm-verity: copy aa-verity-open and insert a call BEFORE the root mount so
     # the init mounts the verified mapper device instead of the raw slot. The
     # verity device must be opened before the mount that targets $sysroot.
