@@ -46,18 +46,37 @@ mountpoint -q /sys  2>/dev/null || mount -t sysfs sysfs /sys
 mount -o remount,rw / 2>/dev/null || true
 EOF
 
-    # Network helper baked from detected config
+    # Network helper baked from detected config. The interface NAME is resolved
+    # at runtime: the build/detection host may use systemd-predictable names
+    # (eno1, ens..) while this Alpine image uses mdev kernel names (eth0..), so a
+    # baked name can be wrong. Prefer the detected name if present, else bring
+    # all non-lo links up and pick the one with carrier (the cabled port), else
+    # the first non-lo. Keeps the box reachable across host/runtime naming.
     if [ "$NETWORK_IS_DHCP" = "true" ]; then
         cat > "${hd}/network-up" << EOF
 #!/bin/sh
 ifconfig lo 127.0.0.1 up 2>/dev/null || true
-udhcpc -i "${DETECTED_INTERFACE}" -b -q 2>/dev/null || true
+IF="${DETECTED_INTERFACE}"
+if [ ! -e "/sys/class/net/\$IF" ]; then
+    for d in /sys/class/net/*; do b=\${d##*/}; [ "\$b" = lo ] && continue; ifconfig "\$b" up 2>/dev/null || true; done
+    sleep 3; IF=""
+    for d in /sys/class/net/*; do b=\${d##*/}; [ "\$b" = lo ] && continue; [ "\$(cat \$d/carrier 2>/dev/null)" = 1 ] && { IF="\$b"; break; }; done
+    [ -n "\$IF" ] || for d in /sys/class/net/*; do b=\${d##*/}; [ "\$b" = lo ] || { IF="\$b"; break; }; done
+fi
+udhcpc -i "\$IF" -b -q 2>/dev/null || true
 EOF
     else
         cat > "${hd}/network-up" << EOF
 #!/bin/sh
 ifconfig lo 127.0.0.1 up 2>/dev/null || true
-ifconfig "${DETECTED_INTERFACE}" "${DETECTED_IP_ADDRESS}" netmask "${DETECTED_NETMASK}" up 2>/dev/null || true
+IF="${DETECTED_INTERFACE}"
+if [ ! -e "/sys/class/net/\$IF" ]; then
+    for d in /sys/class/net/*; do b=\${d##*/}; [ "\$b" = lo ] && continue; ifconfig "\$b" up 2>/dev/null || true; done
+    sleep 3; IF=""
+    for d in /sys/class/net/*; do b=\${d##*/}; [ "\$b" = lo ] && continue; [ "\$(cat \$d/carrier 2>/dev/null)" = 1 ] && { IF="\$b"; break; }; done
+    [ -n "\$IF" ] || for d in /sys/class/net/*; do b=\${d##*/}; [ "\$b" = lo ] || { IF="\$b"; break; }; done
+fi
+ifconfig "\$IF" "${DETECTED_IP_ADDRESS}" netmask "${DETECTED_NETMASK}" up 2>/dev/null || true
 route add default gw "${DETECTED_GATEWAY}" 2>/dev/null || true
 EOF
     fi
