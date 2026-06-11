@@ -364,8 +364,20 @@ run_local_ab_install() {
     # If the target disk is NOT the disk we're booted from, no pivot is needed:
     # partition + install directly (e.g. a Debian/Armbian SD installing onto an
     # attached USB/SSD). The pivot only exists to free the disk you run from.
-    local root_disk=""
-    root_disk=$(strip_partition "$(findmnt -n -o SOURCE / 2>/dev/null)" 2>/dev/null)
+    # Derive the boot disk from the root mount SOURCE. On an immutable aa system
+    # the root is an overlay (SOURCE="overlay"), not a /dev node, so re-installing
+    # aa over aa would wrongly look like "target != boot disk" and try to
+    # repartition the live disk. In that case resolve the real boot device from
+    # the squashfs slot mount (its backing partition IS on our boot disk).
+    # NOTE: `|| true` on every substitution - findmnt is absent on busybox
+    # (Alpine) and a bare `var=$(missing-cmd)` would abort under `set -e`.
+    local root_disk="" root_src=""
+    root_src=$(findmnt -n -o SOURCE / 2>/dev/null) || true
+    case "$root_src" in
+        /dev/*) ;;
+        *) root_src=$(awk '$3=="squashfs"{print $1; exit}' /proc/mounts 2>/dev/null) || true ;;
+    esac
+    root_disk=$(strip_partition "$root_src" 2>/dev/null) || true
     if [ -n "$TARGET_DISK" ] && [ -n "$root_disk" ] && [ "$TARGET_DISK" != "$root_disk" ]; then
         log_info "Target $TARGET_DISK differs from boot disk $root_disk -> installing without pivot"
         if [ -n "$TARGET_SLOT" ] && [ "$TARGET_SLOT" != "A" ]; then
