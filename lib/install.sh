@@ -887,7 +887,13 @@ run_custom_script() {
     log_info "Running custom build hook: $CUSTOM_SCRIPT"
     cp "$CUSTOM_SCRIPT" "${root}/tmp/aa-custom.sh"
     chmod +x "${root}/tmp/aa-custom.sh"
-    if ! chroot "$root" /usr/bin/env $files_env /bin/sh /tmp/aa-custom.sh; then
+    # Set an explicit PATH for the hook: chroot otherwise inherits the host's
+    # PATH, and a host that merges /sbin into /usr/bin (e.g. Arch/SystemRescue)
+    # leaves the Alpine chroot's /sbin off PATH, so bare `apk` (in /sbin) is not
+    # found. Absolute-path apk calls elsewhere are unaffected; this fixes hooks
+    # that call apk/rc-update/etc. by name.
+    local hook_path="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    if ! chroot "$root" /usr/bin/env $hook_path $files_env /bin/sh /tmp/aa-custom.sh; then
         rm -f "${root}/tmp/aa-custom.sh"
         rm -rf "${root}/tmp/aa-custom-files"
         die "Custom script failed: $CUSTOM_SCRIPT"
