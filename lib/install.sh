@@ -636,6 +636,14 @@ resolve_init_system() {
 generate_system_squashfs() {
     local squashfs_output="$1"
 
+    # Ensure chroot'd build steps resolve Alpine binaries regardless of the build
+    # HOST's PATH. A host that symlinks /sbin and /bin into /usr/bin (Arch /
+    # SystemRescue rescue env) has a PATH without /sbin or /bin, which `chroot`
+    # passes through - then bare commands in the Alpine chroot (apk in /sbin,
+    # s6-rc-compile / s6-linux-init-maker in /bin) are "not found". Prepend the
+    # standard set; nonexistent dirs in PATH are harmless on any host.
+    export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
+
     resolve_init_system
     log_step "Building Alpine system image (init: ${INIT_SYSTEM})..."
 
