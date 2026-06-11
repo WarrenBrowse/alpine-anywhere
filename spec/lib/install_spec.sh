@@ -519,3 +519,19 @@ exit 0'
         End
     End
 End
+
+Describe 'assert_disk_free_for_repartition()'
+    Include lib/common.sh
+    Include lib/install.sh
+    It 'passes when the kernel can re-read the table (disk free)'
+        blockdev() { return 0; }
+        When call assert_disk_free_for_repartition /dev/sdzz
+        The status should be success
+    End
+    It 'aborts (disk untouched) when a partition is still in use'
+        blockdev() { return 1; }
+        When run assert_disk_free_for_repartition /dev/sdzz
+        The status should be failure
+        The stderr should include "cannot re-read"
+    End
+End

@@ -205,6 +205,31 @@ detect_disk_layout() {
 # Partition Management
 # =============================================================================
 
+# Refuse to repartition a disk that is still in use. CRITICAL safety gate: if a
+# partition of $disk is mounted or otherwise held (open fd, or a lazy-unmount that
+# has not finalized - e.g. an overlay/squashfs root we pivoted away from), the
+# kernel cannot re-read a new partition table (BLKRRPART -> EBUSY). Writing a new
+# GPT first (parted mklabel) and only THEN discovering it can't be re-read leaves
+# the disk with a wiped table the kernel won't pick up until a reboot - a brick on
+# a headless box. So we verify the disk is releasable BEFORE the destructive step,
+# and die with the disk UNTOUCHED if not. blockdev --rereadpt is non-destructive.
+assert_disk_free_for_repartition() {
+    local disk="$1" base mounted
+    base=$(basename "$disk")
+    mounted=$(awk -v d="/dev/${base}" 'index($1, d)==1 {print "  "$1" on "$2}' /proc/mounts 2>/dev/null)
+    if [ -n "$mounted" ]; then
+        die "Refusing to repartition $disk: partition(s) still mounted:
+$mounted
+Unmount them (or reboot) and retry. The disk has NOT been modified."
+    fi
+    # A successful re-read proves no partition is busy. EBUSY here = a holder
+    # (open fd / pending lazy unmount) that a mklabel would strand.
+    sync
+    if ! blockdev --rereadpt "$disk" 2>/dev/null; then
+        die "Refusing to repartition $disk: the kernel cannot re-read its partition table (a partition is still in use). On a pivot this means the old root's overlay/squashfs has not fully released - free the disk or reboot, then retry. The disk has NOT been modified."
+    fi
+}
+
 # Create partition layout for A/B installation
 create_partition_layout() {
     local disk="$1"
@@ -219,6 +244,9 @@ create_partition_layout() {
     fi
 
     log_info "Disk size: ${disk_size}MB"
+
+    # Safety gate: never wipe the GPT of a disk the kernel can't re-read (brick).
+    assert_disk_free_for_repartition "$disk"
 
     local slot_end_mb=$((1 + PART_BOOT_SIZE_MB + PART_SLOT_SIZE_MB + PART_SLOT_SIZE_MB))
 

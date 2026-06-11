@@ -419,21 +419,39 @@ bc "processes killed"
 sleep 2
 
 # Now unmount everything on old root (this is the LAST point breadcrumbs persist
-# to disk; afterwards only the console has output).
-bc "unmounting old root (final persisted breadcrumb)"
-for mnt in $(awk '{print $2}' /proc/mounts | grep "^${OLD_ROOT}" | sort -r); do
-    echo "[fakeinit]   umount $mnt"
-    umount -l "$mnt" 2>/dev/null || true
+# to disk; afterwards only the console has output). CRITICAL: use a REAL (non-lazy)
+# unmount so the slot partition actually RELEASES. A lazy `umount -l` only detaches
+# the name - the device stays busy (BLKRRPART -> EBUSY), which strands the disk
+# half-repartitioned. An immutable aa origin makes this worse: its root is an
+# overlay whose lowerdir is the slot squashfs, and the squashfs only frees once
+# the overlay ABOVE it is gone. So iterate non-lazy unmounts until nothing more
+# releases (the overlay drops first, then its squashfs lowerdir on the next pass).
+bc "unmounting old root (non-lazy, multi-pass: overlay then its squashfs lowerdir)"
+_pass=0
+while [ "$_pass" -lt 6 ]; do
+    _did=0
+    for mnt in $(awk '{print $2}' /proc/mounts | grep "^${OLD_ROOT}" | sort -r); do
+        if umount "$mnt" 2>/dev/null; then echo "[fakeinit]   umount $mnt"; _did=1; fi
+    done
+    umount "${OLD_ROOT}" 2>/dev/null && _did=1
+    [ "$_did" = "0" ] && break
+    _pass=$((_pass + 1))
 done
 BCLOG=""   # old root gone - stop trying to persist (console only from here)
 
-# Final unmount of old root itself
+# Anything still stubbornly mounted (unexpected holder): lazy-detach as a last
+# resort. This does NOT free the disk, but the disk-busy safety gate in
+# create_partition_layout then ABORTS the install before wiping the GPT, so the
+# box stays recoverable instead of bricked.
+for mnt in $(awk '{print $2}' /proc/mounts | grep "^${OLD_ROOT}" | sort -r); do
+    umount -l "$mnt" 2>/dev/null || true
+done
 umount -l "${OLD_ROOT}" 2>/dev/null || true
 
 if mountpoint -q "${OLD_ROOT}" 2>/dev/null; then
-    echo "[fakeinit] WARNING: ${OLD_ROOT} still mounted"
+    echo "[fakeinit] WARNING: ${OLD_ROOT} still mounted (disk-busy gate will abort the install safely)"
 else
-    echo "[fakeinit] Old root unmounted successfully"
+    echo "[fakeinit] Old root unmounted successfully (disk released)"
 fi
 
 # Mount essential filesystems
