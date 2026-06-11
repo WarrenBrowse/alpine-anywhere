@@ -120,9 +120,11 @@ EOF
     # Base packages for pivot
     local pivot_pkgs="$ssh_pkg openrc busybox-openrc"
 
-    # Add disk tools only for install mode
+    # Add disk tools only for install mode. iproute2/ethtool/wget are for the
+    # post-pivot network bringup + on-console diagnostics (busybox ifconfig is
+    # limited; `ip`/`ethtool` show link/driver state when the link won't come up).
     if [ "$INSTALL_MODE" = "true" ]; then
-        pivot_pkgs="$pivot_pkgs bash e2fsprogs dosfstools parted squashfs-tools rsync"
+        pivot_pkgs="$pivot_pkgs bash e2fsprogs dosfstools parted squashfs-tools rsync iproute2 ethtool wget"
     fi
 
     run_privileged chroot "${PIVOT_DIR}" /sbin/apk add --no-cache $pivot_pkgs
@@ -453,12 +455,30 @@ echo "[fakeinit] iface=$IFACE ip=$NETWORK_IP network_confirmed=$NET_OK"
 echo "[fakeinit] SSH available on port 22"
 echo "[fakeinit] ==================================="
 
+# Always dump network diagnostics to the console so a failure is visible even
+# without SSH (the console is the only window once the link is down).
+echo "[fakeinit] ---- network diagnostics ----"
+ifconfig -a 2>/dev/null || ip addr 2>/dev/null
+echo "[fakeinit] routes:"; route -n 2>/dev/null || ip route 2>/dev/null
+echo "[fakeinit] link states:"
+for _n in /sys/class/net/*; do
+    [ -e "$_n" ] || continue
+    echo "  $(basename "$_n"): carrier=$(cat "$_n/carrier" 2>/dev/null) operstate=$(cat "$_n/operstate" 2>/dev/null)"
+done
+echo "[fakeinit] ethtool $IFACE:"; ethtool "$IFACE" 2>&1 | grep -iE "link detected|speed|duplex"
+echo "[fakeinit] resolv.conf:"; cat /etc/resolv.conf 2>/dev/null
+echo "[fakeinit] gw ping:"; ping -c2 -W2 "$NETWORK_GATEWAY" 2>&1 | tail -3
+echo "[fakeinit] recent dmesg:"; dmesg 2>/dev/null | tail -25
+echo "[fakeinit] ------------------------------"
+
 # Start A/B installation ONLY if the network is confirmed (prerequisite for the
-# destructive partition step). Otherwise leave the disk untouched and stay
-# reachable for diagnosis.
+# destructive partition step). Otherwise leave the disk untouched, stay
+# reachable, and open an interactive console shell for live diagnosis.
 if [ "$NET_OK" != "1" ]; then
     echo "[fakeinit] NETWORK NOT CONFIRMED - install NOT started; disk left intact."
-    echo "[fakeinit] SSH in to diagnose, or reboot to return to the previous OS."
+    echo "[fakeinit] Opening a debug shell on the console. Try: ifconfig -a; route -n; dmesg|tail"
+    echo "[fakeinit] Reboot to return to the previous OS (disk untouched)."
+    setsid sh -c 'exec sh </dev/console >/dev/console 2>&1' 2>/dev/null &
 elif [ -f /root/.local/share/alpine-anywhere/alpine-anywhere ]; then
     echo "[fakeinit] Network OK - starting A/B installation in background..."
     . /etc/alpine-anywhere/config.env
