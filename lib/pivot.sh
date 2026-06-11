@@ -124,7 +124,9 @@ EOF
     # post-pivot network bringup + on-console diagnostics (busybox ifconfig is
     # limited; `ip`/`ethtool` show link/driver state when the link won't come up).
     if [ "$INSTALL_MODE" = "true" ]; then
-        pivot_pkgs="$pivot_pkgs bash e2fsprogs dosfstools parted squashfs-tools rsync iproute2 ethtool wget"
+        # util-linux: full blkid (busybox's cannot read PARTUUID, which the
+        # extlinux root=PARTUUID generation needs). swapoff/wipefs also from here.
+        pivot_pkgs="$pivot_pkgs bash e2fsprogs dosfstools parted squashfs-tools rsync iproute2 ethtool wget util-linux"
     fi
 
     run_privileged chroot "${PIVOT_DIR}" /sbin/apk add --no-cache $pivot_pkgs

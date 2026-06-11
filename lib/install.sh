@@ -1654,6 +1654,14 @@ run_ab_install() {
     # table ("Partition(s) ... in use ... reboot now"). Turn swap off and lazily
     # unmount any lingering mounts on the target before partitioning.
     swapoff -a 2>/dev/null || true
+    # busybox `swapoff -a` can miss /proc/swaps entries whose path is
+    # non-canonical (e.g. "/sdb5" rather than "/dev/sdb5"), so swap off each
+    # active device explicitly too - an active swap on the target keeps parted
+    # from re-reading the table.
+    local _s
+    for _s in $(awk 'NR>1{print $1}' /proc/swaps 2>/dev/null); do
+        swapoff "$_s" 2>/dev/null || swapoff "/dev${_s}" 2>/dev/null || true
+    done
     local _p
     for _p in $(awk -v d="$disk" '$1 ~ ("^" d) {print $2}' /proc/mounts 2>/dev/null | sort -r); do
         umount -l "$_p" 2>/dev/null || true
@@ -1889,6 +1897,22 @@ place_slot_kernel() {
     cp "$src_initramfs" "${boot_mnt}/initramfs-${slot}"
 }
 
+# Print a partition's GPT PARTUUID. Robust to busybox blkid, which ignores
+# -s/-o and never prints PARTUUID (it would emit the whole "/dev/x: TYPE=..."
+# line, producing a malformed root=PARTUUID=...). Returns empty if it cannot be
+# determined (caller then falls back to the /dev path). The in-RAM pivot install
+# carries util-linux so a real PARTUUID is available there.
+_partuuid() {
+    local dev="$1" pu=""
+    command -v blkid >/dev/null 2>&1 || { printf ''; return 0; }
+    pu=$(blkid -s PARTUUID -o value "$dev" 2>/dev/null)
+    case "$pu" in
+        ''|*[!0-9a-fA-F-]*) pu="" ;;   # reject busybox's full-line output
+    esac
+    [ -n "$pu" ] || pu=$(blkid "$dev" 2>/dev/null | sed -n 's/.*PARTUUID="\([^"]*\)".*/\1/p')
+    printf '%s' "$pu"
+}
+
 # Install boot configuration (config.txt, cmdline.txt for RPi, extlinux for others)
 # Configures the boot partition to boot the given slot (default A).
 install_boot_config() {
@@ -1938,11 +1962,9 @@ EOF
         local slota_dev slotb_dev slota_root slotb_root pu
         slota_dev=$(get_part_dev "$disk" 2)
         slotb_dev=$(get_part_dev "$disk" 3)
-        pu=""
-        command -v blkid >/dev/null 2>&1 && pu=$(blkid -s PARTUUID -o value "$slota_dev" 2>/dev/null)
+        pu=$(_partuuid "$slota_dev")
         slota_root="${pu:+PARTUUID=$pu}"; slota_root="${slota_root:-$slota_dev}"
-        pu=""
-        command -v blkid >/dev/null 2>&1 && pu=$(blkid -s PARTUUID -o value "$slotb_dev" 2>/dev/null)
+        pu=$(_partuuid "$slotb_dev")
         slotb_root="${pu:+PARTUUID=$pu}"; slotb_root="${slotb_root:-$slotb_dev}"
         mkdir -p "${boot_mnt}/extlinux"
         cat > "${boot_mnt}/extlinux/extlinux.conf" << EOF
