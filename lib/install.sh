@@ -1585,6 +1585,29 @@ EOF
 # Main Installation Flow
 # =============================================================================
 
+# Verify the network-dependent image build's prerequisites (required tools +
+# Alpine mirror reachable) BEFORE the first destructive disk operation. This is
+# what lets the in-RAM pivot install fail safe: if networking did not return
+# after the takeover, abort here with the disk untouched.
+assert_build_prerequisites() {
+    log_step "Verifying prerequisites before any destructive disk change..."
+    local c missing=""
+    for c in parted mksquashfs tar mkfs.ext4; do
+        command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
+    done
+    [ -z "$missing" ] || die "missing required tools before install:$missing"
+    # The image build runs apk against the Alpine mirror - require it reachable.
+    local root="${ALPINE_MIRROR:-http://dl-cdn.alpinelinux.org/alpine}"
+    if command -v wget >/dev/null 2>&1; then
+        wget -q -T 15 -O /dev/null "${root%/}/" 2>/dev/null \
+            || die "network check failed: cannot reach ${root%/}/ (aborting BEFORE any disk change)"
+    elif command -v curl >/dev/null 2>&1; then
+        curl -fsS -m 15 -o /dev/null "${root%/}/" 2>/dev/null \
+            || die "network check failed: mirror unreachable (aborting BEFORE any disk change)"
+    fi
+    log_info "Prerequisites OK (tools present, mirror reachable)"
+}
+
 # Run full A/B installation (must be run as root)
 run_ab_install() {
     if [ "$(id -u)" -ne 0 ]; then
@@ -1615,13 +1638,18 @@ run_ab_install() {
 
     local with_data=true
 
-    # Step 1: Partition disk
-    create_partition_layout "$disk" "$with_data"
-    format_partitions "$disk" "$with_data"
-
-    # Step 2: Build system image
+    # Step 1: Build the system image FIRST (network-dependent: apk downloads).
+    # Doing this before ANY destructive disk operation means a build/network
+    # failure leaves the existing system bootable - essential for the in-RAM
+    # pivot install, where a post-pivot network loss must not brick the box (a
+    # reboot then returns to the untouched prior OS).
+    assert_build_prerequisites
     local squashfs="/tmp/system.squashfs"
     generate_system_squashfs "$squashfs"
+
+    # Step 2: Partition disk (DESTRUCTIVE - reached only once the image built ok)
+    create_partition_layout "$disk" "$with_data"
+    format_partitions "$disk" "$with_data"
 
     # Step 3: Write squashfs to slot A (durable + read-back verified, and if
     # enabled, with a dm-verity hash tree so the root is cryptographically

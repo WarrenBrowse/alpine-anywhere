@@ -399,41 +399,68 @@ else
     echo "[fakeinit] WARNING: No config found!"
 fi
 
-# Setup networking
+# Setup networking. The NIC keeps its kernel name across pivot_root, but fall
+# back to auto-detection if the configured name is absent in this minimal env
+# (predictable names may not be reapplied without systemd/udev).
 echo "[fakeinit] Starting networking..."
 /sbin/ifconfig lo 127.0.0.1 up 2>/dev/null || true
 
-if [ -n "$NETWORK_INTERFACE" ]; then
-    if [ "$NETWORK_DHCP" = "true" ]; then
-        echo "[fakeinit] DHCP on ${NETWORK_INTERFACE}..."
-        /sbin/udhcpc -i "$NETWORK_INTERFACE" -b -q 2>/dev/null &
-        sleep 3
-    else
-        echo "[fakeinit] Static IP ${NETWORK_IP} on ${NETWORK_INTERFACE}..."
-        /sbin/ifconfig "$NETWORK_INTERFACE" "$NETWORK_IP" netmask "$NETWORK_NETMASK" up
-        /sbin/route add default gw "$NETWORK_GATEWAY" 2>/dev/null || true
-    fi
+IFACE="$NETWORK_INTERFACE"
+if [ -z "$IFACE" ] || [ ! -e "/sys/class/net/$IFACE" ]; then
+    for cand in /sys/class/net/*; do
+        c=$(basename "$cand"); [ "$c" = "lo" ] && continue
+        [ -e "$cand" ] || continue
+        IFACE="$c"; break
+    done
+    echo "[fakeinit] configured iface absent -> using detected '$IFACE'"
 fi
 
-# Start SSH
+if [ "$NETWORK_DHCP" = "true" ]; then
+    echo "[fakeinit] DHCP on ${IFACE}..."
+    /sbin/ip link set "$IFACE" up 2>/dev/null || /sbin/ifconfig "$IFACE" up 2>/dev/null || true
+    /sbin/udhcpc -i "$IFACE" -b -q 2>/dev/null &
+else
+    echo "[fakeinit] Static IP ${NETWORK_IP} on ${IFACE}..."
+    /sbin/ifconfig "$IFACE" "$NETWORK_IP" netmask "$NETWORK_NETMASK" up
+    /sbin/route add default gw "$NETWORK_GATEWAY" 2>/dev/null \
+        || /sbin/ip route add default via "$NETWORK_GATEWAY" 2>/dev/null || true
+fi
+
+# Start SSH immediately so the box is reachable for diagnosis regardless of
+# whether the upstream network is confirmed below.
 echo "[fakeinit] Starting SSH..."
 if [ "$HARDENED_MODE" = "true" ]; then
-    echo "[fakeinit] Using dropbear"
     /usr/sbin/dropbear -R -p 22 -E 2>/dev/null &
 else
-    echo "[fakeinit] Using OpenSSH"
-    mkdir -p /run/sshd
-    /usr/sbin/sshd
+    mkdir -p /run/sshd; /usr/sbin/sshd
 fi
 
+# Verify upstream connectivity BEFORE launching anything destructive: the in-RAM
+# build needs the Alpine mirror, and the install must NOT touch the disk if the
+# network did not come back after the pivot (a reboot then recovers the prior
+# OS, untouched).
+NET_OK=0; n=0
+_mirror_root="${ALPINE_MIRROR:-http://dl-cdn.alpinelinux.org/alpine}"
+while [ $n -lt 20 ]; do
+    if wget -q -T 5 -O /dev/null "${_mirror_root%/}/" 2>/dev/null \
+       || ping -c1 -W2 "${NETWORK_GATEWAY:-1.1.1.1}" >/dev/null 2>&1; then
+        NET_OK=1; break
+    fi
+    sleep 3; n=$((n + 1))
+done
 echo "[fakeinit] ==================================="
-echo "[fakeinit] Alpine Linux is running!"
+echo "[fakeinit] iface=$IFACE ip=$NETWORK_IP network_confirmed=$NET_OK"
 echo "[fakeinit] SSH available on port 22"
 echo "[fakeinit] ==================================="
 
-# Start A/B installation if scripts are present
-if [ -f /root/.local/share/alpine-anywhere/alpine-anywhere ]; then
-    echo "[fakeinit] Starting A/B installation in background..."
+# Start A/B installation ONLY if the network is confirmed (prerequisite for the
+# destructive partition step). Otherwise leave the disk untouched and stay
+# reachable for diagnosis.
+if [ "$NET_OK" != "1" ]; then
+    echo "[fakeinit] NETWORK NOT CONFIRMED - install NOT started; disk left intact."
+    echo "[fakeinit] SSH in to diagnose, or reboot to return to the previous OS."
+elif [ -f /root/.local/share/alpine-anywhere/alpine-anywhere ]; then
+    echo "[fakeinit] Network OK - starting A/B installation in background..."
     . /etc/alpine-anywhere/config.env
 
     INSTALL_CMD="sh /root/.local/share/alpine-anywhere/alpine-anywhere --local --install-continue"
