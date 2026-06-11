@@ -205,29 +205,39 @@ detect_disk_layout() {
 # Partition Management
 # =============================================================================
 
-# Refuse to repartition a disk that is still in use. CRITICAL safety gate: if a
-# partition of $disk is mounted or otherwise held (open fd, or a lazy-unmount that
-# has not finalized - e.g. an overlay/squashfs root we pivoted away from), the
-# kernel cannot re-read a new partition table (BLKRRPART -> EBUSY). Writing a new
-# GPT first (parted mklabel) and only THEN discovering it can't be re-read leaves
-# the disk with a wiped table the kernel won't pick up until a reboot - a brick on
-# a headless box. So we verify the disk is releasable BEFORE the destructive step,
-# and die with the disk UNTOUCHED if not. blockdev --rereadpt is non-destructive.
-assert_disk_free_for_repartition() {
+# Safety gate before repartitioning: refuse ONLY if a partition of $disk is
+# actually MOUNTED - that is the real data-loss risk (clobbering a live fs). A
+# kernel that merely cannot re-read the table (BLKRRPART -> EBUSY, e.g. right after
+# pivoting away from an overlay/squashfs root whose teardown is still settling) is
+# NOT a blocker: parted still writes the on-disk GPT, and ensure_partition_devices
+# accesses the new partitions by offset via loop devices. (An earlier version also
+# aborted on the re-read failure - that wrongly blocked the pivot's own loop-device
+# path, which is exactly how aa is meant to install onto a just-freed disk.)
+assert_disk_not_mounted() {
     local disk="$1" base mounted
     base=$(basename "$disk")
     mounted=$(awk -v d="/dev/${base}" 'index($1, d)==1 {print "  "$1" on "$2}' /proc/mounts 2>/dev/null)
     if [ -n "$mounted" ]; then
-        die "Refusing to repartition $disk: partition(s) still mounted:
+        die "Refusing to repartition $disk: partition(s) still MOUNTED:
 $mounted
 Unmount them (or reboot) and retry. The disk has NOT been modified."
     fi
-    # A successful re-read proves no partition is busy. EBUSY here = a holder
-    # (open fd / pending lazy unmount) that a mklabel would strand.
-    sync
-    if ! blockdev --rereadpt "$disk" 2>/dev/null; then
-        die "Refusing to repartition $disk: the kernel cannot re-read its partition table (a partition is still in use). On a pivot this means the old root's overlay/squashfs has not fully released - free the disk or reboot, then retry. The disk has NOT been modified."
-    fi
+}
+
+# Run a parted command, tolerating ONLY the benign "couldn't tell the kernel to
+# re-read the table" warning (the on-disk write still succeeded; loop devices then
+# access partitions by offset). Any other parted error is fatal.
+parted_tolerant() {
+    local out rc
+    out=$(parted -s "$@" 2>&1); rc=$?
+    [ "$rc" -eq 0 ] && return 0
+    case "$out" in
+        *"unable to inform the kernel"*|*"unable to inform"*|*"have been written"*|*" in use"*|*"Resource busy"*|*"re-read"*)
+            log_warn "parted ($*): kernel re-read deferred, continuing via loop devices"
+            return 0 ;;
+        *)
+            die "parted failed ($*): $(printf '%s' "$out" | tr '\n' ' ')" ;;
+    esac
 }
 
 # Create partition layout for A/B installation
@@ -245,17 +255,20 @@ create_partition_layout() {
 
     log_info "Disk size: ${disk_size}MB"
 
-    # Safety gate: never wipe the GPT of a disk the kernel can't re-read (brick).
-    assert_disk_free_for_repartition "$disk"
+    # Safety gate: never repartition a disk with a MOUNTED partition (would clobber
+    # a live filesystem). A non-re-readable-but-unmounted disk is fine (loop fallback).
+    assert_disk_not_mounted "$disk"
 
     local slot_end_mb=$((1 + PART_BOOT_SIZE_MB + PART_SLOT_SIZE_MB + PART_SLOT_SIZE_MB))
 
+    # parted_tolerant: the on-disk GPT write succeeds even when the kernel can't be
+    # told to re-read it (busy/stale after a pivot); we validate the result below.
     log_info "Creating GPT partition table..."
-    require parted -s "$disk" mklabel gpt
+    parted_tolerant "$disk" mklabel gpt
 
     log_info "Creating boot partition (${PART_BOOT_SIZE_MB}MB)..."
-    require parted -s "$disk" mkpart boot fat32 1MiB "${PART_BOOT_SIZE_MB}MiB"
-    require parted -s "$disk" set 1 boot on
+    parted_tolerant "$disk" mkpart boot fat32 1MiB "${PART_BOOT_SIZE_MB}MiB"
+    parted_tolerant "$disk" set 1 boot on
     # x86_64 BIOS: gptmbr.bin chainloads the partition carrying the GPT
     # "legacy BIOS bootable" attribute (bit 2). extlinux's VBR lives there.
     if [ "$DETECTED_PLATFORM" != "rpi" ]; then
@@ -264,22 +277,27 @@ create_partition_layout() {
     fi
 
     log_info "Creating slot A partition (${PART_SLOT_SIZE_MB}MB)..."
-    require parted -s "$disk" mkpart slota ext4 "${PART_BOOT_SIZE_MB}MiB" "$((PART_BOOT_SIZE_MB + PART_SLOT_SIZE_MB))MiB"
+    parted_tolerant "$disk" mkpart slota ext4 "${PART_BOOT_SIZE_MB}MiB" "$((PART_BOOT_SIZE_MB + PART_SLOT_SIZE_MB))MiB"
 
     log_info "Creating slot B partition (${PART_SLOT_SIZE_MB}MB)..."
-    require parted -s "$disk" mkpart slotb ext4 "$((PART_BOOT_SIZE_MB + PART_SLOT_SIZE_MB))MiB" "${slot_end_mb}MiB"
+    parted_tolerant "$disk" mkpart slotb ext4 "$((PART_BOOT_SIZE_MB + PART_SLOT_SIZE_MB))MiB" "${slot_end_mb}MiB"
 
     if [ "$with_data" = "true" ]; then
         log_info "Creating data partition (remaining space)..."
-        require parted -s "$disk" mkpart data ext4 "${slot_end_mb}MiB" 100%
+        parted_tolerant "$disk" mkpart data ext4 "${slot_end_mb}MiB" 100%
     fi
 
-    # Try to re-read partition table. partprobe/blockdev legitimately fail on a
-    # busy disk, so they stay best-effort - but the partition table MUST be
-    # readable one way or another before we format/dd, so ensure_partition_devices
-    # (which falls back to loop devices and dies if even that fails) is the
-    # authoritative gate, asserted here.
+    # Validate the layout actually landed on disk (parted may have only warned
+    # about the kernel re-read; the WRITE must still have succeeded). If parted
+    # genuinely failed, the on-disk GPT won't have our partitions and we die here
+    # BEFORE any format/dd - so a non-writable disk fails safe, not half-installed.
     sync
+    local npart
+    npart=$(sfdisk -d "$disk" 2>/dev/null | grep -c "^${disk}")
+    [ "$npart" -ge 3 ] || die "partitioning did not land on $disk (on-disk GPT shows $npart partitions); disk may be read-only or the layout failed"
+
+    # Make the partitions reachable: directly if the kernel re-read the table, else
+    # via loop devices mapped to the on-disk GPT offsets (ensure_partition_devices).
     try_warn partprobe "$disk"
     try_warn blockdev --rereadpt "$disk"
     sleep 1

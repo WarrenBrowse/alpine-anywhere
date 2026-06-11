@@ -520,18 +520,35 @@ exit 0'
     End
 End
 
-Describe 'assert_disk_free_for_repartition()'
+Describe 'partition safety (mounted gate + tolerant parted)'
     Include lib/common.sh
     Include lib/install.sh
-    It 'passes when the kernel can re-read the table (disk free)'
-        blockdev() { return 0; }
-        When call assert_disk_free_for_repartition /dev/sdzz
-        The status should be success
+
+    Describe 'assert_disk_not_mounted()'
+        It 'passes when no partition of the disk is mounted'
+            # /dev/sdzz is not in /proc/mounts on any test host
+            When call assert_disk_not_mounted /dev/sdzz
+            The status should be success
+        End
     End
-    It 'aborts (disk untouched) when a partition is still in use'
-        blockdev() { return 1; }
-        When run assert_disk_free_for_repartition /dev/sdzz
-        The status should be failure
-        The stderr should include "cannot re-read"
+
+    Describe 'parted_tolerant()'
+        It 'tolerates the benign "unable to inform the kernel" re-read warning'
+            parted() { echo "Error: Partition(s) 2 on /dev/sdzz have been written, but we have been unable to inform the kernel of the change"; return 1; }
+            When call parted_tolerant /dev/sdzz mklabel gpt
+            The status should be success
+            The stderr should include "loop devices"
+        End
+        It 'still dies on a real parted error'
+            parted() { echo "Error: Could not stat device /dev/sdzz - No such file or directory."; return 1; }
+            When run parted_tolerant /dev/sdzz mklabel gpt
+            The status should be failure
+            The stderr should include "parted failed"
+        End
+        It 'passes a successful parted through'
+            parted() { return 0; }
+            When call parted_tolerant /dev/sdzz mklabel gpt
+            The status should be success
+        End
     End
 End
