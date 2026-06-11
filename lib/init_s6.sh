@@ -44,6 +44,14 @@ setup_s6_init() {
 mountpoint -q /proc 2>/dev/null || mount -t proc proc /proc
 mountpoint -q /sys  2>/dev/null || mount -t sysfs sysfs /sys
 mount -o remount,rw / 2>/dev/null || true
+# Standard /dev fd symlinks. The kernel devtmpfs + minimal s6 init do not create
+# them (OpenRC's devfs service normally does), yet many tools open /dev/stdin etc.
+# -- e.g. `nft -f -` opens /dev/stdin and fails "No such file or directory" without
+# it, breaking any nftables ruleset load. Needs /proc mounted (done above).
+ln -sf /proc/self/fd  /dev/fd     2>/dev/null || true
+ln -sf /proc/self/fd/0 /dev/stdin  2>/dev/null || true
+ln -sf /proc/self/fd/1 /dev/stdout 2>/dev/null || true
+ln -sf /proc/self/fd/2 /dev/stderr 2>/dev/null || true
 # Coldplug hardware: load a driver for every present device by modalias, exactly
 # like OpenRC's hwdrivers. Without this the minimal s6 image never autoloads the
 # NIC driver (ixgbe/igb/tg3/...) and the box comes up with NO network. mdev.conf's
