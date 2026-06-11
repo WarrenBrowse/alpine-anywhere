@@ -233,8 +233,13 @@ Unmount them (or reboot) and retry. The disk has NOT been modified."
 # while the helper lingers harmlessly. create_partition_layout validates the
 # resulting on-disk GPT afterwards, so a genuinely failed parted is caught there.
 parted_tolerant() {
-    parted -s "$@" \
-        || log_warn "parted ($*) returned non-zero (kernel re-read deferred on a busy disk); on-disk GPT validated after all partitions"
+    # `if ! parted` (not `parted || ...`): a failing command in an if-CONDITION is
+    # exempt from `set -e`, so the function always reaches `return 0`. (With
+    # `parted || log_warn`, if log_warn ever returned non-zero, set -e would kill
+    # the install right here.)
+    if ! parted -s "$@"; then
+        log_warn "parted ($*) returned non-zero (kernel re-read deferred on a busy disk); on-disk GPT validated after all partitions"
+    fi
     return 0
 }
 
@@ -269,9 +274,10 @@ create_partition_layout() {
     parted_tolerant "$disk" set 1 boot on
     # x86_64 BIOS: gptmbr.bin chainloads the partition carrying the GPT
     # "legacy BIOS bootable" attribute (bit 2). extlinux's VBR lives there.
+    # Via parted_tolerant: like the others, this parted exits non-zero on a busy
+    # disk and must not be allowed to trip `set -e`.
     if [ "$DETECTED_PLATFORM" != "rpi" ]; then
-        parted -s "$disk" set 1 legacy_boot on 2>/dev/null \
-            || log_warn "could not set legacy_boot attribute on ${disk}1"
+        parted_tolerant "$disk" set 1 legacy_boot on
     fi
 
     log_info "Creating slot A partition (${PART_SLOT_SIZE_MB}MB)..."
@@ -294,10 +300,21 @@ create_partition_layout() {
     npart=$(sfdisk -d "$disk" 2>/dev/null | grep -c "^${disk}")
     [ "$npart" -ge 3 ] || die "partitioning did not land on $disk (on-disk GPT shows $npart partitions); disk may be read-only or the layout failed"
 
-    # Make the partitions reachable: directly if the kernel re-read the table, else
-    # via loop devices mapped to the on-disk GPT offsets (ensure_partition_devices).
+    # Make the partitions reachable. On a just-pivoted boot disk the OLD slot
+    # squashfs's lazy unmount may still be settling (BLKRRPART -> EBUSY); it clears
+    # within a few seconds. Retry the re-read until the kernel exposes the new
+    # partitions (bounded ~40s), then fall back to loop devices mapped to the
+    # on-disk GPT offsets. `until <cond>` and `if` keep this set -e-safe.
+    local _t=0
+    until blockdev --rereadpt "$disk" 2>/dev/null; do
+        _t=$((_t + 1))
+        if [ "$_t" -ge 20 ]; then
+            log_warn "kernel still can't re-read $disk after ~40s; using loop devices"
+            break
+        fi
+        sleep 2
+    done
     try_warn partprobe "$disk"
-    try_warn blockdev --rereadpt "$disk"
     sleep 1
     ensure_partition_devices "$disk"
 
@@ -332,9 +349,18 @@ ensure_partition_devices() {
 
     log_info "Kernel can't see new partitions, creating loop devices..."
 
-    # Read partition offsets from GPT via sfdisk
-    local part_info
-    part_info=$(sfdisk -d "$disk" 2>/dev/null | grep "^${disk}")
+    # Read partition offsets from the on-disk GPT via sfdisk. `|| true`: grep
+    # exits non-zero when it finds nothing, and on a busy disk sfdisk -d can fail
+    # transiently - a bare `var=$(... | grep ...)` would then trip `set -e` and
+    # kill the install SILENTLY. Retry sfdisk a few times (the busy window clears),
+    # then fail loudly if the GPT really can't be read.
+    local part_info="" _r=0
+    while [ "$_r" -lt 10 ]; do
+        part_info=$(sfdisk -d "$disk" 2>/dev/null | grep "^${disk}" || true)
+        [ -n "$part_info" ] && break
+        _r=$((_r + 1)); sleep 1
+    done
+    [ -n "$part_info" ] || die "ensure_partition_devices: cannot read the on-disk GPT of $disk (sfdisk -d returned nothing)"
 
     # Feed the loop via here-doc, NOT a pipe: a piped `while` runs in a subshell
     # so a losetup failure inside it would be invisible AND we must `die` before
