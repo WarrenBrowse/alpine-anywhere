@@ -319,6 +319,29 @@ exec > /dev/console 2>&1
 echo "[fakeinit] === PID 1 Takeover ==="
 echo "[fakeinit] PID: $$"
 
+# Load the install config EARLY (network values etc.) so even the pivot_root
+# failure path below can bring real networking up for recovery. Before pivot it
+# lives under the staged root; after, at /etc. Loading twice is harmless.
+for _cfg in /etc/alpine-anywhere/config.env /mnt/alpine/etc/alpine-anywhere/config.env; do
+    [ -f "$_cfg" ] && . "$_cfg" && break
+done
+
+# Best-effort: bring the detected interface up with its static IP (or DHCP) and
+# start SSH. Used by the recovery paths so a headless box stays reachable.
+_recover_net() {
+    /sbin/ifconfig lo 127.0.0.1 up 2>/dev/null || true
+    _ri="$NETWORK_INTERFACE"
+    [ -n "$_ri" ] && [ -e "/sys/class/net/$_ri" ] || _ri=$(for d in /sys/class/net/*; do b=$(basename "$d"); [ "$b" = lo ] || { echo "$b"; break; }; done)
+    if [ "$NETWORK_DHCP" = "true" ]; then
+        /sbin/udhcpc -i "$_ri" -b -q 2>/dev/null &
+    else
+        /sbin/ifconfig "$_ri" "$NETWORK_IP" netmask "$NETWORK_NETMASK" up 2>/dev/null
+        /sbin/route add default gw "$NETWORK_GATEWAY" 2>/dev/null || true
+    fi
+    /usr/sbin/dropbear -R -p 22 2>/dev/null || { mkdir -p /run/sshd; /usr/sbin/sshd 2>/dev/null; } || true
+    echo "[fakeinit] recovery net: iface=$_ri ip=$NETWORK_IP"
+}
+
 # Close all file descriptors > 2 to release old root references
 for fd in $(ls /proc/self/fd 2>/dev/null); do
     [ "$fd" -gt 2 ] && eval "exec ${fd}>&-" 2>/dev/null || true
@@ -336,15 +359,16 @@ mkdir -p ".${OLD_ROOT}"
 # The actual pivot_root - changes / for entire system
 echo "[fakeinit] Executing pivot_root..."
 if ! pivot_root . ".${OLD_ROOT}"; then
-    echo "[fakeinit] ERROR: pivot_root failed!"
-    # The old root is still mounted and reachable. Rather than dropping to a
-    # local-only shell (useless on a headless remote box), try to bring SSH
-    # back up from the OLD root so the operator can reconnect and recover, then
-    # fall back to a console shell.
-    /sbin/ifconfig lo 127.0.0.1 up 2>/dev/null || true
-    /usr/sbin/sshd 2>/dev/null || /usr/sbin/dropbear -R 2>/dev/null || true
-    echo "[fakeinit] pivot_root failed - SSH recovery attempted; dropping to /bin/sh"
-    exec /bin/sh
+    rc=$?
+    echo "[fakeinit] ERROR: pivot_root FAILED (rc=$rc) - this is the takeover failure point"
+    # Still on the OLD root. Bring REAL networking + SSH up (not just lo) so the
+    # operator can reconnect, and keep PID 1 alive with a console shell. Never
+    # `exec` a shell here: if its stdin EOFs, PID 1 exits and the kernel panics
+    # (reboots the box) before anyone can look.
+    _recover_net
+    echo "[fakeinit] pivot_root failed; SSH + console shell up. Reboot to recover the prior OS."
+    setsid sh -c 'exec sh </dev/console >/dev/console 2>&1' 2>/dev/null &
+    while true; do wait -n 2>/dev/null || sleep 1; done
 fi
 
 echo "[fakeinit] Pivot successful! Now in Alpine root."
