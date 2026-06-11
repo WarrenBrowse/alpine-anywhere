@@ -533,19 +533,16 @@ Describe 'partition safety (mounted gate + tolerant parted)'
     End
 
     Describe 'parted_tolerant()'
-        It 'tolerates the benign "unable to inform the kernel" re-read warning'
-            parted() { echo "Error: Partition(s) 2 on /dev/sdzz have been written, but we have been unable to inform the kernel of the change"; return 1; }
+        # Must NOT capture parted output via $(...) (would hang on a busy disk
+        # where parted's inform-kernel helper holds the pipe). Always succeeds;
+        # a genuinely failed parted is caught by the post-layout sfdisk -d check.
+        It 'tolerates parted exiting non-zero on a busy disk'
+            parted() { echo "...unable to inform the kernel..." >&2; return 1; }
             When call parted_tolerant /dev/sdzz mklabel gpt
             The status should be success
-            The stderr should include "loop devices"
+            The stderr should include "kernel re-read deferred"
         End
-        It 'still dies on a real parted error'
-            parted() { echo "Error: Could not stat device /dev/sdzz - No such file or directory."; return 1; }
-            When run parted_tolerant /dev/sdzz mklabel gpt
-            The status should be failure
-            The stderr should include "parted failed"
-        End
-        It 'passes a successful parted through'
+        It 'passes a successful parted through quietly'
             parted() { return 0; }
             When call parted_tolerant /dev/sdzz mklabel gpt
             The status should be success

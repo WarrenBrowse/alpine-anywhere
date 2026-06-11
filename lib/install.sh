@@ -224,20 +224,18 @@ Unmount them (or reboot) and retry. The disk has NOT been modified."
     fi
 }
 
-# Run a parted command, tolerating ONLY the benign "couldn't tell the kernel to
-# re-read the table" warning (the on-disk write still succeeded; loop devices then
-# access partitions by offset). Any other parted error is fatal.
+# Run a parted command, tolerating its non-zero exit on a disk the kernel can't
+# re-read (busy/stale after a pivot). The on-disk GPT write still succeeds.
+# CRITICAL: do NOT capture parted's output via $(...). On a busy disk parted forks
+# an "inform the kernel" helper that blocks holding parted's stdout; a command
+# substitution then waits forever for that pipe to close (the install hangs at
+# pipe_read). Inheriting fds (output straight to the install log) lets parted exit
+# while the helper lingers harmlessly. create_partition_layout validates the
+# resulting on-disk GPT afterwards, so a genuinely failed parted is caught there.
 parted_tolerant() {
-    local out rc
-    out=$(parted -s "$@" 2>&1); rc=$?
-    [ "$rc" -eq 0 ] && return 0
-    case "$out" in
-        *"unable to inform the kernel"*|*"unable to inform"*|*"have been written"*|*" in use"*|*"Resource busy"*|*"re-read"*)
-            log_warn "parted ($*): kernel re-read deferred, continuing via loop devices"
-            return 0 ;;
-        *)
-            die "parted failed ($*): $(printf '%s' "$out" | tr '\n' ' ')" ;;
-    esac
+    parted -s "$@" \
+        || log_warn "parted ($*) returned non-zero (kernel re-read deferred on a busy disk); on-disk GPT validated after all partitions"
+    return 0
 }
 
 # Create partition layout for A/B installation
