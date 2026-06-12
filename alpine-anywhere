@@ -257,13 +257,25 @@ run_remote_ab_install() {
 run_remote_upgrade() {
     setup_ssh_multiplexing
 
-    log_step "Step 1/3: SSH connection"
+    log_step "Step 1/4: SSH connection"
     test_ssh_connection
 
-    log_step "Step 2/3: Root access verification"
+    log_step "Step 2/4: Root access verification"
     check_root_access
 
-    log_step "Step 3/3: Running upgrade on remote"
+    # Step 3: Deploy the CURRENT scripts (incl. lib/initramfs/aa-resolve-root +
+    # init.aa) to the remote, exactly like install does. Without this the upgrade
+    # ran whatever stale/baked code happened to be on the node, and
+    # wrap_boot_initramfs could not find its initramfs payloads (/boot is not
+    # mounted at upgrade time) — so the new slot shipped a STOCK initramfs that
+    # cannot resolve root=PARTUUID= and died at boot with
+    #   mount ...: No such file or directory  (an unbootable, non-rolling-back slot).
+    # Deploying also sets INSTALL_BASE_DIR so run_on_remote executes the freshly
+    # deployed CLI rather than the baked one.
+    log_step "Step 3/4: Deploying scripts to remote"
+    deploy_scripts_to_remote
+
+    log_step "Step 4/4: Running upgrade on remote"
     run_on_remote "upgrade"
 
     show_upgrade_completion_message

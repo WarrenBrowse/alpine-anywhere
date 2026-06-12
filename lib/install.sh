@@ -1404,25 +1404,27 @@ wrap_boot_initramfs() {
         "/boot/alpine-anywhere/lib/initramfs/init.aa"; do
         [ -f "$cand" ] && { init_aa_src="$cand"; break; }
     done
-    [ -n "$init_aa_src" ] || { log_warn "init.aa source not found; skipping boot-guard"; rm -rf "$tmp"; return 0; }
+    # A missing source means we would ship an A/B slot with NO boot-guard. Combined
+    # with a missing PARTUUID resolver (the sources travel together) that slot dies
+    # in the initramfs and loops forever with no rollback — the exact field brick we
+    # hit when an upgrade ran stale/baked code. FAIL LOUDLY instead of silently
+    # skipping. (deploy_scripts_to_remote guarantees these are present on the node.)
+    [ -n "$init_aa_src" ] || { rm -rf "$tmp"; die "wrap_boot_initramfs: init.aa source not found (looked under SCRIPT_DIR/INSTALL_LIB_DIR/INSTALL_BASE_DIR//boot); refusing to build a guard-less A/B slot"; }
     require cp "$init_aa_src" "$tmp/sbin/init.aa"
     chmod +x "$tmp/sbin/init.aa"
 
-    # Insert the guard call on the line(s) before `exec ... switch_root`, once,
-    # preserving indentation. We pass the init's own $KOPT_root and $sysroot so
-    # the guard works even though /proc and /dev have been moved into $sysroot.
-    # awk (not `sed -i ...\n...`) so it's portable + idempotent. NOTE: $KOPT_root
-    # / $sysroot are LITERAL text emitted into /init (shell expands them at boot);
-    # inside an awk string literal `$` is not the field operator.
-    if ! grep -q '/sbin/init.aa' "$tmp/init"; then
-        awk '
-            /^[[:space:]]*exec .*switch_root/ {
-                match($0, /^[[:space:]]*/)
-                print substr($0, 1, RLENGTH) "/sbin/init.aa \"$KOPT_root\" \"$sysroot\" 2>/dev/null || true"
-            }
-            { print }
-        ' "$tmp/init" > "$tmp/init.aa.new" && mv "$tmp/init.aa.new" "$tmp/init"
-        chmod +x "$tmp/init"
+    # Locate the root-mount anchor up front: the real mkinitfs overlay path mounts
+    # $KOPT_root at /media/root-ro via `mkdir -p /media/root-ro`; the plain path
+    # mounts onto $sysroot. Both the PARTUUID resolver and the boot-guard inject
+    # BEFORE this line, so they run after nlplug-findfs but before the root mount.
+    # A fake/future init without a recognizable root mount falls back to anchoring
+    # the guard on `exec switch_root` (resolver injection is skipped — harmless for
+    # a direct root=/dev/... boot).
+    local rmount_anchor=""
+    if grep -qE '^[[:space:]]*mkdir -p /media/root-ro' "$tmp/init"; then
+        rmount_anchor='^[[:space:]]*mkdir -p /media/root-ro'
+    elif grep -qE 'mount .*\$sysroot' "$tmp/init"; then
+        rmount_anchor='mount .*\$sysroot'
     fi
 
     # PARTUUID resolver: copy aa-resolve-root and insert a call BEFORE the root
@@ -1431,21 +1433,11 @@ wrap_boot_initramfs() {
     # busybox mount/findfs only grok filesystem UUID=/LABEL=), so without this the
     # init mounts the literal "PARTUUID=..." string and dies with
     #   mount: ... on /media/root-ro failed: No such file or directory
-    # Must run AFTER nlplug-findfs has plugged the disk nodes and BEFORE both the
-    # verity-open and the root mount, so anchor on the same root-mount line and
-    # inject this pass FIRST (verity's pass below then lands between us and the
-    # mount, using the node we resolved). On resolution failure aa-resolve-root
-    # prints nothing and KOPT_root is left as-is (boot behaviour unchanged).
-    # Locate a root-mount anchor (the real mkinitfs overlay path mounts $KOPT_root
-    # at /media/root-ro; the plain path mounts onto $sysroot). Best-effort: a fake
-    # or future init without a recognizable root mount just skips the resolver
-    # injection (boot behaviour unchanged) rather than failing the wrap.
-    local rmount_anchor=""
-    if grep -qE '^[[:space:]]*mkdir -p /media/root-ro' "$tmp/init"; then
-        rmount_anchor='^[[:space:]]*mkdir -p /media/root-ro'
-    elif grep -qE 'mount .*\$sysroot' "$tmp/init"; then
-        rmount_anchor='mount .*\$sysroot'
-    fi
+    # Inject this pass FIRST so its line ends up ABOVE the boot-guard's (the guard
+    # then derives the slot/disk from the already-resolved $KOPT_root) and ABOVE
+    # verity's (which lands between us and the mount, using the node we resolved).
+    # On resolution failure aa-resolve-root prints nothing and KOPT_root is left
+    # as-is (boot behaviour unchanged).
     if [ -n "$rmount_anchor" ]; then
         local rr_src=""
         for cand in \
@@ -1455,25 +1447,57 @@ wrap_boot_initramfs() {
             "/boot/alpine-anywhere/lib/initramfs/aa-resolve-root"; do
             [ -f "$cand" ] && { rr_src="$cand"; break; }
         done
-        if [ -n "$rr_src" ]; then
-            require cp "$rr_src" "$tmp/sbin/aa-resolve-root"
-            chmod +x "$tmp/sbin/aa-resolve-root"
-            if ! grep -q '/sbin/aa-resolve-root' "$tmp/init"; then
-                awk -v anchor="$rmount_anchor" '
-                    $0 ~ anchor && !done {
-                        match($0, /^[[:space:]]*/); ind=substr($0, 1, RLENGTH)
-                        print ind "if [ -n \"$KOPT_root\" ]; then _aart=$(/sbin/aa-resolve-root \"$KOPT_root\" 2>/dev/null); [ -n \"$_aart\" ] && KOPT_root=\"$_aart\" && root=\"$_aart\"; fi"
-                        done=1
-                    }
-                    { print }
-                ' "$tmp/init" > "$tmp/init.rr.new" && mv "$tmp/init.rr.new" "$tmp/init"
-                chmod +x "$tmp/init"
-            fi
-        else
-            log_warn "aa-resolve-root source not found; root=PARTUUID may be unresolvable in the initramfs"
+        # Every x86_64 slot (and our RPi installs) boot root=PARTUUID; a missing
+        # resolver makes that root unmountable. Fail rather than ship the brick.
+        [ -n "$rr_src" ] || { rm -rf "$tmp"; die "wrap_boot_initramfs: aa-resolve-root source not found; a root=PARTUUID slot would be unbootable"; }
+        require cp "$rr_src" "$tmp/sbin/aa-resolve-root"
+        chmod +x "$tmp/sbin/aa-resolve-root"
+        if ! grep -q '/sbin/aa-resolve-root' "$tmp/init"; then
+            awk -v anchor="$rmount_anchor" '
+                $0 ~ anchor && !done {
+                    match($0, /^[[:space:]]*/); ind=substr($0, 1, RLENGTH)
+                    print ind "if [ -n \"$KOPT_root\" ]; then _aart=$(/sbin/aa-resolve-root \"$KOPT_root\" 2>/dev/null); [ -n \"$_aart\" ] && KOPT_root=\"$_aart\" && root=\"$_aart\"; fi"
+                    done=1
+                }
+                { print }
+            ' "$tmp/init" > "$tmp/init.rr.new" && mv "$tmp/init.rr.new" "$tmp/init"
+            chmod +x "$tmp/init"
         fi
     else
         log_warn "no root-mount anchor in init; skipping PARTUUID resolver injection"
+    fi
+
+    # A/B boot-guard: insert the init.aa call BEFORE the root mount (right after the
+    # resolver) when an anchor exists, else fall back to right before switch_root.
+    # Pre-mount placement is what makes rollback survive an initramfs ROOT-MOUNT
+    # failure: init.aa bumps the slot's boot counter every boot, so a slot whose
+    # squashfs/PARTUUID will not mount still rolls back after its retry budget
+    # instead of looping forever. (Previously the guard sat after the mount, so a
+    # mount failure killed the init before the counter ever advanced — exactly why
+    # the broken upgrade reboot-looped instead of falling back.) We still pass the
+    # init's own $KOPT_root and $sysroot (LITERAL text expanded at boot; pre-mount,
+    # $sysroot is just an unmounted path and init.aa falls back to /proc/cmdline).
+    # awk (not `sed -i`) so it is portable + idempotent.
+    if ! grep -q '/sbin/init.aa' "$tmp/init"; then
+        if [ -n "$rmount_anchor" ]; then
+            awk -v anchor="$rmount_anchor" '
+                $0 ~ anchor && !done {
+                    match($0, /^[[:space:]]*/); ind=substr($0, 1, RLENGTH)
+                    print ind "/sbin/init.aa \"$KOPT_root\" \"$sysroot\" 2>/dev/null || true"
+                    done=1
+                }
+                { print }
+            ' "$tmp/init" > "$tmp/init.aa.new" && mv "$tmp/init.aa.new" "$tmp/init"
+        else
+            awk '
+                /^[[:space:]]*exec .*switch_root/ {
+                    match($0, /^[[:space:]]*/)
+                    print substr($0, 1, RLENGTH) "/sbin/init.aa \"$KOPT_root\" \"$sysroot\" 2>/dev/null || true"
+                }
+                { print }
+            ' "$tmp/init" > "$tmp/init.aa.new" && mv "$tmp/init.aa.new" "$tmp/init"
+        fi
+        chmod +x "$tmp/init"
     fi
 
     # dm-verity: copy aa-verity-open and insert a call BEFORE the root mount so

@@ -477,6 +477,51 @@ exit 0'
             The output should include "RESOLVER_AFTER_NLPLUG_BEFORE_MOUNT"
             The output should include "RESOLVER_CALLS=1"
         End
+
+        # The boot-guard must be injected BEFORE the root mount (not merely before
+        # switch_root) so a slot whose root fails to MOUNT still bumps its boot
+        # counter and rolls back instead of looping forever. Order must be:
+        # resolver -> guard -> root mount.
+        wrap_guard_premount_inspect() {
+            VERITY_MODE=off
+            {
+                printf '#!/bin/sh\n'
+                printf 'nlplug-findfs -p /sbin/mdev $KOPT_root\n'
+                printf 'mkdir -p /media/root-ro /media/root-rw $sysroot/media/root-ro\n'
+                printf 'mount -t squashfs -o ro $KOPT_root /media/root-ro\n'
+                printf 'mount -t overlay -o lowerdir=/media/root-ro overlayfs $sysroot\n'
+                printf 'exec switch_root $sysroot /sbin/init "$@"\n'
+            } > "$SRC/init"
+            chmod +x "$SRC/init"
+            ( cd "$SRC" && find . | cpio -o -H newc 2>/dev/null | gzip ) > "$WD/initramfs"
+            wrap_boot_initramfs "$WD/initramfs" >/dev/null 2>&1
+            rm -rf "$WD/out"; mkdir -p "$WD/out"
+            ( cd "$WD/out" && gzip -dc "$WD/initramfs" | cpio -idm 2>/dev/null )
+            awk '/aa-resolve-root/{r=NR} /\/sbin\/init\.aa/{g=NR} /mount .*\/media\/root-ro/{m=NR} END{ if (r>0 && g>r && m>0 && g<m) print "GUARD_AFTER_RESOLVER_BEFORE_MOUNT" }' "$WD/out/init"
+            echo "GUARD_CALLS=$(grep -c '/sbin/init.aa' "$WD/out/init")"
+        }
+
+        It 'injects the boot-guard after the resolver and before the root mount'
+            command -v cpio >/dev/null 2>&1 || Skip "cpio not available"
+            When call wrap_guard_premount_inspect
+            The output should include "GUARD_AFTER_RESOLVER_BEFORE_MOUNT"
+            The output should include "GUARD_CALLS=1"
+        End
+
+        # A missing boot-guard source must FAIL the build, not silently ship a
+        # guard-less, PARTUUID-unresolvable (i.e. unbootable) slot.
+        wrap_missing_src() {
+            SCRIPT_DIR=$(mktemp -d)        # contains no lib/initramfs
+            INSTALL_LIB_DIR=""; INSTALL_BASE_DIR=""
+            wrap_boot_initramfs "$WD/initramfs"
+        }
+
+        It 'fails loudly when the init.aa boot-guard source is missing'
+            command -v cpio >/dev/null 2>&1 || Skip "cpio not available"
+            When run wrap_missing_src
+            The status should be failure
+            The stderr should include "init.aa source not found"
+        End
     End
 
     Describe 'persist_host_keys()'
