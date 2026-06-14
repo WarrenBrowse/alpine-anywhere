@@ -319,5 +319,26 @@ EOF
         || die "s6-linux-init-maker failed"
 
     ln -sf /etc/s6-linux-init/current/bin/init "${root}/sbin/init"
-    log_info "s6 init configured (PID 1 = s6-linux-init, services via s6-rc)"
+
+    # Route the standard shutdown commands to s6-linux-init-shutdownd. Alpine's
+    # /sbin/{reboot,halt,poweroff} are busybox applets that signal PID 1 — but
+    # PID 1 here is s6-svscan, which ignores that signal, so `reboot` is a SILENT
+    # NO-OP (the box never reboots: breaks upgrade activation AND auto-rollback).
+    # The maker emits working reboot/halt/poweroff/shutdown in the basedir bin;
+    # point /sbin at them (fallback: a wrapper around s6-linux-init-hpr).
+    for _c in reboot halt poweroff shutdown; do
+        if [ -e "${root}/etc/s6-linux-init/current/bin/${_c}" ]; then
+            ln -sf "/etc/s6-linux-init/current/bin/${_c}" "${root}/sbin/${_c}"
+        else
+            case "$_c" in
+                reboot)   _f="-r" ;;
+                poweroff) _f="-p" ;;
+                halt)     _f="-h" ;;
+                *)        _f="-r" ;;
+            esac
+            printf '#!/bin/sh\nexec s6-linux-init-hpr %s "$@"\n' "$_f" > "${root}/sbin/${_c}"
+            chmod +x "${root}/sbin/${_c}"
+        fi
+    done
+    log_info "s6 init configured (PID 1 = s6-linux-init, services via s6-rc, shutdown wired)"
 }

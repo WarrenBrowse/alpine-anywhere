@@ -1061,6 +1061,12 @@ install_aa_cli() {
 exec ${AA_TOOL_DIR}/alpine-anywhere "\$@"
 EOF
     chmod +x "${root}/usr/local/bin/aa"
+    # The dropbear (hardened) login PATH is /usr/sbin:/usr/bin:/sbin:/bin and
+    # does NOT include /usr/local/bin, so an interactive `aa` would be "not
+    # found". Symlink it into /usr/sbin (which IS on PATH) so `aa status` works
+    # over SSH without the operator typing the full path.
+    mkdir -p "${root}/usr/sbin"
+    ln -sf /usr/local/bin/aa "${root}/usr/sbin/aa"
 }
 
 # Bake the `aa` command + A/B services into the image so the installed system can

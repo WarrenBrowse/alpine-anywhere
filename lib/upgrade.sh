@@ -333,9 +333,11 @@ rollback_slot() {
     switch_slot "$previous"
     umount_boot
     log_info "Rolled back to slot $previous. Rebooting..."
-    # -f: rollback can run from the PID 1 boot-guard shim (before the real init),
-    # where signalling a normal reboot would have nothing to handle it.
-    reboot -f 2>/dev/null || reboot
+    # Force the reboot(2) syscall directly via busybox: rollback can run from the
+    # PID 1 boot-guard shim (before the real init), where the normal /sbin/reboot
+    # (now wired to s6-linux-init-shutdownd) has no shutdownd fifo to talk to yet.
+    # busybox `reboot -f` bypasses init entirely. Fallbacks cover odd images.
+    busybox reboot -f 2>/dev/null || reboot -f 2>/dev/null || reboot
 }
 
 # =============================================================================
@@ -394,7 +396,15 @@ show_status() {
     local running boot_slot boot_root
     running=$(get_current_slot)                                    # slot we're executing
     boot_slot=$(cat "${BOOT_MNT}/current_slot" 2>/dev/null || echo "?")   # slot configured for next boot
-    boot_root=$(sed -n 's/.*\(root=[^ ]*\).*/\1/p' "${BOOT_MNT}/cmdline.txt" 2>/dev/null)
+    # Next-boot root= lives in cmdline.txt (RPi bootloader) OR extlinux.conf
+    # (x86/extlinux). Read whichever exists; never abort (set -e) when the
+    # RPi-style file is absent on an extlinux host (this is what made `aa status`
+    # exit 1 with no output on the bare-metal exit).
+    local boot_cfg=""
+    [ -f "${BOOT_MNT}/cmdline.txt" ] && boot_cfg="${BOOT_MNT}/cmdline.txt"
+    [ -z "$boot_cfg" ] && [ -f "${BOOT_MNT}/extlinux/extlinux.conf" ] && boot_cfg="${BOOT_MNT}/extlinux/extlinux.conf"
+    boot_root=""
+    [ -n "$boot_cfg" ] && boot_root=$(sed -n 's/.*\(root=[^ ]*\).*/\1/p' "$boot_cfg" 2>/dev/null | head -n1) || true
 
     echo "Alpine Anywhere A/B Status"
     echo "=========================="

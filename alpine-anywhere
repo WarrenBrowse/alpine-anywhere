@@ -147,7 +147,11 @@ run_slot_action() {
         return $?
     fi
 
-    # Local: operate on this installed device.
+    # Local: operate on this installed device. Guarantee the boot partition is
+    # never LEFT mounted on the running system (the user must never see
+    # /dev/sdX1 lingering on /mnt/aa-boot post-boot): an EXIT trap unmounts it
+    # on every exit path - normal return, die, or a `set -e` abort mid-action.
+    trap 'umount_boot 2>/dev/null || true' EXIT INT TERM
     case "$SLOT_ACTION" in
         status)    show_status ;;
         verify)    verify_current_slot ;;
