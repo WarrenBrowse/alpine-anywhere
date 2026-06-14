@@ -22,6 +22,16 @@ EXTRA_PACKAGES="${EXTRA_PACKAGES:-}"
 CUSTOM_SCRIPT="${CUSTOM_SCRIPT:-}"        # User script run inside the image chroot at build
 CUSTOM_FILES="${CUSTOM_FILES:-}"          # File or dir staged into the chroot ($AA_CUSTOM_FILES_DIR) for the custom script
 SSH_HOST_KEY_DIR="${SSH_HOST_KEY_DIR:-}"  # Control-host dir holding SSH host keys to bake in
+# Network override/add inputs (empty = use the live-detected value as-is).
+# Each accepts ADDR/PREFIX; gateways are bare addresses. IPv6 overrides let
+# you ADD v6 to a v4-only host (e.g. an FDC box given a static /64) without
+# any v6 on the source system. See apply_network_overrides().
+IPV4_OVERRIDE="${IPV4_OVERRIDE:-}"            # e.g. 203.0.113.5/29 (overrides detected v4 addr/prefix)
+IPV4_GATEWAY_OVERRIDE="${IPV4_GATEWAY_OVERRIDE:-}"
+IPV6_OVERRIDE="${IPV6_OVERRIDE:-}"            # e.g. 2001:db8::2/64 (adds/overrides v6 addr/prefix)
+IPV6_GATEWAY_OVERRIDE="${IPV6_GATEWAY_OVERRIDE:-}"
+DNS_OVERRIDE="${DNS_OVERRIDE:-}"              # space/comma-separated resolvers
+ASSUME_YES="${ASSUME_YES:-false}"             # bypass the pre-pivot access-confirmation step (non-interactive deploy)
 REBOOT_DELAY="${REBOOT_DELAY:-5}"
 TARGET_HOST="${TARGET_HOST:-}"
 TARGET_USER="${TARGET_USER:-}"
@@ -65,6 +75,9 @@ DETECTED_IP_ADDRESS=""
 DETECTED_NETMASK=""
 DETECTED_CIDR=""
 DETECTED_GATEWAY=""
+DETECTED_IPV6_ADDRESS=""
+DETECTED_IPV6_CIDR=""
+DETECTED_IPV6_GATEWAY=""
 DETECTED_DNS=""
 DETECTED_HOSTNAME=""
 DETECTED_ARCH=""
@@ -567,6 +580,17 @@ Image customization:
                                    override). Default: reuse the keys already in use on
                                    the building system so identity is stable across A/B.
 
+Network (defaults: captured live from the running kernel - the REAL active
+config, whatever set it: systemd, openrc, s6, or a manual ip command):
+  --ipv4 ADDR/PREFIX             Override the detected IPv4 (e.g. 203.0.113.5/29)
+  --ipv4-gateway ADDR            Override the detected IPv4 gateway
+  --ipv6 ADDR/PREFIX             Add or override IPv6 (e.g. 2001:db8::2/64). Lets
+                                   you give v6 to a v4-only host (FDC static /64)
+  --ipv6-gateway ADDR            IPv6 gateway (e.g. 2001:db8::1)
+  --dns "S1 S2"                  Override resolvers (space/comma-separated)
+  -y, --yes                      Skip the pre-pivot access confirmation (for the
+                                   warren deploy script / non-interactive runs)
+
 Init system:
   --init SYSTEM                  Init/service manager: openrc or s6
                                    (default: s6 in --hardened mode, else openrc)
@@ -882,6 +906,28 @@ parse_arguments() {
                 INIT_SYSTEM="${1#*=}"
                 shift
                 ;;
+            --ipv4)
+                IPV4_OVERRIDE="$2"; shift 2 ;;
+            --ipv4=*)
+                IPV4_OVERRIDE="${1#*=}"; shift ;;
+            --ipv4-gateway)
+                IPV4_GATEWAY_OVERRIDE="$2"; shift 2 ;;
+            --ipv4-gateway=*)
+                IPV4_GATEWAY_OVERRIDE="${1#*=}"; shift ;;
+            --ipv6)
+                IPV6_OVERRIDE="$2"; shift 2 ;;
+            --ipv6=*)
+                IPV6_OVERRIDE="${1#*=}"; shift ;;
+            --ipv6-gateway)
+                IPV6_GATEWAY_OVERRIDE="$2"; shift 2 ;;
+            --ipv6-gateway=*)
+                IPV6_GATEWAY_OVERRIDE="${1#*=}"; shift ;;
+            --dns)
+                DNS_OVERRIDE="$2"; shift 2 ;;
+            --dns=*)
+                DNS_OVERRIDE="${1#*=}"; shift ;;
+            -y|--yes|--assume-yes)
+                ASSUME_YES=true; shift ;;
             -h|--help)
                 show_usage
                 exit 0

@@ -1585,33 +1585,15 @@ configure_system_image() {
     # Hostname
     echo "${DETECTED_HOSTNAME}" > "${root}/etc/hostname"
 
-    # Network
+    # Network (v4 + optional v6, shared generator with the s6 path)
     mkdir -p "${root}/etc/network"
-    if [ "$NETWORK_IS_DHCP" = "true" ]; then
-        cat > "${root}/etc/network/interfaces" << EOF
-auto lo
-iface lo inet loopback
+    generate_interfaces_config > "${root}/etc/network/interfaces"
 
-auto ${DETECTED_INTERFACE}
-iface ${DETECTED_INTERFACE} inet dhcp
-EOF
-    else
-        cat > "${root}/etc/network/interfaces" << EOF
-auto lo
-iface lo inet loopback
-
-auto ${DETECTED_INTERFACE}
-iface ${DETECTED_INTERFACE} inet static
-    address ${DETECTED_IP_ADDRESS}
-    netmask ${DETECTED_NETMASK}
-    gateway ${DETECTED_GATEWAY}
-EOF
-    fi
-
-    # DNS
-    cat > "${root}/etc/resolv.conf" << EOF
-nameserver ${DETECTED_DNS%% *}
-EOF
+    # DNS (all detected/overridden resolvers, not just the first)
+    : > "${root}/etc/resolv.conf"
+    for _dns in $DETECTED_DNS; do
+        echo "nameserver ${_dns}" >> "${root}/etc/resolv.conf"
+    done
 
     # Enable services (OpenRC only; s6 services are defined in setup_s6_init)
     if [ "$INIT_SYSTEM" = "openrc" ]; then

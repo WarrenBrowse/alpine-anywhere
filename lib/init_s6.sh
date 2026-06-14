@@ -80,34 +80,83 @@ EOF
     # baked name can be wrong. Prefer the detected name if present, else bring
     # all non-lo links up and pick the one with carrier (the cabled port), else
     # the first non-lo. Keeps the box reachable across host/runtime naming.
-    if [ "$NETWORK_IS_DHCP" = "true" ]; then
-        cat > "${hd}/network-up" << EOF
+    cat > "${hd}/network-up" << EOF
 #!/bin/sh
+# Baked by alpine-anywhere. Configures networking through ifupdown:
+# regenerates /etc/network/interfaces from the values below (for this boot's
+# resolved interface) then runs ifup. A direct-ip safety net follows so a
+# misbehaving/absent ifupdown can never strand a remotely-installed box.
+#
+# Configurable without rebaking: drop /etc/alpine-anywhere/network.conf
+# (same AA_NET_* vars) on a persistent overlay and it is sourced here.
+AA_NET_DHCP="${NETWORK_IS_DHCP}"
+AA_NET_IF="${DETECTED_INTERFACE}"
+AA_NET_V4_ADDR="${DETECTED_IP_ADDRESS}"
+AA_NET_V4_NETMASK="${DETECTED_NETMASK}"
+AA_NET_V4_GW="${DETECTED_GATEWAY}"
+AA_NET_V6_ADDR="${DETECTED_IPV6_ADDRESS}"
+AA_NET_V6_CIDR="${DETECTED_IPV6_CIDR}"
+AA_NET_V6_GW="${DETECTED_IPV6_GATEWAY}"
+
+[ -r /etc/alpine-anywhere/network.conf ] && . /etc/alpine-anywhere/network.conf
+
 ifconfig lo 127.0.0.1 up 2>/dev/null || true
-IF="${DETECTED_INTERFACE}"
+
+# Resolve the interface: the baked name may differ from this image's kernel
+# naming, so fall back to the carrier-up port, else the first non-lo.
+IF="\$AA_NET_IF"
 if [ ! -e "/sys/class/net/\$IF" ]; then
     for d in /sys/class/net/*; do b=\${d##*/}; [ "\$b" = lo ] && continue; ifconfig "\$b" up 2>/dev/null || true; done
     sleep 3; IF=""
     for d in /sys/class/net/*; do b=\${d##*/}; [ "\$b" = lo ] && continue; [ "\$(cat \$d/carrier 2>/dev/null)" = 1 ] && { IF="\$b"; break; }; done
     [ -n "\$IF" ] || for d in /sys/class/net/*; do b=\${d##*/}; [ "\$b" = lo ] || { IF="\$b"; break; }; done
 fi
-udhcpc -i "\$IF" -b -q 2>/dev/null || true
-EOF
+
+# Regenerate /etc/network/interfaces for the resolved interface (v4 + opt v6).
+mkdir -p /etc/network
+{
+    echo "auto lo"
+    echo "iface lo inet loopback"
+    echo ""
+    echo "auto \$IF"
+    if [ "\$AA_NET_DHCP" = "true" ]; then
+        echo "iface \$IF inet dhcp"
     else
-        cat > "${hd}/network-up" << EOF
-#!/bin/sh
-ifconfig lo 127.0.0.1 up 2>/dev/null || true
-IF="${DETECTED_INTERFACE}"
-if [ ! -e "/sys/class/net/\$IF" ]; then
-    for d in /sys/class/net/*; do b=\${d##*/}; [ "\$b" = lo ] && continue; ifconfig "\$b" up 2>/dev/null || true; done
-    sleep 3; IF=""
-    for d in /sys/class/net/*; do b=\${d##*/}; [ "\$b" = lo ] && continue; [ "\$(cat \$d/carrier 2>/dev/null)" = 1 ] && { IF="\$b"; break; }; done
-    [ -n "\$IF" ] || for d in /sys/class/net/*; do b=\${d##*/}; [ "\$b" = lo ] || { IF="\$b"; break; }; done
-fi
-ifconfig "\$IF" "${DETECTED_IP_ADDRESS}" netmask "${DETECTED_NETMASK}" up 2>/dev/null || true
-route add default gw "${DETECTED_GATEWAY}" 2>/dev/null || true
-EOF
+        echo "iface \$IF inet static"
+        echo "    address \$AA_NET_V4_ADDR"
+        echo "    netmask \$AA_NET_V4_NETMASK"
+        echo "    gateway \$AA_NET_V4_GW"
     fi
+    if [ -n "\$AA_NET_V6_ADDR" ]; then
+        echo ""
+        echo "iface \$IF inet6 static"
+        echo "    address \$AA_NET_V6_ADDR"
+        echo "    netmask \${AA_NET_V6_CIDR:-64}"
+        [ -n "\$AA_NET_V6_GW" ] && echo "    gateway \$AA_NET_V6_GW"
+    fi
+} > /etc/network/interfaces
+
+# Primary path: ifupdown.
+if command -v ifup >/dev/null 2>&1; then
+    ifup -a 2>/dev/null || ifup "\$IF" 2>/dev/null || true
+fi
+
+# Safety net (never lose remote access): if v4 is still unset, apply directly.
+if ! ip -4 addr show dev "\$IF" 2>/dev/null | grep -q 'inet '; then
+    if [ "\$AA_NET_DHCP" = "true" ]; then
+        udhcpc -i "\$IF" -b -q 2>/dev/null || true
+    else
+        ifconfig "\$IF" "\$AA_NET_V4_ADDR" netmask "\$AA_NET_V4_NETMASK" up 2>/dev/null || true
+        route add default gw "\$AA_NET_V4_GW" 2>/dev/null || true
+    fi
+fi
+
+# IPv6 safety net.
+if [ -n "\$AA_NET_V6_ADDR" ] && ! ip -6 addr show dev "\$IF" scope global 2>/dev/null | grep -q inet6; then
+    ip -6 addr add "\$AA_NET_V6_ADDR/\${AA_NET_V6_CIDR:-64}" dev "\$IF" 2>/dev/null || true
+    [ -n "\$AA_NET_V6_GW" ] && ip -6 route add default via "\$AA_NET_V6_GW" dev "\$IF" 2>/dev/null || true
+fi
+EOF
 
     cat > "${hd}/verify" << 'EOF'
 #!/bin/sh

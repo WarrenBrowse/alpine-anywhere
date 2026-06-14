@@ -304,6 +304,12 @@ run_local_ab_install() {
         [ -n "$TARGET_DISK" ] && sudo_args="$sudo_args --disk=$TARGET_DISK"
         [ -n "$INIT_SYSTEM" ] && sudo_args="$sudo_args --init=$INIT_SYSTEM"
         [ -n "$TARGET_SLOT" ] && sudo_args="$sudo_args --slot=$TARGET_SLOT"
+        [ -n "$IPV4_OVERRIDE" ] && sudo_args="$sudo_args --ipv4=$IPV4_OVERRIDE"
+        [ -n "$IPV4_GATEWAY_OVERRIDE" ] && sudo_args="$sudo_args --ipv4-gateway=$IPV4_GATEWAY_OVERRIDE"
+        [ -n "$IPV6_OVERRIDE" ] && sudo_args="$sudo_args --ipv6=$IPV6_OVERRIDE"
+        [ -n "$IPV6_GATEWAY_OVERRIDE" ] && sudo_args="$sudo_args --ipv6-gateway=$IPV6_GATEWAY_OVERRIDE"
+        [ -n "$DNS_OVERRIDE" ] && sudo_args="$sudo_args --dns=$DNS_OVERRIDE"
+        [ "$ASSUME_YES" = "true" ] && sudo_args="$sudo_args --yes"
         exec sudo -E sh "$0" $sudo_args
     fi
 
@@ -409,6 +415,9 @@ run_local_ab_install() {
     # Setup pivot environment and execute pivot
     # The pivot script will continue the installation from within Alpine
     setup_pivot_environment
+    # Last chance to verify the baked network/SSH config before we lose the
+    # current connectivity (bypassed by -y/--yes for non-interactive deploy).
+    confirm_access_before_pivot
     execute_pivot
 
     # If we get here, the pivot is running in background
@@ -547,6 +556,7 @@ run_local_installation() {
     # Step 5: Pivot to Alpine in RAM
     log_step "Step 5/5: Pivot to Alpine (RAM-only)"
     setup_pivot_environment
+    confirm_access_before_pivot
     execute_pivot
 
     log_info "Pivot complete. Alpine Linux is running from RAM."

@@ -237,6 +237,12 @@ run_on_remote() {
     [ -n "$TARGET_DISK" ] && remote_cmd="$remote_cmd --disk=$(shell_quote "$TARGET_DISK")"
     [ -n "$INIT_SYSTEM" ] && remote_cmd="$remote_cmd --init=$(shell_quote "$INIT_SYSTEM")"
     [ -n "$TARGET_SLOT" ] && remote_cmd="$remote_cmd --slot=$(shell_quote "$TARGET_SLOT")"
+    [ -n "$IPV4_OVERRIDE" ] && remote_cmd="$remote_cmd --ipv4=$(shell_quote "$IPV4_OVERRIDE")"
+    [ -n "$IPV4_GATEWAY_OVERRIDE" ] && remote_cmd="$remote_cmd --ipv4-gateway=$(shell_quote "$IPV4_GATEWAY_OVERRIDE")"
+    [ -n "$IPV6_OVERRIDE" ] && remote_cmd="$remote_cmd --ipv6=$(shell_quote "$IPV6_OVERRIDE")"
+    [ -n "$IPV6_GATEWAY_OVERRIDE" ] && remote_cmd="$remote_cmd --ipv6-gateway=$(shell_quote "$IPV6_GATEWAY_OVERRIDE")"
+    [ -n "$DNS_OVERRIDE" ] && remote_cmd="$remote_cmd --dns=$(shell_quote "$DNS_OVERRIDE")"
+    [ "$ASSUME_YES" = "true" ] && remote_cmd="$remote_cmd --yes"
     [ -n "$remote_custom_script" ] && remote_cmd="$remote_cmd --custom-script=$(shell_quote "$remote_custom_script")"
     [ -n "$remote_custom_files" ] && remote_cmd="$remote_cmd --custom-files=$(shell_quote "$remote_custom_files")"
     [ -n "$remote_host_key_dir" ] && remote_cmd="$remote_cmd --ssh-host-keys=$(shell_quote "$remote_host_key_dir")"
@@ -279,6 +285,24 @@ detect_local_network() {
     # Gateway
     DETECTED_GATEWAY=$(ip route show default 2>/dev/null | head -1 | awk '{print $3}')
     log_info "Detected gateway: $DETECTED_GATEWAY"
+
+    # IPv6 (optional - many hosts are v4-only). Read the live kernel state:
+    # the actual global unicast on the interface + the default v6 route. This
+    # is the REAL active config whatever configured it (systemd-networkd,
+    # ifupdown, NetworkManager, or a manual `ip` command). Skip tentative /
+    # dadfailed / deprecated addresses (unusable - e.g. a DAD conflict) so we
+    # never bake an address the kernel has rejected.
+    local v6_info
+    v6_info=$(ip -6 addr show dev "$DETECTED_INTERFACE" scope global 2>/dev/null \
+        | awk '/inet6/ && !/tentative/ && !/dadfailed/ && !/deprecated/ {print $2; exit}')
+    if [ -n "$v6_info" ]; then
+        DETECTED_IPV6_ADDRESS="${v6_info%/*}"
+        DETECTED_IPV6_CIDR="${v6_info#*/}"
+        DETECTED_IPV6_GATEWAY=$(ip -6 route show default 2>/dev/null | awk '/default via/ {print $3; exit}')
+        log_info "Detected IPv6: $DETECTED_IPV6_ADDRESS/$DETECTED_IPV6_CIDR via ${DETECTED_IPV6_GATEWAY:-(none)}"
+    else
+        log_info "No global IPv6 detected (v4-only host)"
+    fi
 
     # DNS
     DETECTED_DNS=$(grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' | head -3 | tr '\n' ' ' | xargs)
@@ -338,6 +362,10 @@ detect_local_network() {
 
     # Reject crafted values before they reach the kernel cmdline / remote shell.
     validate_safe_inputs
+
+    # Apply any --ipv4/--ipv6/--dns overrides on top of the live-detected
+    # config (re-validates). This is also where v6 is ADDED to a v4-only host.
+    apply_network_overrides
 }
 
 # =============================================================================

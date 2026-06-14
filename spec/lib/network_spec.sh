@@ -76,6 +76,117 @@ Describe 'network.sh'
         End
     End
 
+    Describe 'generate_interfaces_config() IPv6'
+        Context 'static v4 + v6'
+            setup() {
+                DETECTED_INTERFACE="eth0"
+                DETECTED_IP_ADDRESS="50.7.46.90"
+                DETECTED_NETMASK="255.255.255.248"
+                DETECTED_GATEWAY="50.7.46.89"
+                NETWORK_IS_DHCP=false
+                DETECTED_IPV6_ADDRESS="2001:49f0:d086:1003::2"
+                DETECTED_IPV6_CIDR="64"
+                DETECTED_IPV6_GATEWAY="2001:49f0:d086:1003::1"
+            }
+            Before 'setup'
+
+            It 'emits an inet6 static stanza'
+                When call generate_interfaces_config
+                The output should include 'inet6 static'
+            End
+            It 'includes the v6 address'
+                When call generate_interfaces_config
+                The output should include 'address 2001:49f0:d086:1003::2'
+            End
+            It 'includes the v6 netmask (prefix)'
+                When call generate_interfaces_config
+                The output should include 'netmask 64'
+            End
+            It 'includes the v6 gateway'
+                When call generate_interfaces_config
+                The output should include 'gateway 2001:49f0:d086:1003::1'
+            End
+            It 'still emits the v4 static stanza'
+                When call generate_interfaces_config
+                The output should include 'address 50.7.46.90'
+            End
+            It 'honors a runtime interface override argument'
+                When call generate_interfaces_config wlan0
+                The output should include 'auto wlan0'
+            End
+        End
+
+        Context 'v4-only host (no v6)'
+            setup() {
+                DETECTED_INTERFACE="eth0"
+                DETECTED_IP_ADDRESS="203.0.113.5"
+                DETECTED_NETMASK="255.255.255.0"
+                DETECTED_GATEWAY="203.0.113.1"
+                NETWORK_IS_DHCP=false
+                DETECTED_IPV6_ADDRESS=""
+            }
+            Before 'setup'
+
+            It 'emits no inet6 stanza when v6 is absent'
+                When call generate_interfaces_config
+                The output should not include 'inet6'
+            End
+        End
+    End
+
+    Describe 'apply_network_overrides()'
+        Include lib/validate.sh
+        setup() {
+            DETECTED_INTERFACE="eth0"
+            DETECTED_IP_ADDRESS="203.0.113.5"
+            DETECTED_CIDR="24"
+            DETECTED_NETMASK="255.255.255.0"
+            DETECTED_GATEWAY="203.0.113.1"
+            NETWORK_IS_DHCP=false
+            DETECTED_DNS="8.8.8.8"
+            DETECTED_HOSTNAME="host"
+            DETECTED_IPV6_ADDRESS=""
+            DETECTED_IPV6_CIDR=""
+            DETECTED_IPV6_GATEWAY=""
+            IPV4_OVERRIDE=""; IPV4_GATEWAY_OVERRIDE=""
+            IPV6_OVERRIDE=""; IPV6_GATEWAY_OVERRIDE=""; DNS_OVERRIDE=""
+        }
+        Before 'setup'
+
+        It 'adds IPv6 to a v4-only host (FDC case)'
+            IPV6_OVERRIDE="2001:db8::2/64"
+            IPV6_GATEWAY_OVERRIDE="2001:db8::1"
+            When call apply_network_overrides
+            The variable DETECTED_IPV6_ADDRESS should equal '2001:db8::2'
+            The variable DETECTED_IPV6_CIDR should equal '64'
+            The variable DETECTED_IPV6_GATEWAY should equal '2001:db8::1'
+            The stderr should be present
+        End
+
+        It 'defaults the v6 prefix to 64 when omitted'
+            IPV6_OVERRIDE="2001:db8::2"
+            When call apply_network_overrides
+            The variable DETECTED_IPV6_CIDR should equal '64'
+            The stderr should be present
+        End
+
+        It 'overrides IPv4 address and recomputes the netmask'
+            IPV4_OVERRIDE="10.0.0.5/16"
+            When call apply_network_overrides
+            The variable DETECTED_IP_ADDRESS should equal '10.0.0.5'
+            The variable DETECTED_CIDR should equal '16'
+            The variable DETECTED_NETMASK should equal '255.255.0.0'
+            The stderr should be present
+        End
+
+        It 'normalizes comma-separated DNS overrides'
+            DNS_OVERRIDE="1.1.1.1,9.9.9.9"
+            When call apply_network_overrides
+            The variable DETECTED_DNS should equal '1.1.1.1 9.9.9.9'
+            The stderr should be present
+        End
+    End
+
     Describe 'generate_resolv_conf()'
         Context 'with single DNS server'
             setup() {
