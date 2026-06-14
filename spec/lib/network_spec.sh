@@ -185,6 +185,44 @@ Describe 'network.sh'
             The variable DETECTED_DNS should equal '1.1.1.1 9.9.9.9'
             The stderr should be present
         End
+
+        It 'preserves DHCP when adding IPv6 only (does not switch v4 to static)'
+            NETWORK_IS_DHCP=true
+            IPV6_OVERRIDE="2001:db8::2/64"
+            When call apply_network_overrides
+            The variable NETWORK_IS_DHCP should equal 'true'
+            The variable DETECTED_IPV6_ADDRESS should equal '2001:db8::2'
+            The stderr should be present
+        End
+
+        It 'switches to static only when IPv4 is explicitly overridden'
+            NETWORK_IS_DHCP=true
+            IPV4_OVERRIDE="10.0.0.5/24"
+            When call apply_network_overrides
+            The variable NETWORK_IS_DHCP should equal 'false'
+            The stderr should be present
+        End
+    End
+
+    Describe 'generate_interfaces_config() DHCP v4 + static v6'
+        setup() {
+            DETECTED_INTERFACE="eth0"
+            NETWORK_IS_DHCP=true
+            DETECTED_IPV6_ADDRESS="2001:db8::2"
+            DETECTED_IPV6_CIDR="64"
+            DETECTED_IPV6_GATEWAY="2001:db8::1"
+        }
+        Before 'setup'
+
+        It 'keeps v4 on dhcp'
+            When call generate_interfaces_config
+            The output should include 'inet dhcp'
+        End
+        It 'still adds the static v6 stanza'
+            When call generate_interfaces_config
+            The output should include 'inet6 static'
+            The output should include 'address 2001:db8::2'
+        End
     End
 
     Describe 'generate_resolv_conf()'
