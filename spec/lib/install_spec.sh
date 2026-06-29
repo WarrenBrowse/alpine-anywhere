@@ -593,4 +593,27 @@ Describe 'partition safety (mounted gate + tolerant parted)'
             The status should be success
         End
     End
+
+    Describe 'setup_openrc_fs_modules()'
+        # Regression: under OpenRC nothing loaded the ext4 driver, so the installed
+        # system could not mount its ext4 boot partition and every `aa status` /
+        # verify / rollback / upgrade failed with EINVAL. The s6 init loads it
+        # inline (lib/init_s6.sh); this gives the OpenRC image the same. The VM
+        # integration test exercises it end to end; this guards it cheaply.
+        setup() { OR_ROOT=$(mktemp -d); mkdir -p "$OR_ROOT/etc/init.d"; }
+        cleanup() { rm -rf "$OR_ROOT"; }
+        Before 'setup'
+        After 'cleanup'
+
+        It 'installs a boot service that modprobes ext4 before the partitions mount'
+            chroot() { :; }   # rc-update runs inside the chroot; stub it out
+            When call setup_openrc_fs_modules "$OR_ROOT"
+            The status should be success
+            The path "$OR_ROOT/etc/init.d/aa-modules" should be file
+            The contents of file "$OR_ROOT/etc/init.d/aa-modules" should include "modprobe"
+            The contents of file "$OR_ROOT/etc/init.d/aa-modules" should include "ext4"
+            The contents of file "$OR_ROOT/etc/init.d/aa-modules" should include "before localmount"
+            The contents of file "$OR_ROOT/etc/init.d/aa-modules" should include "aa-mount-data"
+        End
+    End
 End

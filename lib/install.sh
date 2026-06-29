@@ -916,8 +916,9 @@ EOF
     if [ "$INIT_SYSTEM" = "s6" ]; then
         setup_s6_init "$build_dir"
     else
-        # OpenRC: wire any custom services declared by --custom-script (the s6
-        # path does the equivalent slurp inside setup_s6_init).
+        # OpenRC: load the A/B boot/data filesystem drivers (the s6 init does this
+        # inline) and wire any custom services declared by --custom-script.
+        setup_openrc_fs_modules "$build_dir"
         wire_custom_openrc_services "$build_dir"
     fi
 
@@ -1033,6 +1034,39 @@ wire_custom_openrc_services() {
             || log_warn "could not enable custom OpenRC service: $name"
         log_info "Wired custom OpenRC service: ${name}"
     done
+}
+
+# OpenRC: load the filesystem drivers needed to mount the A/B boot partition
+# (ext4 on x86 via extlinux, vfat on RPi) and the data partition (btrfs/ext4) at
+# runtime. The s6 init does this inline (lib/init_s6.sh); without an OpenRC
+# equivalent the modules never load, so `aa status`/`verify`/`rollback`/`upgrade`
+# and the aa-mount-data/aa-verify services fail to mount the boot partition with
+# EINVAL. Runs in the boot runlevel, before anything that mounts those partitions.
+setup_openrc_fs_modules() {
+    local root="$1"
+    cat > "${root}/etc/init.d/aa-modules" << 'EOF'
+#!/sbin/openrc-run
+description="Alpine Anywhere: load filesystem drivers for the A/B boot/data partitions"
+depend() {
+    before localmount bootmisc aa-mount-data aa-verify
+    keyword -timeout
+}
+start() {
+    ebegin "Loading A/B filesystem modules"
+    for mf in /etc/modules /etc/modules-load.d/*.conf; do
+        [ -f "$mf" ] || continue
+        while read -r m _; do
+            case "$m" in ""|\#*) continue ;; esac
+            modprobe -b "$m" 2>/dev/null || true
+        done < "$mf"
+    done
+    for m in ext4 vfat btrfs; do modprobe -b "$m" 2>/dev/null || true; done
+    eend 0
+}
+EOF
+    chmod +x "${root}/etc/init.d/aa-modules"
+    chroot "$root" /sbin/rc-update add aa-modules boot 2>/dev/null \
+        || log_warn "could not enable aa-modules OpenRC service"
 }
 
 # Locate the alpine-anywhere CLI source base dir (control-host deploy or repo).
