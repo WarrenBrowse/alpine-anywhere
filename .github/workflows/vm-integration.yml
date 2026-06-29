@@ -1,0 +1,68 @@
+name: vm-integration
+
+# Boots a disposable QEMU guest and runs the full install -> reboot -> A/B
+# upgrade -> rollback -> auto-rollback lifecycle (spec/integration/vm/). This is
+# the only coverage of the pivot/takeover + repartition-the-running-disk path
+# that can brick a server, so it is the gate to run before each exit-fleet bump.
+#
+# Runs on the org's SELF-HOSTED Debian x86_64 runner (label `warren`, the
+# warren-docker-ci LXC) - a native x86_64 host where QEMU runs properly. The
+# macstudio-rosetta runner is an x86 container emulated under Rosetta, so nested
+# QEMU there would be emulation-on-emulation; this one is the right target.
+# `poka` on that runner has NOPASSWD apt to install qemu, and user-mode (slirp)
+# networking needs no /dev/net/tun. KVM is used if /dev/kvm is exposed, else the
+# harness falls back to TCG (slower but correct).
+
+on:
+  # PR + manual only: avoids running the same commit twice (push + PR) on the
+  # single self-hosted runner. Pushes to master still run via the open PR / a
+  # manual dispatch.
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run per ref on the shared self-hosted runner; a new push cancels the old.
+concurrency:
+  group: vm-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: [self-hosted, Linux, X64, warren]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      # Repo-wide syntax check (the Makefile `syntax` target) + shellcheck on the
+      # new harness only. Repo-wide shellcheck carries pre-existing findings that
+      # are out of scope for this change, so we do not gate the whole tree on it.
+      - name: Syntax (sh -n, repo-wide)
+        run: make syntax
+      - name: Shellcheck the VM harness
+        run: shellcheck -x -s sh -S warning spec/integration/vm/run.sh spec/integration/vm/lib/*.sh
+
+  vm:
+    runs-on: [self-hosted, Linux, X64, warren]
+    needs: lint
+    timeout-minutes: 60
+    env:
+      # Cache the seed image on the runner between runs (free, fast). Keep the
+      # guest small: this LXC has limited RAM/disk.
+      AA_VM_CACHE: /home/poka/.cache/aa-vm
+      AA_VM_RAM_MB: "2048"
+      AA_VM_DISK_GB: "6"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install QEMU + NoCloud tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+          ls -l /dev/kvm 2>/dev/null || echo "no /dev/kvm in this LXC - harness will fall back to TCG"
+
+      - name: VM lifecycle test
+        run: |
+          mkdir -p "$AA_VM_CACHE"
+          make test-vm

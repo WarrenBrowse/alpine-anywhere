@@ -1,6 +1,6 @@
 # Makefile for alpine-anywhere
 
-.PHONY: all test test-unit test-integration install uninstall lint shellcheck syntax help clean
+.PHONY: all test test-unit test-integration test-vm install uninstall lint shellcheck syntax help clean
 
 # Installation prefix
 PREFIX ?= /usr/local
@@ -28,6 +28,15 @@ test-unit:
 test-integration:
 	@echo "Running integration tests..."
 	@shellspec spec/integration/
+
+# Run the real-VM lifecycle test (install -> reboot -> A/B upgrade -> rollback
+# -> boot-counter auto-rollback) against a disposable QEMU guest. Unlike the
+# shellspec suites this boots, repartitions and power-cycles a real machine, so
+# it covers the pivot/takeover path that can brick a box. Needs QEMU; it SKIPs
+# cleanly (exit 0) when QEMU is absent, and uses KVM when /dev/kvm is available.
+test-vm:
+	@echo "Running VM integration test (QEMU)..."
+	@sh spec/integration/vm/run.sh
 
 # Run tests with coverage (requires kcov)
 test-coverage:
@@ -96,7 +105,8 @@ help:
 	@echo "  all             - Lint and run all tests (default)"
 	@echo "  test            - Run all tests"
 	@echo "  test-unit       - Run unit tests only"
-	@echo "  test-integration - Run integration tests only"
+	@echo "  test-integration - Run integration tests only (shellspec, mocked)"
+	@echo "  test-vm         - Real-VM lifecycle test via QEMU (install/upgrade/rollback)"
 	@echo "  test-coverage   - Run tests with coverage report (requires kcov)"
 	@echo "  test-tap        - Run tests in TAP format"
 	@echo "  lint            - Run linters"
