@@ -1,12 +1,14 @@
 #!/bin/sh
 # upgrade.sh - A/B upgrade management for alpine-anywhere
 #
-# Atomic upgrades for the raw-partition squashfs A/B layout:
-#   sda1  FAT boot   - config.txt, cmdline.txt, vmlinuz-A/B, initramfs-A/B,
-#                      current_slot, slots.meta, firmware, dtbs, overlays
+# Atomic upgrades for the raw-partition squashfs A/B layout (see docs/BOOT.md):
+#   sda1  boot       - vmlinuz-A/B, initramfs-A/B, current_slot, slots.meta, and
+#                      the bootloader config(s): extlinux.conf (BIOS) + grub/
+#                      (UEFI) on x86; config.txt/cmdline.txt on RPi
 #   sda2  slot A     - raw squashfs root image
 #   sda3  slot B     - raw squashfs root image
-#   sda4  data       - persistent overlay (phase 3)
+#   sda4  data       - persistent overlay (optional)
+#   (last) esp       - FAT EFI System Partition, x86 UEFI only
 #
 # Upgrade flow: build new image -> write to the INACTIVE slot -> point the
 # bootloader at it -> reboot. The previous slot is preserved for rollback.
@@ -261,6 +263,9 @@ switch_slot() {
     elif [ -f "${BOOT_MNT}/extlinux/extlinux.conf" ]; then
         sed_inplace_checked "${BOOT_MNT}/extlinux/extlinux.conf" "^DEFAULT alpine-${new_slot}\$" \
             -e "s|^DEFAULT alpine-[AB].*|DEFAULT alpine-${new_slot}|"
+        # Mirror the flip for UEFI/GRUB (same boot partition; no-op without an ESP).
+        [ -d "${BOOT_MNT}/grub" ] && \
+            printf 'set default=alpine-%s\n' "$new_slot" | atomic_write "${BOOT_MNT}/grub/grub_aa_default.cfg"
     else
         die "No known bootloader config on ${BOOT_MNT} (config.txt / extlinux.conf)"
     fi

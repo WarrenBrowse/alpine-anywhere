@@ -778,30 +778,30 @@ pivot_s6() {
     run_privileged s6-svscanctl -t "${scandir}"
 }
 
-# Strategy: reboot into a RAM installer (no runtime PID 1 takeover).
-# Used when the running init can't be re-exec'd at runtime (e.g. busybox init).
-# We turn the already-built pivot env (${PIVOT_DIR}: install tools + scripts +
-# cache + config) into an initramfs, add the running kernel's modules, write it
-# next to the existing vmlinuz on the boot partition, and reboot. The RPi
-# firmware then boots that initramfs entirely in RAM (the disk is free), its
-# /init runs the A/B install onto the disk, and reboots into the new system.
-pivot_reboot_installer() {
-    log_info "Using reboot-into-RAM-installer strategy..."
-
-    local kver
+# Bundle the running kernel's modules into the initramfs staging dir so the RAM
+# installer's /init can modprobe the storage/network drivers it needs to see the
+# disk. Shared by the RPi-firmware (pivot_reboot_installer) and the x86-kexec
+# (pivot_kexec_installer) installers - both boot the SAME initramfs, only the
+# boot mechanism differs.
+_bundle_running_kernel_modules() {
+    local dest="$1" kver
     kver=$(uname -r)
-
-    # 1. Kernel modules matching the on-disk vmlinuz (same running kernel)
     if [ -d "/lib/modules/${kver}" ]; then
         log_info "Bundling kernel modules ${kver}..."
-        run_privileged mkdir -p "${PIVOT_DIR}/lib/modules"
-        run_privileged cp -a "/lib/modules/${kver}" "${PIVOT_DIR}/lib/modules/"
+        run_privileged mkdir -p "${dest}/lib/modules"
+        run_privileged cp -a "/lib/modules/${kver}" "${dest}/lib/modules/"
     else
         log_warn "No /lib/modules/${kver}; installer may not see the disk"
     fi
+}
 
-    # 2. Installer /init (PID 1 of the initramfs; disk is free, no pivot needed)
-    run_privileged tee "${PIVOT_DIR}/init" > /dev/null << 'INSTALLERINIT'
+# Write the RAM-installer /init (PID 1 of the initramfs) into $1. The disk is
+# free at this point (a fresh kernel/initramfs boot, no pivot), so /init just
+# brings up modules + network and runs the A/B install onto the disk. Shared by
+# both RAM-installer strategies so the installer logic stays in one place.
+_emit_installer_init() {
+    local dest="$1"
+    run_privileged tee "${dest}/init" > /dev/null << 'INSTALLERINIT'
 #!/bin/sh
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
@@ -815,7 +815,11 @@ mkdir -p /dev/pts && mount -t devpts devpts /dev/pts 2>/dev/null
 mkdir -p /run /tmp
 
 echo "[ram-installer] loading storage/fs modules..."
-for m in dwc2 phy-generic xhci-pci-renesas xhci-pci xhci-hcd \
+# virtio_* first: cloud/KVM hosts (Hetzner, most VPS) present the disk + NIC as
+# virtio-blk/virtio-net, so without these the installer never sees /dev/vd*|/dev/sd*
+# or the network. The USB/NVMe/scsi set covers bare metal + Raspberry Pi.
+for m in virtio_pci virtio_blk virtio_scsi virtio_net \
+         dwc2 phy-generic xhci-pci-renesas xhci-pci xhci-hcd \
          usb-storage uas scsi_mod sd_mod \
          nvme ext4 vfat nls_cp437 nls_iso8859-1 squashfs loop crc32c; do
     modprobe "$m" 2>/dev/null || true
@@ -824,21 +828,51 @@ done
 sleep 5
 mdev -s 2>/dev/null || true
 
-echo "[ram-installer] block devices:"; ls -l /dev/sd* /dev/nvme* /dev/mmcblk* 2>/dev/null
+echo "[ram-installer] block devices:"; ls -l /dev/vd* /dev/sd* /dev/nvme* /dev/mmcblk* 2>/dev/null
 
 [ -f /etc/alpine-anywhere/config.env ] && . /etc/alpine-anywhere/config.env
 
 echo "[ram-installer] networking..."
-ifconfig lo 127.0.0.1 up 2>/dev/null || true
+ifconfig lo 127.0.0.1 up 2>/dev/null || ip link set lo up 2>/dev/null || true
 if [ -n "$NETWORK_INTERFACE" ]; then
+    ip link set "$NETWORK_INTERFACE" up 2>/dev/null || ifconfig "$NETWORK_INTERFACE" up 2>/dev/null || true
     if [ "$NETWORK_DHCP" = "true" ]; then
-        udhcpc -i "$NETWORK_INTERFACE" -b -q 2>/dev/null &
-        sleep 4
+        # BusyBox udhcpc only OBTAINS the lease; an apply-script is what actually
+        # configures IP/route/DNS, and the minirootfs may not ship one - without it
+        # the box gets a lease but no working network, and the installer's mirror
+        # pre-check then aborts before touching the disk. Ship our own script. It
+        # also handles a cloud /32 + on-link gateway (Hetzner): the router is off
+        # the local subnet, so add an explicit on-link route before the default.
+        cat > /tmp/udhcpc.script << 'UDHCPC'
+#!/bin/sh
+case "$1" in
+  bound|renew)
+    ip addr flush dev "$interface" 2>/dev/null
+    ip addr add "$ip/${mask:-32}" dev "$interface" 2>/dev/null \
+        || ifconfig "$interface" "$ip" netmask "${subnet:-255.255.255.255}" up
+    for r in $router; do
+        ip route add "$r" dev "$interface" 2>/dev/null
+        ip route add default via "$r" dev "$interface" 2>/dev/null \
+            || route add default gw "$r" 2>/dev/null
+    done
+    : > /etc/resolv.conf
+    for d in $dns; do echo "nameserver $d" >> /etc/resolv.conf; done
+    ;;
+esac
+UDHCPC
+        chmod +x /tmp/udhcpc.script
+        udhcpc -i "$NETWORK_INTERFACE" -s /tmp/udhcpc.script -q -n -t 10 -T 2 2>/dev/null \
+            || udhcpc -i "$NETWORK_INTERFACE" -s /tmp/udhcpc.script -b 2>/dev/null
     else
-        ifconfig "$NETWORK_INTERFACE" "$NETWORK_IP" netmask "$NETWORK_NETMASK" up 2>/dev/null || true
-        route add default gw "$NETWORK_GATEWAY" 2>/dev/null || true
+        ip addr add "$NETWORK_IP/${NETWORK_CIDR:-32}" dev "$NETWORK_INTERFACE" 2>/dev/null \
+            || ifconfig "$NETWORK_INTERFACE" "$NETWORK_IP" netmask "$NETWORK_NETMASK" up 2>/dev/null || true
+        ip route add "$NETWORK_GATEWAY" dev "$NETWORK_INTERFACE" 2>/dev/null || true
+        ip route add default via "$NETWORK_GATEWAY" dev "$NETWORK_INTERFACE" 2>/dev/null \
+            || route add default gw "$NETWORK_GATEWAY" 2>/dev/null || true
     fi
 fi
+# Ensure name resolution even if DHCP pushed no DNS (the mirror is a hostname).
+[ -s /etc/resolv.conf ] || printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
 
 # Optional SSH for live monitoring/rescue (dropbear in hardened mode)
 if [ "$HARDENED_MODE" = "true" ]; then
@@ -872,15 +906,55 @@ else
     exec /bin/sh
 fi
 INSTALLERINIT
-    run_privileged chmod +x "${PIVOT_DIR}/init"
+    run_privileged chmod +x "${dest}/init"
+}
 
-    # 3. Unmount the virtual filesystems inside PIVOT_DIR so the cpio doesn't
-    #    archive a live /proc /sys /dev (the initramfs /init remounts them).
+# Drop the virtual-fs mounts inside the staging dir so the cpio archive doesn't
+# capture a live /proc /sys /dev (the installer /init remounts them itself).
+_unmount_pivot_vfs() {
+    local dir="$1" vfs
     for vfs in dev/pts dev sys proc; do
-        run_privileged umount "${PIVOT_DIR}/${vfs}" 2>/dev/null || true
+        run_privileged umount "${dir}/${vfs}" 2>/dev/null || true
     done
+}
 
-    # 4. Package the env as a gzip cpio initramfs onto the boot partition
+# Pack SRC as a gzip cpio initramfs at OUT, then VALIDATE it (gzip integrity +
+# the archive really contains ./init) before any caller commits to booting it.
+# No 2>/dev/null swallowing on the pack: a corrupt image must abort here, never
+# reach the bootloader/kexec. Dies on any failure.
+_pack_installer_img() {
+    local src="$1" out="$2"
+    log_info "Building installer initramfs ${out}..."
+    # NOTE: no `set -o pipefail` here. /bin/sh is dash on Debian/Ubuntu, where an
+    # unknown `set -o` option is a FATAL error that aborts the whole `sh -c`
+    # before the pipeline ever runs (the 2>/dev/null only hid the message, not
+    # the abort) - which silently broke the pack on every dash host. Correctness
+    # is instead enforced by the explicit post-pack validation below: a truncated
+    # or empty image fails the gzip integrity check or the ./init presence check.
+    ( cd "$src" && run_privileged sh -c "find . -path ./old_root -prune -o -print0 | cpio -0 -o -H newc | gzip -1 > '${out}'" ) \
+        || die "failed to build installer.img (cpio/gzip error)"
+    run_privileged sh -c "gzip -t '${out}'" \
+        || die "installer.img failed gzip integrity check"
+    # Accept both "init" and "./init": GNU cpio (Debian) stores the find paths
+    # without the leading ./, BusyBox cpio (Alpine/RPi) keeps it. Both extract to
+    # /init and boot the same; pinning one form wrongly rejected a valid image.
+    run_privileged sh -c "gzip -dc '${out}' | cpio -t 2>/dev/null | grep -qxE '(\\./)?init'" \
+        || die "installer.img does not contain init - refusing to boot it"
+    log_info "installer.img: $(run_privileged du -h "${out}" | cut -f1) (validated)"
+}
+
+# Strategy: reboot into a RAM installer via the Raspberry Pi firmware (no runtime
+# PID 1 takeover). Used when the running init can't be re-exec'd at runtime (e.g.
+# busybox init) on a Pi. We build the installer initramfs, write it next to the
+# existing vmlinuz on the FAT boot partition, point config.txt at it, and reboot.
+# The Pi firmware then boots that initramfs entirely in RAM (the disk is free),
+# its /init runs the A/B install onto the disk, and reboots into the new system.
+pivot_reboot_installer() {
+    log_info "Using reboot-into-RAM-installer strategy (RPi firmware)..."
+    _bundle_running_kernel_modules "$PIVOT_DIR"
+    _emit_installer_init "$PIVOT_DIR"
+    _unmount_pivot_vfs "$PIVOT_DIR"
+
     local boot_mnt="/mnt/aa-bootstage" disk part1
     disk=$(strip_partition "$(get_root_device)")
     part1=$(get_part_dev "$disk" 1)
@@ -888,20 +962,9 @@ INSTALLERINIT
     run_privileged mount "$part1" "$boot_mnt" || die "cannot mount boot partition $part1"
     assert_mounted "$boot_mnt"
 
-    log_info "Building installer initramfs onto ${part1}..."
-    # Capture the cpio/gzip status (no 2>/dev/null swallowing) so a failed pack
-    # is caught BEFORE we repoint the bootloader at a corrupt installer.img.
-    ( cd "$PIVOT_DIR" && run_privileged sh -c "set -o pipefail 2>/dev/null; find . -path ./old_root -prune -o -print0 | cpio -0 -o -H newc | gzip -1 > '${boot_mnt}/installer.img'" ) \
-        || die "failed to build installer.img (cpio/gzip error)"
+    _pack_installer_img "$PIVOT_DIR" "${boot_mnt}/installer.img"
 
-    # Validate the artifact: gzip integrity + the cpio actually contains ./init.
-    run_privileged sh -c "gzip -t '${boot_mnt}/installer.img'" \
-        || die "installer.img failed gzip integrity check"
-    run_privileged sh -c "gzip -dc '${boot_mnt}/installer.img' | cpio -t 2>/dev/null | grep -qx './init'" \
-        || die "installer.img does not contain ./init - refusing to repoint bootloader"
-    log_info "installer.img: $(run_privileged du -h "${boot_mnt}/installer.img" | cut -f1) (validated)"
-
-    # 4. Point config.txt at vmlinuz + installer.img for the next boot.
+    # Point config.txt at vmlinuz + installer.img for the next boot.
     #    The .preinstall backups are the ONLY rollback if the installer is bad,
     #    so they are mandatory (require), not best-effort.
     require run_privileged cp "${boot_mnt}/config.txt" "${boot_mnt}/config.txt.preinstall"
@@ -924,6 +987,150 @@ EOF
     log_warn "Rebooting into the RAM installer now..."
     log_warn "Reconnect after install completes: ssh root@${DETECTED_IP_ADDRESS}"
     run_privileged reboot -f || run_privileged reboot
+}
+
+# Locate the running kernel's bootable vmlinuz file (needed as the kexec target).
+# Cloud/distro kernels keep it at /boot/vmlinuz-$(uname -r); fall back to a bare
+# /boot/vmlinuz symlink. Echoes the path, or nothing if none is found.
+_find_running_kernel_image() {
+    local kver; kver=$(uname -r)
+    for k in "/boot/vmlinuz-${kver}" /boot/vmlinuz "/boot/vmlinuz-linux"; do
+        [ -f "$k" ] && { printf '%s\n' "$k"; return 0; }
+    done
+    return 1
+}
+
+# Ensure a usable kexec binary exists on the SOURCE OS (we are still pre-pivot,
+# so its native package manager is available). Echoes the kexec path on success.
+_ensure_kexec_local() {
+    local k
+    for k in /sbin/kexec /usr/sbin/kexec; do [ -x "$k" ] && { printf '%s\n' "$k"; return 0; }; done
+    command -v kexec >/dev/null 2>&1 && { command -v kexec; return 0; }
+
+    local distro=""
+    [ -f /etc/os-release ] && distro=$(. /etc/os-release 2>/dev/null; echo "$ID")
+    log_info "Installing kexec-tools on source OS ($distro)..."
+    case "$distro" in
+        debian|ubuntu|armbian|raspbian)
+            run_privileged sh -c "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y kexec-tools" >/dev/null 2>&1 ;;
+        centos|rhel|fedora|rocky|almalinux|alma)
+            run_privileged sh -c "dnf install -y kexec-tools 2>/dev/null || yum install -y kexec-tools" >/dev/null 2>&1 ;;
+        arch|manjaro)
+            run_privileged pacman -Sy --noconfirm kexec-tools >/dev/null 2>&1 ;;
+        alpine)
+            run_privileged apk add --no-cache kexec-tools >/dev/null 2>&1 ;;
+        opensuse*|sles|suse)
+            run_privileged zypper -n install kexec-tools >/dev/null 2>&1 ;;
+        *)  return 1 ;;
+    esac
+    for k in /sbin/kexec /usr/sbin/kexec; do [ -x "$k" ] && { printf '%s\n' "$k"; return 0; }; done
+    return 1
+}
+
+# Fetch the Alpine "virt" netboot kernel + matching modloop into the cache.
+# Echoes "<vmlinuz> <modloop>" on success. We boot THIS kernel (not the host's
+# own) post-kexec because the Alpine virt kernel is built to kexec cleanly on
+# cloud hypervisors - a stock distro kernel can panic post-kexec on some KVM
+# setups - and its module set covers cloud storage/NICs. arch-aware via
+# DETECTED_ARCH (x86_64 / aarch64).
+_fetch_alpine_installer_kernel() {
+    local flavor=virt base
+    base="${ALPINE_MIRROR}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/netboot"
+    cache_download "${base}/vmlinuz-${flavor}" "aa-installer-vmlinuz" 2>/dev/null || return 1
+    cache_download "${base}/modloop-${flavor}" "aa-installer-modloop" 2>/dev/null || return 1
+    local v="${INSTALL_CACHE_DIR}/aa-installer-vmlinuz" m="${INSTALL_CACHE_DIR}/aa-installer-modloop"
+    [ -s "$v" ] && [ -s "$m" ] || return 1
+    printf '%s %s\n' "$v" "$m"
+}
+
+# Bundle the Alpine kernel modules from a modloop (squashfs) into the initramfs
+# staging dir, so the RAM installer's /init can modprobe the storage/net/fs
+# drivers for the kernel we are about to kexec into. Self-contained: nothing has
+# to be served over the network or off the (about-to-be-wiped) disk afterwards.
+_bundle_modloop_modules() {
+    local dest="$1" modloop="$2" mnt
+    mnt=$(mktemp -d 2>/dev/null) || return 1
+    run_privileged modprobe squashfs 2>/dev/null || true
+    run_privileged modprobe loop 2>/dev/null || true
+    if ! run_privileged mount -t squashfs -o loop,ro "$modloop" "$mnt" 2>/dev/null; then
+        rm -rf "$mnt"; return 1
+    fi
+    run_privileged mkdir -p "${dest}/lib/modules"
+    # modloop layout: modules/<kver>/...  (+ firmware/...)
+    run_privileged cp -a "${mnt}/modules/." "${dest}/lib/modules/" 2>/dev/null || true
+    if [ -d "${mnt}/firmware" ]; then
+        run_privileged mkdir -p "${dest}/lib/firmware"
+        run_privileged cp -a "${mnt}/firmware/." "${dest}/lib/firmware/" 2>/dev/null || true
+    fi
+    run_privileged umount "$mnt" 2>/dev/null || true
+    rm -rf "$mnt"
+    # A module dir must now exist, named for the kexec'd kernel's uname -r.
+    [ -n "$(ls -A "${dest}/lib/modules/" 2>/dev/null)" ] || return 1
+    return 0
+}
+
+# Strategy: kexec into a RAM installer (x86 BIOS/UEFI cloud + bare metal; the
+# general non-RPi equivalent of pivot_reboot_installer). A systemd/sysvinit host
+# cannot free its own boot disk in place: PID 1 keeps the original root mounted,
+# so the kernel refuses to re-read the new partition table ("device is busy") and
+# the in-place repartition fails. kexec sidesteps this entirely: we build the
+# installer initramfs in RAM, then boot a FRESH kernel into it. Nothing from the
+# disk is mounted in that fresh boot, so the installer repartitions a truly free
+# disk, lays down the A/B slots, and reboots into the new system.
+pivot_kexec_installer() {
+    log_info "Using kexec-into-RAM-installer strategy (x86/cloud)..."
+
+    local kexec_bin kimg="" modloop="" kpair
+    kexec_bin=$(_ensure_kexec_local) \
+        || die "kexec-tools unavailable on this host; cannot free the boot disk for an in-place install (try --method takeover on a non-systemd source, or install kexec-tools)"
+
+    # Prefer the Alpine 'virt' netboot kernel + its modloop modules (kexec-clean
+    # on cloud KVM, broad driver coverage), bundled into our self-contained
+    # initramfs. Fall back to the host's own kernel if the mirror is unreachable.
+    kpair=$(_fetch_alpine_installer_kernel) \
+        && kimg=$(printf '%s' "$kpair" | awk '{print $1}') \
+        && modloop=$(printf '%s' "$kpair" | awk '{print $2}')
+    if [ -n "$kimg" ] && [ -f "$kimg" ] && [ -n "$modloop" ] && _bundle_modloop_modules "$PIVOT_DIR" "$modloop"; then
+        log_info "installer kernel: Alpine netboot virt ($kimg)"
+    else
+        log_warn "Alpine netboot kernel/modloop unavailable; falling back to the host kernel"
+        kimg=$(_find_running_kernel_image) \
+            || die "no installer kernel available (Alpine netboot fetch failed and no /boot/vmlinuz)"
+        _bundle_running_kernel_modules "$PIVOT_DIR"
+    fi
+    log_info "kexec: $kexec_bin  kernel: $kimg"
+
+    _emit_installer_init "$PIVOT_DIR"
+    _unmount_pivot_vfs "$PIVOT_DIR"
+
+    # Build the installer initramfs to a RAM path that is NOT the disk we are
+    # about to repartition and NOT inside PIVOT_DIR (which we cpio). /dev/shm and
+    # /run are tmpfs on the source OS. kexec -l copies the image into reserved
+    # kernel memory immediately, so it only needs to exist at load time.
+    local img=/dev/shm/aa-installer.img
+    [ -d /dev/shm ] || img=/run/aa-installer.img
+    _pack_installer_img "$PIVOT_DIR" "$img"
+
+    # Serial console too: cloud servers are headless, so the installer's progress
+    # (and the init.aa boot-guard later) must reach the provider serial console.
+    local cmdline="console=tty1 console=ttyS0,115200n8 panic=10"
+
+    log_info "Loading installer kernel via kexec..."
+    run_privileged "$kexec_bin" -l "$kimg" --initrd="$img" --command-line="$cmdline" \
+        || die "kexec -l failed (kernel not kexec-loadable?); system UNCHANGED and still reachable"
+    local loaded
+    loaded=$(cat /sys/kernel/kexec_loaded 2>/dev/null || echo 0)
+    [ "$loaded" = "1" ] \
+        || die "kexec load did not stick (kexec_loaded=$loaded); system UNCHANGED and still reachable"
+    log_info "Installer kernel loaded (kexec_loaded=1)"
+
+    log_warn "kexec-ing into the RAM installer now - the connection WILL be lost."
+    log_warn "The install runs on the freed disk, then reboots into the new system."
+    log_warn "Reconnect after it completes: ssh root@${DETECTED_IP_ADDRESS}"
+    run_privileged sync
+    # Detach so a dropped SSH session can't SIGHUP the reboot mid-flight.
+    run_privileged sh -c "nohup sh -c 'sleep 2; ${kexec_bin} -e' >/dev/null 2>&1 &" || true
+    sleep 3
 }
 
 # Strategy for runit
@@ -976,6 +1183,20 @@ pivot_direct() {
 # Main Pivot Execution
 # =============================================================================
 
+# In LIVE mode the in-place bind-mount takeover is correct: it pivots to Alpine
+# in RAM, never touches the disk, and reverts on the next reboot. In INSTALL mode
+# that same takeover is fatal on systemd/sysvinit/runit: PID 1 keeps the original
+# root mounted, so the boot disk stays busy and cannot be repartitioned. There we
+# kexec into a RAM installer instead (fresh kernel, disk free). $1 is the
+# live-mode takeover function to use for this init system.
+_pivot_takeover_or_kexec() {
+    if [ "${INSTALL_MODE:-false}" = "true" ]; then
+        pivot_kexec_installer
+    else
+        "$1"
+    fi
+}
+
 execute_pivot() {
     log_step "Executing pivot_root..."
 
@@ -986,28 +1207,30 @@ execute_pivot() {
 
     case "$init_system" in
         systemd)
-            pivot_systemd
+            _pivot_takeover_or_kexec pivot_systemd
             ;;
         sysvinit)
-            pivot_sysvinit
+            _pivot_takeover_or_kexec pivot_sysvinit
             ;;
         busybox)
             # busybox init can't be re-exec'd at runtime -> reboot into a RAM installer
             pivot_reboot_installer
             ;;
         runit)
-            pivot_runit
+            _pivot_takeover_or_kexec pivot_runit
             ;;
         openrc)
             # Alpine's OpenRC runs on top of busybox init (PID 1)
             pivot_reboot_installer
             ;;
         s6)
+            # s6 frees the disk in place (it reaps services before partitioning),
+            # so it works for install without a kexec.
             pivot_s6
             ;;
         *)
             log_warn "Unknown init system, trying direct approach"
-            pivot_direct
+            _pivot_takeover_or_kexec pivot_direct
             ;;
     esac
 

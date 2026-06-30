@@ -56,9 +56,16 @@ done
 [ -z "$boot" ] && boot="/dev/${bootname}"
 klog "slot=$slot disk=$disk boot=$boot"
 
-# 3) Mount it (vfat is built into the kernel - no module needed).
+# 3) Mount it. The boot partition is FAT on RPi (vfat is built into the kernel)
+#    but ext4 on x86 (extlinux). Load ext4 (bundled in the initramfs via the
+#    mkinitfs `ext4` feature) so the ext4 boot partition is mountable - without
+#    this the auto-detect mount fails on x86 and the whole A/B boot-guard silently
+#    no-ops (the boot-counter never increments, so auto-rollback never fires).
+modprobe ext4 2>/dev/null || true
 mkdir -p "${AA_BOOT_DIR}" 2>/dev/null
-if ! mount -t vfat "$boot" "${AA_BOOT_DIR}" 2>/dev/null && ! mount "$boot" "${AA_BOOT_DIR}" 2>/dev/null; then
+if ! mount -t vfat "$boot" "${AA_BOOT_DIR}" 2>/dev/null \
+   && ! mount -t ext4 "$boot" "${AA_BOOT_DIR}" 2>/dev/null \
+   && ! mount "$boot" "${AA_BOOT_DIR}" 2>/dev/null; then
     klog "cannot mount boot $boot; skip (boot continues)"
     exit 0
 fi
@@ -122,6 +129,13 @@ if [ "$cnt" -gt 1 ] && [ "$ver" != "true" ]; then
             else
                 rm -f ${AA_BOOT_DIR}/extlinux/extlinux.conf.t
             fi
+        fi
+
+        # Mirror the rollback for UEFI/GRUB on the same boot partition (no-op
+        # without an ESP). One line, so no atomic dance is warranted.
+        if [ -d ${AA_BOOT_DIR}/grub ]; then
+            echo "set default=alpine-${other}" > ${AA_BOOT_DIR}/grub/grub_aa_default.cfg 2>/dev/null
+            sync
         fi
 
         if [ "$changed" != "1" ]; then

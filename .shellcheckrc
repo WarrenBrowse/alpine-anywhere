@@ -1,0 +1,8 @@
+# alpine-anywhere shellcheck config.
+#
+# SC3043: "In POSIX sh, 'local' is undefined." We target real-world /bin/sh
+# implementations (BusyBox ash on Alpine, dash, bash) - every one of them
+# implements `local`, and the codebase uses it deliberately for function-scoped
+# variables. The portability nag does not apply here, so silence it globally.
+# (SC2039 is the same nag on older shellcheck, e.g. Debian bullseye's 0.7.x.)
+disable=SC2039,SC3043
