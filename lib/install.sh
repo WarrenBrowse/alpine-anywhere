@@ -293,16 +293,17 @@ create_partition_layout() {
 
     # x86_64 UEFI: a small FAT EFI System Partition, appended LAST so the boot/
     # slotA/slotB/data partition numbers (which init.aa and the A/B logic key off)
-    # never shift. parted's negative end offset (-Nmib) carves it from the disk
-    # tail without needing the exact disk size. RPi has no ESP (firmware FAT only).
+    # never shift. The data partition ends PART_ESP_SIZE_MB before the disk end to
+    # leave room for it. RPi has no ESP (firmware reads the FAT boot directly).
     local want_esp=false
     [ "$DETECTED_PLATFORM" != "rpi" ] && want_esp=true
 
     if [ "$with_data" = "true" ]; then
         log_info "Creating data partition (remaining space)..."
         if [ "$want_esp" = "true" ]; then
-            parted_tolerant "$disk" mkpart data ext4 "${slot_end_mb}MiB" "-${PART_ESP_SIZE_MB}MiB"
-            parted_tolerant "$disk" mkpart esp fat32 "-${PART_ESP_SIZE_MB}MiB" 100%
+            local data_end_mb=$((disk_size - PART_ESP_SIZE_MB))
+            parted_tolerant "$disk" mkpart data ext4 "${slot_end_mb}MiB" "${data_end_mb}MiB"
+            parted_tolerant "$disk" mkpart esp fat32 "${data_end_mb}MiB" 100%
             parted_tolerant "$disk" set 5 esp on
         else
             parted_tolerant "$disk" mkpart data ext4 "${slot_end_mb}MiB" 100%
@@ -2356,27 +2357,28 @@ menuentry "Alpine Linux (Slot B)" --id alpine-B {
 EOF
 }
 
-# Install GRUB-EFI so an x86_64 UEFI firmware can boot the disk. The standalone
-# image is written to the UEFI removable/fallback path (/EFI/BOOT/BOOTX64.EFI) on
-# the ESP, so no NVRAM boot entry (efibootmgr) is needed - it boots on firmware
-# whose NVRAM is reset/absent (cloud). It only bootstraps to the editable grub.cfg
-# on the boot partition (write_grub_cfg). No-op on RPi; soft-fails (BIOS still
-# works) if GRUB tooling or an ESP is missing.
+# Install GRUB-EFI so an x86_64 UEFI firmware can boot the disk. grub-install
+# writes the loader to the UEFI removable/fallback path (/EFI/BOOT/BOOTX64.EFI) on
+# the ESP and embeds in its core image the modules needed to reach its prefix on
+# the ext4 boot partition (notably ext2), so no NVRAM boot entry (efibootmgr) is
+# required - it boots on firmware whose NVRAM is reset/absent (cloud). GRUB then
+# reads the editable grub.cfg written by write_grub_cfg. No-op on RPi; soft-fails
+# (BIOS still works) if GRUB tooling or an ESP is missing.
 install_uefi_bootloader() {
     local disk="$1" boot_mnt="$2" with_data="$3" slot="${4:-A}"
     [ "$DETECTED_PLATFORM" = "rpi" ] && return 0
 
-    local mkstandalone
-    mkstandalone=$(command -v grub-mkstandalone 2>/dev/null || true)
-    if [ -z "$mkstandalone" ]; then
+    local grub_install
+    grub_install=$(command -v grub-install 2>/dev/null || true)
+    if [ -z "$grub_install" ]; then
         if command -v apk >/dev/null 2>&1; then
             apk add --no-cache grub grub-efi >/dev/null 2>&1 || true
         elif command -v apt-get >/dev/null 2>&1; then
             DEBIAN_FRONTEND=noninteractive apt-get -qq install -y grub-efi-amd64-bin grub-common >/dev/null 2>&1 || true
         fi
-        mkstandalone=$(command -v grub-mkstandalone 2>/dev/null || true)
+        grub_install=$(command -v grub-install 2>/dev/null || true)
     fi
-    [ -n "$mkstandalone" ] || { log_warn "grub-mkstandalone not available; UEFI boot NOT installed (BIOS still works)"; return 0; }
+    [ -n "$grub_install" ] || { log_warn "grub-install not available; UEFI boot NOT installed (BIOS still works)"; return 0; }
 
     local esp_dev esp_mnt="/mnt/aa-esp"
     esp_dev=$(get_esp_dev "$disk" "$with_data")
@@ -2386,21 +2388,12 @@ install_uefi_bootloader() {
 
     mkdir -p "$esp_mnt"
     require mount "$esp_dev" "$esp_mnt"
-    mkdir -p "${esp_mnt}/EFI/BOOT"
 
-    local embed="/tmp/aa-grub-embed.cfg"
-    cat > "$embed" << 'EOF'
-search --no-floppy --label ALPINE_BOOT --set aaroot
-if [ -n "$aaroot" ]; then
-    set prefix=($aaroot)/grub
-    configfile ($aaroot)/grub/grub.cfg
-fi
-EOF
-    if "$mkstandalone" -O x86_64-efi -o "${esp_mnt}/EFI/BOOT/BOOTX64.EFI" \
-            "boot/grub/grub.cfg=${embed}" >/dev/null 2>&1; then
-        log_info "x86_64 UEFI bootloader installed (GRUB-EFI at /EFI/BOOT/BOOTX64.EFI -> ALPINE_BOOT/grub/grub.cfg)"
+    if "$grub_install" --target=x86_64-efi --efi-directory="$esp_mnt" \
+            --boot-directory="$boot_mnt" --removable --no-nvram --recheck >/dev/null 2>&1; then
+        log_info "x86_64 UEFI bootloader installed (GRUB-EFI at /EFI/BOOT/BOOTX64.EFI, prefix on ALPINE_BOOT/grub)"
     else
-        log_warn "grub-mkstandalone failed; UEFI boot NOT installed (BIOS still works)"
+        log_warn "grub-install failed; UEFI boot NOT installed (BIOS still works)"
     fi
     sync
     umount "$esp_mnt" 2>/dev/null || true
