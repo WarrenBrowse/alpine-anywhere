@@ -1,12 +1,14 @@
 #!/bin/sh
 # upgrade.sh - A/B upgrade management for alpine-anywhere
 #
-# Atomic upgrades for the raw-partition squashfs A/B layout:
-#   sda1  FAT boot   - config.txt, cmdline.txt, vmlinuz-A/B, initramfs-A/B,
-#                      current_slot, slots.meta, firmware, dtbs, overlays
+# Atomic upgrades for the raw-partition squashfs A/B layout (see docs/BOOT.md):
+#   sda1  boot       - vmlinuz-A/B, initramfs-A/B, current_slot, slots.meta, and
+#                      the bootloader config(s): extlinux.conf (BIOS) + grub/
+#                      (UEFI) on x86; config.txt/cmdline.txt on RPi
 #   sda2  slot A     - raw squashfs root image
 #   sda3  slot B     - raw squashfs root image
-#   sda4  data       - persistent overlay (phase 3)
+#   sda4  data       - persistent overlay (optional)
+#   (last) esp       - FAT EFI System Partition, x86 UEFI only
 #
 # Upgrade flow: build new image -> write to the INACTIVE slot -> point the
 # bootloader at it -> reboot. The previous slot is preserved for rollback.

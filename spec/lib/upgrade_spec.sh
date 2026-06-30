@@ -221,6 +221,27 @@ Describe 'upgrade.sh'
             The contents of file "$BOOT_MNT/cmdline.txt" should not include "aaverity"
             The stderr should be defined
         End
+
+        It 'flips both bootloaders on x86: extlinux DEFAULT and the GRUB default'
+            rm -f "$BOOT_MNT/config.txt" "$BOOT_MNT/cmdline.txt"
+            mkdir -p "$BOOT_MNT/extlinux" "$BOOT_MNT/grub"
+            echo 'DEFAULT alpine-A' > "$BOOT_MNT/extlinux/extlinux.conf"
+            When call switch_slot B
+            The contents of file "$BOOT_MNT/extlinux/extlinux.conf" should include "DEFAULT alpine-B"
+            The contents of file "$BOOT_MNT/grub/grub_aa_default.cfg" should include "set default=alpine-B"
+            The contents of file "$BOOT_MNT/current_slot" should include "B"
+            The stderr should be defined
+        End
+
+        It 'skips the GRUB write on a BIOS-only x86 boot partition (no grub dir)'
+            rm -f "$BOOT_MNT/config.txt" "$BOOT_MNT/cmdline.txt"
+            mkdir -p "$BOOT_MNT/extlinux"
+            echo 'DEFAULT alpine-A' > "$BOOT_MNT/extlinux/extlinux.conf"
+            When call switch_slot B
+            The contents of file "$BOOT_MNT/extlinux/extlinux.conf" should include "DEFAULT alpine-B"
+            The path "$BOOT_MNT/grub/grub_aa_default.cfg" should not be exist
+            The stderr should be defined
+        End
     End
 
     Describe 'Upgrade constants'
