@@ -261,6 +261,9 @@ switch_slot() {
     elif [ -f "${BOOT_MNT}/extlinux/extlinux.conf" ]; then
         sed_inplace_checked "${BOOT_MNT}/extlinux/extlinux.conf" "^DEFAULT alpine-${new_slot}\$" \
             -e "s|^DEFAULT alpine-[AB].*|DEFAULT alpine-${new_slot}|"
+        # Mirror the flip for UEFI/GRUB (same boot partition; no-op without an ESP).
+        [ -d "${BOOT_MNT}/grub" ] && \
+            printf 'set default=alpine-%s\n' "$new_slot" | atomic_write "${BOOT_MNT}/grub/grub_aa_default.cfg"
     else
         die "No known bootloader config on ${BOOT_MNT} (config.txt / extlinux.conf)"
     fi

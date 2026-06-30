@@ -131,6 +131,13 @@ if [ "$cnt" -gt 1 ] && [ "$ver" != "true" ]; then
             fi
         fi
 
+        # Mirror the rollback for UEFI/GRUB on the same boot partition (no-op
+        # without an ESP). One line, so no atomic dance is warranted.
+        if [ -d ${AA_BOOT_DIR}/grub ]; then
+            echo "set default=alpine-${other}" > ${AA_BOOT_DIR}/grub/grub_aa_default.cfg 2>/dev/null
+            sync
+        fi
+
         if [ "$changed" != "1" ]; then
             say "bootloader config unchanged (no slot pattern matched); NOT flipping current_slot"
             umount "${AA_BOOT_DIR}" 2>/dev/null

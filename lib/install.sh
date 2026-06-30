@@ -10,14 +10,17 @@
 # Constants
 # =============================================================================
 
-# Partition layout (GPT)
-# 1: Boot (FAT32, 512M) - firmware + kernel + initramfs + config
+# Partition layout (GPT). x86_64 boots part 1 via BIOS (extlinux + gptmbr) and,
+# when present, via UEFI through the trailing EFI System Partition (GRUB-EFI).
+# 1: Boot (RPi: FAT32; x86: ext4, 512M) - kernel + initramfs + extlinux config
 # 2: Slot A (raw, 2G)   - squashfs root image A
 # 3: Slot B (raw, 2G)   - squashfs root image B
-# 4: Data (ext4, rest)  - persistent overlay (optional, phase 3)
+# 4: Data (ext4, rest)  - persistent overlay (optional)
+# last: ESP (FAT32, x86 only) - GRUB-EFI; appended so 1-4 never renumber
 
 PART_BOOT_SIZE_MB=512
 PART_SLOT_SIZE_MB=2048
+PART_ESP_SIZE_MB=100
 MIN_DISK_SIZE_MB=5120
 
 # dm-verity: the per-slot hash tree is appended INSIDE the slot partition at a
@@ -271,12 +274,14 @@ create_partition_layout() {
 
     log_info "Creating boot partition (${PART_BOOT_SIZE_MB}MB)..."
     parted_tolerant "$disk" mkpart boot fat32 1MiB "${PART_BOOT_SIZE_MB}MiB"
-    parted_tolerant "$disk" set 1 boot on
-    # x86_64 BIOS: gptmbr.bin chainloads the partition carrying the GPT
-    # "legacy BIOS bootable" attribute (bit 2). extlinux's VBR lives there.
-    # Via parted_tolerant: like the others, this parted exits non-zero on a busy
-    # disk and must not be allowed to trip `set -e`.
-    if [ "$DETECTED_PLATFORM" != "rpi" ]; then
+    if [ "$DETECTED_PLATFORM" = "rpi" ]; then
+        # RPi firmware boots the FAT files off part 1; mark it the ESP.
+        parted_tolerant "$disk" set 1 boot on
+    else
+        # x86_64 BIOS boots part 1 via gptmbr.bin + extlinux's VBR, selected by
+        # the GPT "legacy BIOS bootable" attribute. UEFI is served by a separate
+        # FAT EFI System Partition appended last (see PART_ESP below), so part 1
+        # is NOT the ESP here. parted_tolerant: exits non-zero on a busy disk.
         parted_tolerant "$disk" set 1 legacy_boot on
     fi
 
@@ -286,9 +291,25 @@ create_partition_layout() {
     log_info "Creating slot B partition (${PART_SLOT_SIZE_MB}MB)..."
     parted_tolerant "$disk" mkpart slotb ext4 "$((PART_BOOT_SIZE_MB + PART_SLOT_SIZE_MB))MiB" "${slot_end_mb}MiB"
 
+    # x86_64 UEFI: a small FAT EFI System Partition, appended LAST so the boot/
+    # slotA/slotB/data partition numbers (which init.aa and the A/B logic key off)
+    # never shift. parted's negative end offset (-Nmib) carves it from the disk
+    # tail without needing the exact disk size. RPi has no ESP (firmware FAT only).
+    local want_esp=false
+    [ "$DETECTED_PLATFORM" != "rpi" ] && want_esp=true
+
     if [ "$with_data" = "true" ]; then
         log_info "Creating data partition (remaining space)..."
-        parted_tolerant "$disk" mkpart data ext4 "${slot_end_mb}MiB" 100%
+        if [ "$want_esp" = "true" ]; then
+            parted_tolerant "$disk" mkpart data ext4 "${slot_end_mb}MiB" "-${PART_ESP_SIZE_MB}MiB"
+            parted_tolerant "$disk" mkpart esp fat32 "-${PART_ESP_SIZE_MB}MiB" 100%
+            parted_tolerant "$disk" set 5 esp on
+        else
+            parted_tolerant "$disk" mkpart data ext4 "${slot_end_mb}MiB" 100%
+        fi
+    elif [ "$want_esp" = "true" ]; then
+        parted_tolerant "$disk" mkpart esp fat32 "${slot_end_mb}MiB" 100%
+        parted_tolerant "$disk" set 4 esp on
     fi
 
     # Validate the layout actually landed on disk (parted may have only warned
@@ -535,7 +556,27 @@ format_partitions() {
         fi
     fi
 
+    # x86_64 UEFI: format the trailing EFI System Partition (FAT32). It is the
+    # last partition (5 with data, else 4). RPi has no ESP.
+    if [ "$DETECTED_PLATFORM" != "rpi" ]; then
+        local esp_dev
+        esp_dev=$(get_esp_dev "$disk" "$with_data")
+        if [ -n "$esp_dev" ] && [ -e "$esp_dev" ]; then
+            log_info "Formatting EFI System Partition ($esp_dev, FAT32)..."
+            require mkfs.vfat -F 32 -n ALPINE_ESP "$esp_dev"
+        fi
+    fi
+
     log_info "Partitions formatted"
+}
+
+# x86_64 EFI System Partition device: appended last, so part 5 when a data
+# partition exists, else part 4. Empty on RPi (no ESP).
+get_esp_dev() {
+    local disk="$1" with_data="$2" num=4
+    [ "$DETECTED_PLATFORM" = "rpi" ] && return 0
+    [ "$with_data" = "true" ] && num=5
+    get_part_dev "$disk" "$num"
 }
 
 # Path to the LUKS key material (the passphrase bytes) staged by the control
@@ -1940,6 +1981,8 @@ run_ab_install() {
     install_boot_config "$boot_mnt" "$disk"
     # x86_64 BIOS: write the actual boot code (extlinux + gptmbr). No-op on RPi.
     install_bios_bootloader "$disk" "$boot_mnt"
+    # x86_64 UEFI: GRUB-EFI on the ESP, booting the same A/B kernels. No-op on RPi.
+    install_uefi_bootloader "$disk" "$boot_mnt" "$with_data"
 
     # Copy alpine-anywhere scripts to boot partition for future upgrades
     mkdir -p "${boot_mnt}/alpine-anywhere/lib"
@@ -2274,4 +2317,91 @@ install_bios_bootloader() {
     fi
     sync
     log_info "x86_64 BIOS bootloader installed (extlinux + gptmbr, legacy_boot on part 1)"
+}
+
+# Write the editable GRUB config on the (ext4) boot partition. It mirrors
+# extlinux.conf: two A/B menuentries booting the slot kernels with the same
+# root=PARTUUID and kernel options. The active slot is sourced from
+# grub_aa_default.cfg on this same partition, so init.aa (rollback) and aa-switch
+# flip the UEFI default with a one-line write next to the extlinux edit they
+# already do. $aaroot is resolved by GRUB at boot from the ALPINE_BOOT label.
+write_grub_cfg() {
+    local boot_mnt="$1" disk="$2" slot="${3:-A}"
+    local slota_dev slotb_dev slota_root slotb_root pu
+    slota_dev=$(get_part_dev "$disk" 2)
+    slotb_dev=$(get_part_dev "$disk" 3)
+    pu=$(_partuuid "$slota_dev"); slota_root="${pu:+PARTUUID=$pu}"; slota_root="${slota_root:-$slota_dev}"
+    pu=$(_partuuid "$slotb_dev"); slotb_root="${pu:+PARTUUID=$pu}"; slotb_root="${slotb_root:-$slotb_dev}"
+
+    mkdir -p "${boot_mnt}/grub"
+    printf 'set default=alpine-%s\n' "$slot" > "${boot_mnt}/grub/grub_aa_default.cfg"
+    cat > "${boot_mnt}/grub/grub.cfg" << EOF
+set timeout=3
+insmod part_gpt
+insmod ext2
+insmod fat
+search --no-floppy --label ALPINE_BOOT --set aaroot
+set default=alpine-A
+if [ -f (\$aaroot)/grub/grub_aa_default.cfg ]; then
+    source (\$aaroot)/grub/grub_aa_default.cfg
+fi
+menuentry "Alpine Linux (Slot A)" --id alpine-A {
+    linux (\$aaroot)/vmlinuz-A root=${slota_root} $(slot_kernel_opts)
+    initrd (\$aaroot)/initramfs-A
+}
+menuentry "Alpine Linux (Slot B)" --id alpine-B {
+    linux (\$aaroot)/vmlinuz-B root=${slotb_root} $(slot_kernel_opts)
+    initrd (\$aaroot)/initramfs-B
+}
+EOF
+}
+
+# Install GRUB-EFI so an x86_64 UEFI firmware can boot the disk. The standalone
+# image is written to the UEFI removable/fallback path (/EFI/BOOT/BOOTX64.EFI) on
+# the ESP, so no NVRAM boot entry (efibootmgr) is needed - it boots on firmware
+# whose NVRAM is reset/absent (cloud). It only bootstraps to the editable grub.cfg
+# on the boot partition (write_grub_cfg). No-op on RPi; soft-fails (BIOS still
+# works) if GRUB tooling or an ESP is missing.
+install_uefi_bootloader() {
+    local disk="$1" boot_mnt="$2" with_data="$3" slot="${4:-A}"
+    [ "$DETECTED_PLATFORM" = "rpi" ] && return 0
+
+    local mkstandalone
+    mkstandalone=$(command -v grub-mkstandalone 2>/dev/null || true)
+    if [ -z "$mkstandalone" ]; then
+        if command -v apk >/dev/null 2>&1; then
+            apk add --no-cache grub grub-efi >/dev/null 2>&1 || true
+        elif command -v apt-get >/dev/null 2>&1; then
+            DEBIAN_FRONTEND=noninteractive apt-get -qq install -y grub-efi-amd64-bin grub-common >/dev/null 2>&1 || true
+        fi
+        mkstandalone=$(command -v grub-mkstandalone 2>/dev/null || true)
+    fi
+    [ -n "$mkstandalone" ] || { log_warn "grub-mkstandalone not available; UEFI boot NOT installed (BIOS still works)"; return 0; }
+
+    local esp_dev esp_mnt="/mnt/aa-esp"
+    esp_dev=$(get_esp_dev "$disk" "$with_data")
+    [ -n "$esp_dev" ] && [ -e "$esp_dev" ] || { log_warn "no EFI System Partition found; UEFI boot NOT installed"; return 0; }
+
+    write_grub_cfg "$boot_mnt" "$disk" "$slot"
+
+    mkdir -p "$esp_mnt"
+    require mount "$esp_dev" "$esp_mnt"
+    mkdir -p "${esp_mnt}/EFI/BOOT"
+
+    local embed="/tmp/aa-grub-embed.cfg"
+    cat > "$embed" << 'EOF'
+search --no-floppy --label ALPINE_BOOT --set aaroot
+if [ -n "$aaroot" ]; then
+    set prefix=($aaroot)/grub
+    configfile ($aaroot)/grub/grub.cfg
+fi
+EOF
+    if "$mkstandalone" -O x86_64-efi -o "${esp_mnt}/EFI/BOOT/BOOTX64.EFI" \
+            "boot/grub/grub.cfg=${embed}" >/dev/null 2>&1; then
+        log_info "x86_64 UEFI bootloader installed (GRUB-EFI at /EFI/BOOT/BOOTX64.EFI -> ALPINE_BOOT/grub/grub.cfg)"
+    else
+        log_warn "grub-mkstandalone failed; UEFI boot NOT installed (BIOS still works)"
+    fi
+    sync
+    umount "$esp_mnt" 2>/dev/null || true
 }
