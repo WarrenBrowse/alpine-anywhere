@@ -269,6 +269,10 @@ exec >/dev/console 2>&1
 mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sysfs /sys 2>/dev/null
 
+# Apply the baked hostname. s6 (unlike OpenRC) has no hostname service, so
+# without this the kernel hostname stays "(none)" regardless of /etc/hostname.
+[ -s /etc/hostname ] && hostname "$(cat /etc/hostname)" 2>/dev/null
+
 bootdev=$(sed -n 's|.*root=/dev/\([a-z0-9]*\)[0-9].*|/dev/\11|p' /proc/cmdline)
 [ -n "$bootdev" ] || bootdev=/dev/sda1
 mkdir -p /run/aa-log

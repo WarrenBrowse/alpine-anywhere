@@ -117,6 +117,9 @@ Describe 'custom files & custom services'
             The status should be success
             The path "$ROOT/etc/s6-rc/source/warren-exit/type" should be exist
             The path "$ROOT/etc/s6-rc/source/default/contents.d/warren-exit" should be exist
+            # s6 has no hostname service: rc.init must apply /etc/hostname itself,
+            # else the kernel hostname stays "(none)".
+            The contents of file "$ROOT/etc/s6-linux-init/skel/rc.init" should include "hostname"
             The stderr should be present
         End
     End
