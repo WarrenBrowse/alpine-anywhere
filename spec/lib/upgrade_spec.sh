@@ -100,6 +100,22 @@ Describe 'upgrade.sh'
                 The output should equal "A"
             End
         End
+
+        Context 'when the active slot is unknown'
+            setup() {
+                no_runtime_disk
+                BOOT_MNT=$(mktemp -d)
+            }
+            cleanup() { rm -rf "$BOOT_MNT"; }
+            Before 'setup'
+            After 'cleanup'
+
+            It 'propagates the failure instead of inventing a target'
+                When run get_inactive_slot
+                The status should be failure
+                The stderr should include "Cannot determine the active slot"
+            End
+        End
     End
 
     Describe 'get_current_slot()'
@@ -128,9 +144,29 @@ Describe 'upgrade.sh'
             Before 'setup'
             After 'cleanup'
 
-            It 'defaults to A'
-                When call get_current_slot
-                The output should equal "A"
+            It 'fails closed instead of guessing a slot'
+                When run get_current_slot
+                The status should be failure
+                The stderr should include "Cannot determine the active slot"
+                The stderr should include "current_slot"
+                The stderr should include "aa status"
+            End
+        End
+
+        Context 'when current_slot file holds garbage'
+            setup() {
+                no_runtime_disk
+                BOOT_MNT=$(mktemp -d)
+                echo "X" > "${BOOT_MNT}/current_slot"
+            }
+            cleanup() { rm -rf "$BOOT_MNT"; }
+            Before 'setup'
+            After 'cleanup'
+
+            It 'fails closed instead of guessing a slot'
+                When run get_current_slot
+                The status should be failure
+                The stderr should include "Cannot determine the active slot"
             End
         End
     End

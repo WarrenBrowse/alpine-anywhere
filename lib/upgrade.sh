@@ -66,6 +66,10 @@ get_root_device() {
     r=$(sed -n 's/.*[ ]root=\([^ ]*\).*/\1/p' "$cmdline" 2>/dev/null | head -n1)
     case "$r" in
         ""|PARTUUID=*|UUID=*|LABEL=*)
+            # dm-verity caveat: with a verity-mapped root the squashfs source is
+            # /dev/dm-* and never matches a slot partition, so slot detection
+            # falls back to the current_slot marker (or fails closed). The
+            # deploy path currently uses --no-verity, where this is exact.
             s=$(awk '$3=="squashfs"{print $1; exit}' "$mounts" 2>/dev/null)
             [ -n "$s" ] && { echo "$s"; return; }
             s=$(findmnt -no SOURCE /media/root-ro 2>/dev/null)
@@ -111,8 +115,10 @@ umount_boot() {
 
 # Currently active slot. The running root device is authoritative; the
 # current_slot marker file is only a fallback (e.g. when run off-device).
+# Fail-closed on purpose: a guessed slot once sent an upgrade over the RUNNING
+# slot's partition, so no positive answer means abort, never a default.
 get_current_slot() {
-    local disk root
+    local disk root marker
     disk=$(get_boot_disk 2>/dev/null) || disk=""
     root=$(get_root_device)
 
@@ -120,11 +126,17 @@ get_current_slot() {
         if [ "$root" = "$(get_part_dev "$disk" 2)" ]; then echo A; return; fi
         if [ "$root" = "$(get_part_dev "$disk" 3)" ]; then echo B; return; fi
     fi
-    cat "${BOOT_MNT}/current_slot" 2>/dev/null || echo A
+    marker=$(cat "${BOOT_MNT}/current_slot" 2>/dev/null) || marker=""
+    case "$marker" in
+        A|B) echo "$marker"; return ;;
+    esac
+    die "Cannot determine the active slot: running root (${root:-unknown}) matches no slot partition and ${BOOT_MNT}/current_slot has no valid A/B marker. Inspect 'aa status' and the marker file before retrying; guessing a slot risks overwriting the running system."
 }
 
 get_inactive_slot() {
-    if [ "$(get_current_slot)" = "A" ]; then echo B; else echo A; fi
+    local cur
+    cur=$(get_current_slot) || die "Cannot pick an upgrade target: active slot unknown"
+    if [ "$cur" = "A" ]; then echo B; else echo A; fi
 }
 
 # =============================================================================
