@@ -49,4 +49,12 @@ boot partition in the same step:
 
 All three write to the boot partition that `init.aa` already mounts, so there is
 no second mount and no extra state to keep in sync. A box with no ESP (BIOS-only)
-simply has no `grub/` directory, and the GRUB writes are skipped.
+simply has no `grub/` directory, and the GRUB writes are skipped. Conversely, a
+GRUB-only box (UEFI without `extlinux/extlinux.conf` or `config.txt`, e.g. a
+Hetzner cloud server) is first-class: `switch_slot` and `init.aa` treat the
+`grub_aa_default.cfg` write itself as the slot flip.
+
+TODO: extend the QEMU VM integration matrix (`spec/integration/vm/`) with a
+GRUB-only (UEFI, no extlinux.conf) case; that layout is currently covered by
+unit specs only, so an on-box validation on the Hetzner exits is still required
+before trusting the persist path there.

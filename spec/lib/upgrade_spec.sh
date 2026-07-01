@@ -328,6 +328,57 @@ Describe 'upgrade.sh'
             The path "$BOOT_MNT/grub/grub_aa_default.cfg" should not be exist
             The stderr should be defined
         End
+
+        It 'flips the GRUB default on a GRUB-only boot partition (UEFI, no extlinux)'
+            rm -f "$BOOT_MNT/config.txt" "$BOOT_MNT/cmdline.txt"
+            mkdir -p "$BOOT_MNT/grub"
+            printf 'set default=alpine-A\n' > "$BOOT_MNT/grub/grub_aa_default.cfg"
+            printf 'menuentry "Alpine Linux (Slot A)" --id alpine-A {\n}\n' > "$BOOT_MNT/grub/grub.cfg"
+            When call switch_slot B
+            The contents of file "$BOOT_MNT/grub/grub_aa_default.cfg" should include "set default=alpine-B"
+            The contents of file "$BOOT_MNT/current_slot" should include "B"
+            The stderr should be defined
+        End
+
+        It 'dies when no bootloader config exists at all'
+            rm -f "$BOOT_MNT/config.txt" "$BOOT_MNT/cmdline.txt"
+            When run switch_slot B
+            The status should be failure
+            The stderr should include "No known bootloader config"
+            The path "$BOOT_MNT/current_slot" should not be exist
+        End
+    End
+
+    Describe 'show_status()'
+        setup_status() {
+            get_boot_disk() { echo /dev/sda; }
+            get_root_device() { echo /dev/sda2; }
+            get_part_dev() { echo "/dev/sda$2"; }
+            mount_boot() { :; }
+            umount_boot() { :; }
+            BOOT_MNT=$(mktemp -d)
+            echo B > "$BOOT_MNT/current_slot"
+            mkdir -p "$BOOT_MNT/grub"
+            printf 'set default=alpine-B\n' > "$BOOT_MNT/grub/grub_aa_default.cfg"
+            {
+                echo 'menuentry "Alpine Linux (Slot A)" --id alpine-A {'
+                echo '    linux ($aaroot)/vmlinuz-A root=PARTUUID=aaaa quiet'
+                echo '}'
+                echo 'menuentry "Alpine Linux (Slot B)" --id alpine-B {'
+                echo '    linux ($aaroot)/vmlinuz-B root=PARTUUID=bbbb quiet'
+                echo '}'
+            } > "$BOOT_MNT/grub/grub.cfg"
+        }
+        cleanup_status() { rm -rf "$BOOT_MNT"; }
+        Before 'setup_status'
+        After 'cleanup_status'
+
+        It 'reports the next-boot root from grub.cfg on a GRUB-only layout'
+            When call show_status
+            The output should include "Boot slot:     B"
+            The output should include "root=PARTUUID=bbbb"
+            The stderr should be defined
+        End
     End
 
     Describe 'Upgrade constants'

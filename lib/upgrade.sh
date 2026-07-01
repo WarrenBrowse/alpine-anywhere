@@ -304,8 +304,12 @@ switch_slot() {
         # Mirror the flip for UEFI/GRUB (same boot partition; no-op without an ESP).
         [ -d "${BOOT_MNT}/grub" ] && \
             printf 'set default=alpine-%s\n' "$new_slot" | atomic_write "${BOOT_MNT}/grub/grub_aa_default.cfg"
+    elif [ -f "${BOOT_MNT}/grub/grub.cfg" ]; then
+        # GRUB-only layout (UEFI-only boxes, e.g. Hetzner cloud servers): the
+        # active slot lives solely in grub_aa_default.cfg, sourced by grub.cfg.
+        printf 'set default=alpine-%s\n' "$new_slot" | atomic_write "${BOOT_MNT}/grub/grub_aa_default.cfg"
     else
-        die "No known bootloader config on ${BOOT_MNT} (config.txt / extlinux.conf)"
+        die "No known bootloader config on ${BOOT_MNT} (config.txt / extlinux.conf / grub/grub.cfg)"
     fi
     # Only flip current_slot AFTER the bootloader config was confirmed changed.
     printf '%s\n' "$new_slot" | atomic_write "${BOOT_MNT}/current_slot"
@@ -448,6 +452,13 @@ show_status() {
     [ -z "$boot_cfg" ] && [ -f "${BOOT_MNT}/extlinux/extlinux.conf" ] && boot_cfg="${BOOT_MNT}/extlinux/extlinux.conf"
     boot_root=""
     [ -n "$boot_cfg" ] && boot_root=$(sed -n 's/.*\(root=[^ ]*\).*/\1/p' "$boot_cfg" 2>/dev/null | head -n1) || true
+    # GRUB-only layout: the next-boot root lives in the slot menuentry of
+    # grub.cfg, selected by grub_aa_default.cfg.
+    if [ -z "$boot_cfg" ] && [ -f "${BOOT_MNT}/grub/grub.cfg" ]; then
+        local grub_slot
+        grub_slot=$(sed -n 's/^set default=alpine-\([AB]\).*/\1/p' "${BOOT_MNT}/grub/grub_aa_default.cfg" 2>/dev/null | head -n1) || true
+        [ -n "$grub_slot" ] && boot_root=$(sed -n "/vmlinuz-${grub_slot} /s/.*\(root=[^ ]*\).*/\1/p" "${BOOT_MNT}/grub/grub.cfg" 2>/dev/null | head -n1) || true
+    fi
 
     echo "Alpine Anywhere A/B Status"
     echo "=========================="
