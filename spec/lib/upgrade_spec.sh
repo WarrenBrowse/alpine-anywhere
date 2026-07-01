@@ -196,6 +196,56 @@ Describe 'upgrade.sh'
         End
     End
 
+    Describe 'live_root_backing_dev()'
+        setup_live() {
+            LRDIR=$(mktemp -d)
+            export AA_MOUNTS_FILE="$LRDIR/mounts" AA_SYS_BLOCK_DIR="$LRDIR/sys"
+        }
+        cleanup_live() { rm -rf "$LRDIR"; unset AA_MOUNTS_FILE AA_SYS_BLOCK_DIR; }
+        Before 'setup_live'
+        After 'cleanup_live'
+
+        It 'returns the live squashfs source verbatim'
+            printf '/dev/sda2 /media/root-ro squashfs ro 0 0\n' > "$AA_MOUNTS_FILE"
+            When call live_root_backing_dev
+            The output should equal "/dev/sda2"
+        End
+
+        It 'resolves a dm-mapped root to its backing partition'
+            printf '/dev/dm-0 /media/root-ro squashfs ro 0 0\n' > "$AA_MOUNTS_FILE"
+            mkdir -p "$LRDIR/sys/dm-0/slaves/sda2"
+            When call live_root_backing_dev
+            The output should equal "/dev/sda2"
+        End
+
+        It 'returns nothing when no squashfs root is mounted'
+            printf '/dev/sda1 / ext4 rw 0 0\n' > "$AA_MOUNTS_FILE"
+            When call live_root_backing_dev
+            The output should equal ""
+        End
+    End
+
+    Describe 'install_to_slot()'
+        setup_install() {
+            IDIR=$(mktemp -d)
+            export AA_MOUNTS_FILE="$IDIR/mounts"
+            printf '/dev/sda3 /media/root-ro squashfs ro 0 0\n' > "$AA_MOUNTS_FILE"
+            get_boot_disk() { echo /dev/sda; }
+            get_part_dev() { echo "/dev/sda$2"; }
+            generate_system_squashfs() { echo built > "$IDIR/built"; }
+        }
+        cleanup_install() { rm -rf "$IDIR"; unset AA_MOUNTS_FILE; }
+        Before 'setup_install'
+        After 'cleanup_install'
+
+        It 'refuses to write the target slot over the live root device'
+            When run install_to_slot B 3.20
+            The status should be failure
+            The stderr should include "live root"
+            The path "$IDIR/built" should not be exist
+        End
+    End
+
     Describe 'sed_inplace_checked()'
         setup() {
             F=$(mktemp)

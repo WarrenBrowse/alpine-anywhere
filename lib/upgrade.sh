@@ -184,16 +184,42 @@ set_global_meta() {
 # Upgrade Process
 # =============================================================================
 
+# Block device backing the currently mounted squashfs root, best-effort: a
+# dm-mapped root (verity) is resolved through its /sys slaves; anything the
+# heuristic cannot resolve returns as-is (or empty), and the caller's guard
+# simply cannot match. Paths overridable for tests.
+live_root_backing_dev() {
+    local src name slave
+    local mounts="${AA_MOUNTS_FILE:-/proc/mounts}" sysblk="${AA_SYS_BLOCK_DIR:-/sys/block}"
+    src=$(awk '$3=="squashfs"{print $1; exit}' "$mounts" 2>/dev/null)
+    [ -n "$src" ] || return 0
+    case "$src" in
+        /dev/dm-*)
+            name=${src##*/}
+            slave=$(ls "$sysblk/$name/slaves" 2>/dev/null | head -n1)
+            [ -n "$slave" ] && { echo "/dev/$slave"; return 0; }
+            ;;
+    esac
+    echo "$src"
+}
+
 # Build a fresh system image and write it to the given (inactive) slot,
 # including that slot's kernel + initramfs on the boot partition.
 install_to_slot() {
     local target_slot="$1"
     local version="${2:-$ALPINE_VERSION}"
 
-    local disk partnum slot_dev
+    local disk partnum slot_dev live_dev
     disk=$(get_boot_disk)
     partnum=$(slot_to_partnum "$target_slot")
     slot_dev=$(get_part_dev "$disk" "$partnum")
+
+    # Last-line guard against slot mis-detection: a mis-detected active slot
+    # once sent the new image over the RUNNING slot's backing partition.
+    live_dev=$(live_root_backing_dev)
+    if [ -n "$live_dev" ] && [ "$live_dev" = "$slot_dev" ]; then
+        die "Refusing to write slot $target_slot: $slot_dev backs the live root filesystem (slot detection is wrong; check 'aa status')"
+    fi
 
     log_step "Building Alpine $version for slot $target_slot..."
 
