@@ -323,4 +323,23 @@ Describe 'network.sh'
             The output should include 'Architecture: x86_64'
         End
     End
+
+    Describe 'detect_hostname()'
+        log_step() { :; }
+        log_info() { :; }
+        # Stand in for the SSH probe of the source system's hostname.
+        ssh_exec_capture() { echo "old-provider-default"; }
+
+        It 'prefers HOSTNAME_OVERRIDE over the source system hostname'
+            HOSTNAME_OVERRIDE="exit-sg-sin1"
+            When call detect_hostname
+            The variable DETECTED_HOSTNAME should equal "exit-sg-sin1"
+        End
+
+        It 'falls back to the detected hostname when no override is given'
+            HOSTNAME_OVERRIDE=""
+            When call detect_hostname
+            The variable DETECTED_HOSTNAME should equal "old-provider-default"
+        End
+    End
 End

@@ -1118,24 +1118,19 @@ _aa_cli_src() {
     else return 1; fi
 }
 
-# Install the full alpine-anywhere tool into $root, exposed as the `aa` command.
-#   /usr/local/share/alpine-anywhere/{alpine-anywhere,lib/*.sh} - a complete copy
-#     so the installed host can itself act as a control host and install other
-#     remotes (e.g. `aa --install user@other`).
-#   /usr/local/bin/aa - exec wrapper for the command (no system dirs touched).
-AA_TOOL_DIR="/usr/local/share/alpine-anywhere"
+# Install the full alpine-anywhere tool into $root, exposed as the `aa` command,
+# so the installed host can itself act as a control host and install other
+# remotes (e.g. `aa --install user@other`).
+#   /usr/local/bin/aa      - the tool itself (the alpine-anywhere script verbatim;
+#                            it locates its libs at /usr/local/lib/aa at runtime).
+#   /usr/local/lib/aa/*.sh - the library modules it sources.
+AA_LIB_DIR="/usr/local/lib/aa"
 install_aa_cli() {
-    local root="$1" srcbase dest
+    local root="$1" srcbase
     srcbase=$(_aa_cli_src) || return 1
-    dest="${root}${AA_TOOL_DIR}"
-    mkdir -p "${dest}/lib" "${root}/usr/local/bin"
-    cp "${srcbase}/alpine-anywhere" "${dest}/alpine-anywhere"
-    cp "${srcbase}"/lib/*.sh "${dest}/lib/"
-    chmod +x "${dest}/alpine-anywhere"
-    cat > "${root}/usr/local/bin/aa" << EOF
-#!/bin/sh
-exec ${AA_TOOL_DIR}/alpine-anywhere "\$@"
-EOF
+    mkdir -p "${root}${AA_LIB_DIR}" "${root}/usr/local/bin"
+    cp "${srcbase}"/lib/*.sh "${root}${AA_LIB_DIR}/"
+    cp "${srcbase}/alpine-anywhere" "${root}/usr/local/bin/aa"
     chmod +x "${root}/usr/local/bin/aa"
     # The dropbear (hardened) login PATH is /usr/sbin:/usr/bin:/sbin:/bin and
     # does NOT include /usr/local/bin, so an interactive `aa` would be "not

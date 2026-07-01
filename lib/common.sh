@@ -61,6 +61,10 @@ KEY_URL="${KEY_URL:-}"                     # keyfile method: URL to fetch the LU
 KEY_FILE="${KEY_FILE:-}"                   # keyfile method: local key file baked to boot FAT
 CONTAINERS="${CONTAINERS:-none}"          # Container runtime baked in: none|podman|docker|both (podman = rootless)
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-crun}"  # OCI runtime: crun|runsc (runsc = gVisor, fetched in custom-script)
+# --hostname: operator-chosen hostname baked into /etc/hostname. Empty = fall
+# back to the detected hostname of the source system (which is usually stale for
+# a re-provisioned box, e.g. the old provider default).
+HOSTNAME_OVERRIDE="${HOSTNAME_OVERRIDE:-}"
 
 # Working directories (set by setup_install_dirs in exec.sh)
 WORK_DIR=""
@@ -588,6 +592,8 @@ config, whatever set it: systemd, openrc, s6, or a manual ip command):
                                    you give v6 to a v4-only host (FDC static /64)
   --ipv6-gateway ADDR            IPv6 gateway (e.g. 2001:db8::1)
   --dns "S1 S2"                  Override resolvers (space/comma-separated)
+  --hostname NAME                Hostname baked into the installed system
+                                   (default: reuse the source system's hostname)
   -y, --yes                      Skip the pre-pivot access confirmation (for the
                                    warren deploy script / non-interactive runs)
 
@@ -727,6 +733,14 @@ parse_arguments() {
                 ;;
             --ssh-host-keys=*)
                 SSH_HOST_KEY_DIR="${1#*=}"
+                shift
+                ;;
+            --hostname)
+                HOSTNAME_OVERRIDE="$2"
+                shift 2
+                ;;
+            --hostname=*)
+                HOSTNAME_OVERRIDE="${1#*=}"
                 shift
                 ;;
             --method)

@@ -111,7 +111,13 @@ detect_hostname() {
     log_step "Detecting hostname..."
 
     local hostname
-    hostname=$(ssh_exec_capture "hostname -s 2>/dev/null || hostname")
+    # An operator-supplied --hostname wins: a re-provisioned box otherwise
+    # inherits the source system's stale name (e.g. the old provider default).
+    if [ -n "$HOSTNAME_OVERRIDE" ]; then
+        hostname="$HOSTNAME_OVERRIDE"
+    else
+        hostname=$(ssh_exec_capture "hostname -s 2>/dev/null || hostname")
+    fi
 
     if [ -z "$hostname" ]; then
         hostname="alpine"

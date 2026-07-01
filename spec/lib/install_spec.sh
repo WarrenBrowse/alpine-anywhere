@@ -354,12 +354,14 @@ exit 0'
         Before 'setup'
         After 'cleanup'
 
-        It 'installs aa in /usr/local/bin and the full tool in /usr/local/share'
+        It 'installs the aa tool in /usr/local/bin/aa with libs in /usr/local/lib/aa'
             When call bake_management_tools "$ROOT"
             The path "$ROOT/usr/local/bin/aa" should be exist
-            The contents of file "$ROOT/usr/local/bin/aa" should include "/usr/local/share/alpine-anywhere/alpine-anywhere"
-            The path "$ROOT/usr/local/share/alpine-anywhere/alpine-anywhere" should be exist
-            The path "$ROOT/usr/local/share/alpine-anywhere/lib/upgrade.sh" should be exist
+            # The script is the alpine-anywhere tool itself, not a share/ wrapper.
+            The contents of file "$ROOT/usr/local/bin/aa" should include "alpine-anywhere"
+            The path "$ROOT/usr/local/lib/aa/upgrade.sh" should be exist
+            The path "$ROOT/usr/local/lib/aa/common.sh" should be exist
+            The path "$ROOT/usr/local/share/alpine-anywhere" should not be exist
             The stderr should be defined
         End
 

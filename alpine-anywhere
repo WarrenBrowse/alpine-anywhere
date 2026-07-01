@@ -20,10 +20,15 @@ set -eu
 # Get the directory where the script is located
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Determine library directory
-LIB_DIR="${SCRIPT_DIR}/lib"
-if [ ! -d "$LIB_DIR" ]; then
-    echo "ERROR: Cannot find library directory: $LIB_DIR" >&2
+# Determine library directory. Dev / control-host layout keeps lib/ next to the
+# script; the installed layout ships the script as /usr/local/bin/aa with its
+# modules under /usr/local/lib/aa (see install_aa_cli in lib/install.sh).
+if [ -d "${SCRIPT_DIR}/lib" ]; then
+    LIB_DIR="${SCRIPT_DIR}/lib"
+elif [ -d /usr/local/lib/aa ]; then
+    LIB_DIR="/usr/local/lib/aa"
+else
+    echo "ERROR: Cannot find library directory (${SCRIPT_DIR}/lib or /usr/local/lib/aa)" >&2
     exit 1
 fi
 

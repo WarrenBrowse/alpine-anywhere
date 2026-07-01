@@ -271,9 +271,9 @@ mount -t sysfs sysfs /sys 2>/dev/null
 
 bootdev=$(sed -n 's|.*root=/dev/\([a-z0-9]*\)[0-9].*|/dev/\11|p' /proc/cmdline)
 [ -n "$bootdev" ] || bootdev=/dev/sda1
-mkdir -p /aa-log
-mount "$bootdev" /aa-log 2>/dev/null
-slog() { echo "[s6-rc.init] $*"; echo "[$(cat /proc/uptime 2>/dev/null|cut -d. -f1)] $*" >> /aa-log/s6-boot.log 2>/dev/null; sync 2>/dev/null; }
+mkdir -p /run/aa-log
+mount "$bootdev" /run/aa-log 2>/dev/null
+slog() { echo "[s6-rc.init] $*"; echo "[$(cat /proc/uptime 2>/dev/null|cut -d. -f1)] $*" >> /run/aa-log/s6-boot.log 2>/dev/null; sync 2>/dev/null; }
 
 slog "rc.init start rl=$rl"
 if s6-rc-init -c /etc/s6-rc/compiled -l /run/s6-rc /run/service; then
@@ -293,7 +293,7 @@ fi
   else mkdir -p /run/sshd; /usr/sbin/sshd 2>/dev/null; fi ) &
 
 slog "rc.init done"
-umount /aa-log 2>/dev/null
+umount /run/aa-log 2>/dev/null
 EOF
     cat > "${skel}/runlevel" << 'EOF'
 #!/bin/sh

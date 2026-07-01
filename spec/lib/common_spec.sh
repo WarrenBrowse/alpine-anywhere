@@ -199,6 +199,7 @@ Describe 'common.sh'
             LOCAL_MODE=false
             TARGET_USER=""
             TARGET_HOST=""
+            HOSTNAME_OVERRIDE=""
         }
         Before 'setup'
 
@@ -232,6 +233,16 @@ Describe 'common.sh'
             The variable INSTALL_MODE should equal "true"
             The variable OVERLAY_DEVICE should equal "/dev/sda3"
             The variable KEEP_EXISTING should equal "true"
+        End
+
+        It 'parses --hostname with value'
+            When call parse_arguments --hostname exit-sg-sin1 --local
+            The variable HOSTNAME_OVERRIDE should equal "exit-sg-sin1"
+        End
+
+        It 'parses --hostname= format'
+            When call parse_arguments --hostname=exit-de-kas1 --local
+            The variable HOSTNAME_OVERRIDE should equal "exit-de-kas1"
         End
     End
 
