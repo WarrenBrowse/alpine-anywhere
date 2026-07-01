@@ -70,6 +70,21 @@ Describe 'init.aa boot-guard'
         The stderr should be defined
     End
 
+    It 'rolls back on a GRUB-only boot partition (no config.txt, no extlinux)'
+        seed_meta "SLOT_A_VERSION=3.20" "SLOT_A_VERIFIED=false" "SLOT_A_BOOT_COUNT=1" \
+                  "SLOT_B_VERSION=3.20" "SLOT_B_VERIFIED=true" "SLOT_B_BOOT_COUNT=0"
+        mkdir -p "$AA_BOOT_DIR/grub"
+        printf 'set default=alpine-A\n' > "$AA_BOOT_DIR/grub/grub_aa_default.cfg"
+        When run sh "$INIT_AA" /dev/sda2 ""
+        The status should be success
+        The contents of file "$AA_BOOT_DIR/grub/grub_aa_default.cfg" should include "set default=alpine-B"
+        The contents of file "$AA_BOOT_DIR/current_slot" should include "B"
+        The contents of file "$AA_BOOT_DIR/slots.meta" should include "SLOT_B_BOOT_COUNT=0"
+        The path "$SANDBOX/reboot.fired" should be exist
+        The stdout should be defined
+        The stderr should be defined
+    End
+
     It 'does not roll back when the other slot has no image'
         seed_meta "SLOT_A_VERSION=3.20" "SLOT_A_VERIFIED=false" "SLOT_A_BOOT_COUNT=1" \
                   "SLOT_B_VERSION=" "SLOT_B_VERIFIED=false" "SLOT_B_BOOT_COUNT=0"

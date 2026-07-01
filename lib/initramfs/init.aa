@@ -8,7 +8,7 @@
 #
 # Strict POSIX sh / BusyBox ash - runs before switch_root. Do not add bashisms.
 # This file is a standalone script (not a heredoc) so it can be `sh -n`-checked,
-# shellcheck'd and unit-tested; wrap_boot_initramfs copies it into the initramfs.
+# linted and unit-tested; wrap_boot_initramfs copies it into the initramfs.
 ROOTARG="$1"; SYSROOT="$2"
 
 # Mount point for the FAT boot partition. Overridable for unit tests; defaults
@@ -132,10 +132,17 @@ if [ "$cnt" -gt 1 ] && [ "$ver" != "true" ]; then
         fi
 
         # Mirror the rollback for UEFI/GRUB on the same boot partition (no-op
-        # without an ESP). One line, so no atomic dance is warranted.
+        # without an ESP). One line, so no atomic dance is warranted. A verified
+        # flip counts as a bootloader change like the edits above: on a
+        # GRUB-only box (no config.txt, no extlinux.conf) this write IS the
+        # slot flip, and without changed=1 the marker update and reboot below
+        # would never run there, leaving GRUB and current_slot disagreeing.
         if [ -d ${AA_BOOT_DIR}/grub ]; then
             echo "set default=alpine-${other}" > ${AA_BOOT_DIR}/grub/grub_aa_default.cfg 2>/dev/null
             sync
+            if grep -q "alpine-${other}" ${AA_BOOT_DIR}/grub/grub_aa_default.cfg 2>/dev/null; then
+                changed=1
+            fi
         fi
 
         if [ "$changed" != "1" ]; then
