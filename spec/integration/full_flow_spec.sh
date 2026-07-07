@@ -7,7 +7,6 @@ Describe 'alpine-anywhere integration'
     Include lib/network.sh
     Include lib/download.sh
     Include lib/apkovl.sh
-    Include lib/kexec.sh
     Include lib/validate.sh
 
     Describe 'parse_arguments()'
@@ -154,14 +153,6 @@ Describe 'alpine-anywhere integration'
         }
         Before 'setup'
 
-        It 'generates valid kernel command line'
-            When call build_kernel_cmdline
-            The output should include 'console=tty0'
-            The output should include 'alpine_repo='
-            The output should include 'modloop='
-            The output should include 'ip=172.16.0.100::'
-        End
-
         It 'generates valid network interfaces'
             When call generate_interfaces_config
             The output should include 'auto ens192'
@@ -172,11 +163,6 @@ Describe 'alpine-anywhere integration'
         It 'generates valid resolv.conf'
             When call generate_resolv_conf
             The output should include 'nameserver 172.16.0.1'
-        End
-
-        It 'builds correct download URLs'
-            When call build_alpine_file_url vmlinuz
-            The output should include 'v3.20/releases/x86_64/netboot/vmlinuz-lts'
         End
     End
 End

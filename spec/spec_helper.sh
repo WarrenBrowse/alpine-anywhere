@@ -42,12 +42,6 @@ setup_test_env() {
     NETWORK_IS_DHCP=false
 }
 
-# Reset test environment
-reset_test_env() {
-    setup_test_env
-    reset_mocks
-}
-
 # ShellSpec hooks
 spec_helper_precheck() {
     : # Called before loading specs
@@ -59,17 +53,4 @@ spec_helper_loaded() {
 
 spec_helper_configure() {
     : # Called to configure shellspec
-}
-
-# Helper to create a temporary directory for tests
-create_test_work_dir() {
-    WORK_DIR=$(mktemp -d -t test-alpine-anywhere.XXXXXX)
-    mkdir -p "$WORK_DIR"
-}
-
-# Helper to cleanup test work directory
-cleanup_test_work_dir() {
-    if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then
-        rm -rf "$WORK_DIR"
-    fi
 }

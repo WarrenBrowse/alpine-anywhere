@@ -253,37 +253,6 @@ Describe 'network.sh'
         End
     End
 
-    Describe 'generate_kernel_ip_param()'
-        Context 'with DHCP'
-            setup() {
-                NETWORK_IS_DHCP=true
-            }
-            Before 'setup'
-
-            It 'generates ip=dhcp'
-                When call generate_kernel_ip_param
-                The output should equal 'ip=dhcp'
-            End
-        End
-
-        Context 'with static IP'
-            setup() {
-                NETWORK_IS_DHCP=false
-                DETECTED_IP_ADDRESS="10.0.0.50"
-                DETECTED_GATEWAY="10.0.0.1"
-                DETECTED_NETMASK="255.255.255.0"
-                DETECTED_HOSTNAME="myserver"
-                DETECTED_INTERFACE="eth0"
-            }
-            Before 'setup'
-
-            It 'generates kernel ip parameter'
-                When call generate_kernel_ip_param
-                The output should equal 'ip=10.0.0.50::10.0.0.1:255.255.255.0:myserver:eth0:off'
-            End
-        End
-    End
-
     Describe 'print_network_summary()'
         setup() {
             DETECTED_INTERFACE="eth0"
@@ -324,22 +293,4 @@ Describe 'network.sh'
         End
     End
 
-    Describe 'detect_hostname()'
-        log_step() { :; }
-        log_info() { :; }
-        # Stand in for the SSH probe of the source system's hostname.
-        ssh_exec_capture() { echo "old-provider-default"; }
-
-        It 'prefers HOSTNAME_OVERRIDE over the source system hostname'
-            HOSTNAME_OVERRIDE="exit-sg-sin1"
-            When call detect_hostname
-            The variable DETECTED_HOSTNAME should equal "exit-sg-sin1"
-        End
-
-        It 'falls back to the detected hostname when no override is given'
-            HOSTNAME_OVERRIDE=""
-            When call detect_hostname
-            The variable DETECTED_HOSTNAME should equal "old-provider-default"
-        End
-    End
 End

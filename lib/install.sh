@@ -727,42 +727,6 @@ EOF
 }
 
 # =============================================================================
-# Boot Structure Setup
-# =============================================================================
-
-# Create A/B boot structure
-setup_boot_structure() {
-    local boot_mount="$1"
-
-    log_step "Setting up A/B boot structure..."
-
-    # Create slot directories
-    mkdir -p "${boot_mount}/slots/A"
-    mkdir -p "${boot_mount}/slots/B"
-    mkdir -p "${boot_mount}/bootloader"
-
-    # Create slot marker
-    echo "A" > "${boot_mount}/current_slot"
-
-    # Create slot metadata
-    cat > "${boot_mount}/slots/A/meta.conf" << 'EOF'
-VERSION=
-INSTALLED=
-BOOT_COUNT=0
-VERIFIED=false
-EOF
-
-    cat > "${boot_mount}/slots/B/meta.conf" << 'EOF'
-VERSION=
-INSTALLED=
-BOOT_COUNT=0
-VERIFIED=false
-EOF
-
-    log_info "Boot structure created"
-}
-
-# =============================================================================
 # System Image Generation
 # =============================================================================
 

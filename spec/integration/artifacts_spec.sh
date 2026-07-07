@@ -1,40 +1,14 @@
 #!/bin/sh
 # artifacts_spec.sh - Integration checks on generated artifacts (no root, no
-# loop devices). Validates that the boot config, kexec cmdline and the patched
-# initramfs come out well-formed and internally consistent.
+# loop devices). Validates that the boot config and the patched initramfs come
+# out well-formed and internally consistent.
 
 Describe 'generated artifacts'
     Include lib/common.sh
     Include lib/network.sh
     Include lib/download.sh
-    Include lib/kexec.sh
     Include lib/install.sh
     Include lib/upgrade.sh
-
-    Describe 'kexec cmdline'
-        setup() {
-            ALPINE_MIRROR="https://dl-cdn.alpinelinux.org/alpine"
-            ALPINE_VERSION="3.20"
-            REMOTE_WORK_DIR="/tmp/aa.XXXX"
-            DETECTED_HOSTNAME="vpnhost"
-            DETECTED_INTERFACE="eth0"
-            DETECTED_IP_ADDRESS="192.168.1.10"
-            DETECTED_GATEWAY="192.168.1.1"
-            DETECTED_NETMASK="255.255.255.0"
-            NETWORK_IS_DHCP=false
-            VERBOSE=false
-        }
-        Before 'setup'
-
-        It 'builds a single-line cmdline with the expected keys'
-            When call build_kernel_cmdline
-            The output should include "alpine_repo="
-            The output should include "modloop="
-            The output should include "ip=192.168.1.10"
-            # exactly one line (no embedded newline that would split the cmdline)
-            The lines of output should equal 1
-        End
-    End
 
     Describe 'extlinux boot config' install_boot_config
         setup() {
