@@ -58,14 +58,12 @@ validate_safe_inputs() {
 
     # Data-persistence inputs
     assert_safe_token "key-url" "$KEY_URL"
-    assert_safe_token "key-file" "$KEY_FILE"
     case "$DATA_FS" in btrfs|ext4) ;; *) die "invalid --data-fs '$DATA_FS' (btrfs|ext4)" ;; esac
     case "$UNLOCK_METHOD" in ssh|keyfile|passphrase) ;; *) die "invalid --unlock-method '$UNLOCK_METHOD' (ssh|keyfile|passphrase)" ;; esac
     case "$CONTAINERS" in none|podman|docker|both) ;; *) die "invalid --containers '$CONTAINERS' (none|podman|docker|both)" ;; esac
     case "$CONTAINER_RUNTIME" in crun|runsc) ;; *) die "invalid --container-runtime '$CONTAINER_RUNTIME' (crun|runsc)" ;; esac
-    # keyfile method: --key-url fetches the key at boot, --key-file bakes a provided
-    # key onto the boot partition; with NEITHER, aa generates a random key and
-    # stages it there itself (zero-config autonomous unlock).
+    # keyfile method: --key-url fetches the key at boot; with no URL, aa generates
+    # a random key and stages it on the boot partition (zero-config autonomous unlock).
 
     # Customization inputs: fail early on the control host if the path is missing
     # (run_custom_script re-checks inside the chroot, but a clear message here

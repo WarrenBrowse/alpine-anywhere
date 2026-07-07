@@ -208,11 +208,6 @@ Describe 'common.sh'
             The variable INSTALL_MODE should equal "true"
         End
 
-        It 'parses --keep flag'
-            When call parse_arguments --keep --local
-            The variable KEEP_EXISTING should equal "true"
-        End
-
         It 'parses --overlay with device'
             When call parse_arguments --overlay /dev/sda3 --local
             The variable OVERLAY_DEVICE should equal "/dev/sda3"
@@ -229,10 +224,10 @@ Describe 'common.sh'
         End
 
         It 'parses combined install options'
-            When call parse_arguments --install --overlay /dev/sda3 --keep --local
+            When call parse_arguments --install --overlay /dev/sda3 --slot B --local
             The variable INSTALL_MODE should equal "true"
             The variable OVERLAY_DEVICE should equal "/dev/sda3"
-            The variable KEEP_EXISTING should equal "true"
+            The variable TARGET_SLOT should equal "B"
         End
 
         It 'parses --hostname with value'
@@ -255,16 +250,8 @@ Describe 'common.sh'
             The variable UPGRADE_MODE should equal "false"
         End
 
-        It 'KEEP_EXISTING defaults to false'
-            The variable KEEP_EXISTING should equal "false"
-        End
-
         It 'OVERLAY_DEVICE defaults to empty'
             The variable OVERLAY_DEVICE should equal ""
-        End
-
-        It 'BOOT_SLOT defaults to A'
-            The variable BOOT_SLOT should equal "A"
         End
     End
 

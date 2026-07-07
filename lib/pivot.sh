@@ -393,7 +393,7 @@ if ! pivot_root . ".${OLD_ROOT}"; then
     _recover_net
     bc "pivot_root failed; SSH + console shell up. Reboot to recover the prior OS."
     setsid sh -c 'exec sh </dev/console >/dev/console 2>&1' 2>/dev/null &
-    while true; do wait -n 2>/dev/null || sleep 1; done
+    while true; do wait 2>/dev/null; sleep 1; done
 fi
 
 # Past pivot_root: the OLD root (our breadcrumb disk) is now at /mnt/oldroot.
@@ -567,10 +567,12 @@ elif [ -f /root/.local/share/alpine-anywhere/alpine-anywhere ]; then
     echo "[fakeinit] Monitor: tail -f /var/log/alpine-install.log"
 fi
 
-# PID 1 must never exit - reap zombies forever
+# PID 1 must never exit - reap zombies forever. Bare `wait` (not `wait -n`,
+# a bash/ksh-ism BusyBox ash does not implement) so zombies are actually reaped.
 echo "[fakeinit] Entering zombie reaper loop (PID 1)"
 while true; do
-    wait -n 2>/dev/null || sleep 1
+    wait 2>/dev/null
+    sleep 1
 done
 FAKEINIT
 
@@ -1082,7 +1084,7 @@ pivot_kexec_installer() {
 
     local kexec_bin kimg="" modloop="" kpair
     kexec_bin=$(_ensure_kexec_local) \
-        || die "kexec-tools unavailable on this host; cannot free the boot disk for an in-place install (try --method takeover on a non-systemd source, or install kexec-tools)"
+        || die "kexec-tools unavailable on this host; cannot free the boot disk for an in-place install (install kexec-tools, or run from a non-systemd source that can pivot without kexec)"
 
     # Prefer the Alpine 'virt' netboot kernel + its modloop modules (kexec-clean
     # on cloud KVM, broad driver coverage), bundled into our self-contained
@@ -1135,27 +1137,13 @@ pivot_kexec_installer() {
 
 # Strategy for runit
 pivot_runit() {
-    log_info "Using runit strategy..."
-
-    # Runit doesn't support re-exec easily
-    # We need to use a different approach: exec directly
-
-    # Stop all services
-    run_privileged sv stop /var/service/* 2>/dev/null || true
-
-    # Kill runsv processes
-    run_privileged pkill -TERM runsv 2>/dev/null || true
-    sleep 2
-
-    # Now exec into our pivot script directly
-    # This won't be PID 1 but should work for our purposes
-    log_warn "Executing pivot directly (runit workaround)..."
-
-    # We need to do this in a way that survives
-    run_privileged nohup sh -c "cd ${PIVOT_DIR} && exec chroot ${PIVOT_DIR} /pivot.sh" &
-
-    # Alternative: try to replace runit
-    # run_privileged mount --bind "${PIVOT_DIR}/sbin/takeover-init" /sbin/runit-init
+    # Only reachable in LIVE mode on a runit PID 1 (INSTALL mode always kexecs,
+    # see _pivot_takeover_or_kexec). runit re-exec is not implemented here and
+    # was never validated, so fail BEFORE stopping any service rather than tear
+    # the host's services down and then exec a payload that does not exist (which
+    # left the box degraded). Install mode works on runit hosts; live mode does
+    # not.
+    die "live-mode pivot is not supported on a runit init; use --install (kexec RAM installer) instead"
 }
 
 # Fallback: chroot approach (no real pivot, Alpine on port 2222)

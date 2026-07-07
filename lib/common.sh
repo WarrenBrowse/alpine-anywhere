@@ -32,10 +32,8 @@ IPV6_OVERRIDE="${IPV6_OVERRIDE:-}"            # e.g. 2001:db8::2/64 (adds/overri
 IPV6_GATEWAY_OVERRIDE="${IPV6_GATEWAY_OVERRIDE:-}"
 DNS_OVERRIDE="${DNS_OVERRIDE:-}"              # space/comma-separated resolvers
 ASSUME_YES="${ASSUME_YES:-false}"             # bypass the pre-pivot access-confirmation step (non-interactive deploy)
-REBOOT_DELAY="${REBOOT_DELAY:-5}"
 TARGET_HOST="${TARGET_HOST:-}"
 TARGET_USER="${TARGET_USER:-}"
-INSTALL_METHOD="${INSTALL_METHOD:-auto}"  # auto, kexec, takeover
 LOCAL_MODE="${LOCAL_MODE:-false}"         # Run locally (no SSH)
 INSTALL_MODE="${INSTALL_MODE:-false}"     # Install mode (vs live mode)
 INSTALL_CONTINUE="${INSTALL_CONTINUE:-false}"  # Continue installation after pivot
@@ -43,10 +41,8 @@ UPGRADE_MODE="${UPGRADE_MODE:-false}"     # Upgrade mode (A/B switch)
 SLOT_ACTION="${SLOT_ACTION:-}"            # Slot subcommand: status|verify|rollback|bootcount
 INIT_SYSTEM="${INIT_SYSTEM:-}"            # Init system: openrc|s6 (empty = auto: s6 if hardened else openrc)
 TARGET_SLOT="${TARGET_SLOT:-}"            # Destination/boot slot: A|B (install dest; aa switch target)
-KEEP_EXISTING="${KEEP_EXISTING:-false}"   # Keep existing system (dual-boot)
 OVERLAY_DEVICE="${OVERLAY_DEVICE:-}"      # Device for persistent overlay
 TARGET_DISK="${TARGET_DISK:-}"            # Explicit install disk (e.g. /dev/sda); empty = auto-detect
-BOOT_SLOT="${BOOT_SLOT:-A}"               # Current boot slot (A/B)
 HARDENED_MODE="${HARDENED_MODE:-false}"   # Security hardened mode
 NO_VERIFY="${NO_VERIFY:-false}"           # Skip artifact checksum verification (UNSAFE)
 CHECKSUM_DIR="${CHECKSUM_DIR:-}"          # Local dir of *.sha512 files (air-gapped mirror)
@@ -58,7 +54,6 @@ DATA_FS="${DATA_FS:-btrfs}"               # Data partition filesystem: btrfs|ext
 ENCRYPT_DATA="${ENCRYPT_DATA:-false}"     # LUKS-encrypt the data partition
 UNLOCK_METHOD="${UNLOCK_METHOD:-ssh}"     # LUKS unlock: ssh|keyfile|passphrase (ssh = manual aa-unlock, no key at rest)
 KEY_URL="${KEY_URL:-}"                     # keyfile method: URL to fetch the LUKS key (mTLS)
-KEY_FILE="${KEY_FILE:-}"                   # keyfile method: local key file baked to boot FAT
 CONTAINERS="${CONTAINERS:-none}"          # Container runtime baked in: none|podman|docker|both (podman = rootless)
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-crun}"  # OCI runtime: crun|runsc (runsc = gVisor, fetched in custom-script)
 # --hostname: operator-chosen hostname baked into /etc/hostname. Empty = fall
@@ -517,7 +512,7 @@ parse_target() {
 # =============================================================================
 
 show_usage() {
-    cat <<EOF
+    cat <<'EOF'
 Usage: alpine-anywhere [OPTIONS] [user@host]
        alpine-anywhere upgrade [OPTIONS] [user@host]
 
@@ -535,7 +530,8 @@ A/B slot subcommands (run on an installed device; omit host to act locally):
   status                         Show active slot and per-slot metadata
   verify                         Mark the running slot as known-good (stops auto-rollback)
   rollback                       Switch back to the other slot and reboot
-  switch A|B                     Set the boot slot (reboot to activate)
+  switch A|B [user@host]         Set the boot slot (reboot to activate)
+  bootcount                      Bump the running slot's boot counter (boot-guard use)
 
 Options:
   -V, --alpine-version VERSION   Alpine version (default: 3.20)
@@ -557,12 +553,10 @@ Options:
   -v, --verbose                  Verbose output
   -f, --force                    Skip confirmation prompts
   --local                        Run locally (no SSH, for running on target server)
-  --method METHOD                Live mode method: auto, kexec, takeover (default: auto)
   --extra-packages PKGS          Additional packages (comma-separated)
   -h, --help                     Show this help message
 
 Install options:
-  --keep                         Keep existing system (dual-boot)
   --slot A|B                     Destination slot (default A). --slot B installs into the
                                    second slot of an existing layout without touching slot A.
   --disk DEVICE                  Target install disk (e.g. /dev/sda). REQUIRED when more
@@ -578,7 +572,7 @@ Image customization:
                                      wget -O- https://github.com/aya/myos/...tar.gz \\
                                        | tar -xz -C /usr/local/share
   --custom-files PATH            File or directory staged into the chroot and exposed
-                                   to --custom-script via \$AA_CUSTOM_FILES_DIR (e.g. a
+                                   to --custom-script via $AA_CUSTOM_FILES_DIR (e.g. a
                                    pre-built binary to install without network at build)
   --ssh-host-keys DIR            Bake these SSH host keys into the image (control-host
                                    override). Default: reuse the keys already in use on
@@ -621,7 +615,6 @@ Data persistence options (immutable A/B root stays RAM; only data persists):
                                    manual `aa-unlock` after boot, no key at rest;
                                    the OS still boots & is reachable while locked)
   --key-url URL                  keyfile method: fetch the LUKS key from URL (mTLS)
-  --key-file FILE                keyfile method: bake a local key onto the boot FAT
   --containers podman|docker|both
                                    Bake a container runtime, data on the persistent
                                    volume (default none; podman = rootless)
@@ -629,17 +622,16 @@ Data persistence options (immutable A/B root stays RAM; only data persists):
 
 Security options:
   --hardened                     Security hardened mode:
-                                   - linux-hardened kernel (KSPP)
-                                   - dropbear instead of openssh
-                                   - hardened_malloc
-                                   - Network stack hardening (sysctl)
-                                   - Kernel lockdown mode
+                                   - s6 init + dropbear (key-only) instead of openrc+openssh
+                                   - KSPP-aligned kernel cmdline (lockdown, init_on_alloc/free,
+                                     slab hardening, kptr_restrict; cloud-KVM safe)
+                                   - hardened_malloc preload
+                                   - network stack hardening (sysctl)
                                    - nftables firewall
 
 Examples:
   # Live mode - temporary Alpine boot (reverts on reboot)
   alpine-anywhere root@192.168.1.100
-  alpine-anywhere --method=takeover q@raspberry-pi
 
   # Install mode - permanent immutable Alpine with A/B updates
   alpine-anywhere --install root@192.168.1.100
@@ -743,24 +735,6 @@ parse_arguments() {
                 HOSTNAME_OVERRIDE="${1#*=}"
                 shift
                 ;;
-            --method)
-                INSTALL_METHOD="$2"
-                if [ "$INSTALL_METHOD" != "auto" ] && [ "$INSTALL_METHOD" != "kexec" ] && [ "$INSTALL_METHOD" != "takeover" ]; then
-                    die "Invalid method: $INSTALL_METHOD (must be 'auto', 'kexec', or 'takeover')"
-                fi
-                shift 2
-                ;;
-            --method=*)
-                INSTALL_METHOD="${1#*=}"
-                if [ "$INSTALL_METHOD" != "auto" ] && [ "$INSTALL_METHOD" != "kexec" ] && [ "$INSTALL_METHOD" != "takeover" ]; then
-                    die "Invalid method: $INSTALL_METHOD (must be 'auto', 'kexec', or 'takeover')"
-                fi
-                shift
-                ;;
-            --reboot-delay)
-                REBOOT_DELAY="$2"
-                shift 2
-                ;;
             --install)
                 INSTALL_MODE=true
                 shift
@@ -769,10 +743,6 @@ parse_arguments() {
                 INSTALL_CONTINUE=true
                 INSTALL_MODE=true
                 LOCAL_MODE=true
-                shift
-                ;;
-            --keep)
-                KEEP_EXISTING=true
                 shift
                 ;;
             --overlay)
@@ -880,14 +850,6 @@ parse_arguments() {
                 KEY_URL="${1#*=}"; UNLOCK_METHOD=keyfile
                 shift
                 ;;
-            --key-file)
-                KEY_FILE="$2"; UNLOCK_METHOD=keyfile
-                shift 2
-                ;;
-            --key-file=*)
-                KEY_FILE="${1#*=}"; UNLOCK_METHOD=keyfile
-                shift
-                ;;
             --containers)
                 CONTAINERS="$2"; PERSIST_DATA=true
                 shift 2
@@ -961,12 +923,22 @@ parse_arguments() {
         esac
     done
 
-    # `aa switch <A|B>`: the positional is the target slot, run locally.
+    # `aa switch <A|B> [user@host]`: first positional is the target slot; an
+    # optional second positional is a remote target (like the other slot
+    # subcommands). Previously any host was silently dropped and the flip was
+    # forced onto the LOCAL machine.
     if [ "$SLOT_ACTION" = "switch" ]; then
         [ -n "$pos_0" ] && TARGET_SLOT="$pos_0"
-        LOCAL_MODE=true
-        TARGET_USER="root"
-        TARGET_HOST="localhost"
+        if [ -n "$pos_1" ]; then
+            case "$pos_1" in
+                *@*) TARGET_USER="${pos_1%@*}"; TARGET_HOST="${pos_1#*@}" ;;
+                *)   TARGET_USER="root"; TARGET_HOST="$pos_1" ;;
+            esac
+        elif [ "$LOCAL_MODE" != "true" ]; then
+            LOCAL_MODE=true
+            TARGET_USER="root"
+            TARGET_HOST="localhost"
+        fi
         return 0
     fi
 

@@ -280,6 +280,8 @@ Describe 'upgrade.sh'
                 echo 'initramfs initramfs-A followkernel'
             } > "$BOOT_MNT/config.txt"
             echo 'root=/dev/sda2 rootfstype=squashfs' > "$BOOT_MNT/cmdline.txt"
+            # switch_slot refuses an empty target slot: give slot B an installed image.
+            printf 'SLOT_B_VERSION=3.20\n' > "$BOOT_MNT/slots.meta"
         }
         cleanup() { rm -rf "$BOOT_MNT"; }
         Before 'setup'
@@ -295,7 +297,7 @@ Describe 'upgrade.sh'
         End
 
         It 'adds aaverity=1 only when the target slot has a ROOT_HASH (verity)'
-            printf 'SLOT_B_ROOT_HASH=deadbeef\n' > "$BOOT_MNT/slots.meta"
+            printf 'SLOT_B_VERSION=3.20\nSLOT_B_ROOT_HASH=deadbeef\n' > "$BOOT_MNT/slots.meta"
             When call switch_slot B
             The contents of file "$BOOT_MNT/cmdline.txt" should include "aaverity=1"
             The stderr should be defined
@@ -306,6 +308,13 @@ Describe 'upgrade.sh'
             When call switch_slot B
             The contents of file "$BOOT_MNT/cmdline.txt" should not include "aaverity"
             The stderr should be defined
+        End
+
+        It 'refuses to switch to a slot with no installed image'
+            printf '' > "$BOOT_MNT/slots.meta"
+            When run switch_slot B
+            The status should be failure
+            The stderr should include "no image installed"
         End
 
         It 'flips both bootloaders on x86: extlinux DEFAULT and the GRUB default'

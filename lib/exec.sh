@@ -83,55 +83,6 @@ run_cmd() {
     fi
 }
 
-# Run a command with sudo
-run_cmd_sudo() {
-    local cmd="$1"
-
-    if [ "$LOCAL_MODE" = "true" ]; then
-        log_debug "Local sudo: $cmd"
-        if [ "$DRY_RUN" = "true" ]; then
-            echo "[DRY-RUN] sudo $cmd"
-            return 0
-        fi
-        if [ "$(id -u)" -eq 0 ]; then
-            eval "$cmd"
-        else
-            sudo sh -c "$cmd"
-        fi
-    else
-        ssh_exec_sudo "$cmd"
-    fi
-}
-
-# Run a command and capture output
-run_cmd_capture() {
-    local cmd="$1"
-
-    if [ "$LOCAL_MODE" = "true" ]; then
-        log_debug "Local capture: $cmd"
-        eval "$cmd"
-    else
-        ssh_exec_capture "$cmd"
-    fi
-}
-
-# Copy file to target (in local mode, just copies locally)
-copy_to_target() {
-    local local_path="$1"
-    local remote_path="$2"
-
-    if [ "$LOCAL_MODE" = "true" ]; then
-        log_debug "Local copy: $local_path -> $remote_path"
-        if [ "$DRY_RUN" = "true" ]; then
-            echo "[DRY-RUN] cp '$local_path' '$remote_path'"
-            return 0
-        fi
-        cp "$local_path" "$remote_path"
-    else
-        scp_to_remote "$local_path" "$remote_path"
-    fi
-}
-
 # =============================================================================
 # Remote Execution of Local Script
 # =============================================================================
@@ -153,10 +104,16 @@ stage_data_passphrase() {
     fi
     [ -n "$p1" ] || die "empty data passphrase"
     tmp="${WORK_DIR}/aa-data.key"
+    # Create the key file with 0600 BEFORE writing the secret, so it never exists
+    # world-readable even briefly (the default umask would leave it 0644).
+    ( umask 077; : > "$tmp" )
     printf '%s' "$p1" > "$tmp"
     scp_to_remote "$tmp" "/tmp/aa-data.key"
-    secure_wipe_dir "$WORK_DIR" 2>/dev/null || true
+    # Best-effort shred + remove the transient local copy (secure_wipe_dir's
+    # glob does not match aa-data.key, so shred it by name explicitly).
+    command -v shred >/dev/null 2>&1 && shred -u "$tmp" 2>/dev/null
     rm -f "$tmp" 2>/dev/null || true
+    p1=""; p2=""
 }
 
 # Execute alpine-anywhere on the remote server
@@ -220,7 +177,6 @@ run_on_remote() {
     [ -n "$ALPINE_MIRROR" ] && remote_cmd="$remote_cmd -m $(shell_quote "$ALPINE_MIRROR")"
     [ -n "$KERNEL_FLAVOR" ] && remote_cmd="$remote_cmd -k $(shell_quote "$KERNEL_FLAVOR")"
     [ -n "$KERNEL_PKG" ] && remote_cmd="$remote_cmd --kernel-pkg=$(shell_quote "$KERNEL_PKG")"
-    [ "$INSTALL_METHOD" != "auto" ] && remote_cmd="$remote_cmd --method=$(shell_quote "$INSTALL_METHOD")"
     [ -n "$EXTRA_PACKAGES" ] && remote_cmd="$remote_cmd --extra-packages=$(shell_quote "$EXTRA_PACKAGES")"
     [ "$HARDENED_MODE" = "true" ] && remote_cmd="$remote_cmd --hardened"
     [ "$VERITY_MODE" = "on" ] && remote_cmd="$remote_cmd --verity"
@@ -236,6 +192,7 @@ run_on_remote() {
     [ -n "$OVERLAY_DEVICE" ] && remote_cmd="$remote_cmd --overlay=$(shell_quote "$OVERLAY_DEVICE")"
     [ -n "$TARGET_DISK" ] && remote_cmd="$remote_cmd --disk=$(shell_quote "$TARGET_DISK")"
     [ -n "$INIT_SYSTEM" ] && remote_cmd="$remote_cmd --init=$(shell_quote "$INIT_SYSTEM")"
+    [ -n "$HOSTNAME_OVERRIDE" ] && remote_cmd="$remote_cmd --hostname=$(shell_quote "$HOSTNAME_OVERRIDE")"
     [ -n "$TARGET_SLOT" ] && remote_cmd="$remote_cmd --slot=$(shell_quote "$TARGET_SLOT")"
     [ -n "$IPV4_OVERRIDE" ] && remote_cmd="$remote_cmd --ipv4=$(shell_quote "$IPV4_OVERRIDE")"
     [ -n "$IPV4_GATEWAY_OVERRIDE" ] && remote_cmd="$remote_cmd --ipv4-gateway=$(shell_quote "$IPV4_GATEWAY_OVERRIDE")"
@@ -246,7 +203,6 @@ run_on_remote() {
     [ -n "$remote_custom_script" ] && remote_cmd="$remote_cmd --custom-script=$(shell_quote "$remote_custom_script")"
     [ -n "$remote_custom_files" ] && remote_cmd="$remote_cmd --custom-files=$(shell_quote "$remote_custom_files")"
     [ -n "$remote_host_key_dir" ] && remote_cmd="$remote_cmd --ssh-host-keys=$(shell_quote "$remote_host_key_dir")"
-    [ "$KEEP_EXISTING" = "true" ] && remote_cmd="$remote_cmd --keep"
     [ -n "$extra_args" ] && remote_cmd="$remote_cmd $extra_args"
 
     log_debug "Remote command: $remote_cmd"
@@ -311,8 +267,14 @@ detect_local_network() {
     fi
     log_info "Detected DNS: $DETECTED_DNS"
 
-    # Hostname
-    DETECTED_HOSTNAME=$(hostname -s 2>/dev/null || hostname)
+    # Hostname: --hostname wins over the detected one (the flag exists precisely
+    # to set the node id at install; without this it was a silent no-op and the
+    # image baked the pivot host's name instead).
+    if [ -n "$HOSTNAME_OVERRIDE" ]; then
+        DETECTED_HOSTNAME="$HOSTNAME_OVERRIDE"
+    else
+        DETECTED_HOSTNAME=$(hostname -s 2>/dev/null || hostname)
+    fi
     DETECTED_HOSTNAME=$(echo "$DETECTED_HOSTNAME" | tr -cd '[:alnum:]-' | head -c 63)
     log_info "Detected hostname: $DETECTED_HOSTNAME"
 
@@ -371,18 +333,6 @@ detect_local_network() {
 # =============================================================================
 # Cache Management
 # =============================================================================
-
-# Check if a file exists in cache
-cache_exists() {
-    local filename="$1"
-    [ -f "${INSTALL_CACHE_DIR}/${filename}" ]
-}
-
-# Get path to cached file
-cache_path() {
-    local filename="$1"
-    echo "${INSTALL_CACHE_DIR}/${filename}"
-}
 
 # Download file to cache if not present
 cache_download() {

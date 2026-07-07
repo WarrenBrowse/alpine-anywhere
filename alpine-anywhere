@@ -93,6 +93,13 @@ main() {
         exit $?
     fi
 
+    # Local install/live/upgrade need root (pivot_root, partitioning, writing
+    # slot devices). Re-exec with the ORIGINAL argv so NO option is dropped:
+    # rebuilding the flag list by hand in each mode silently lost flags (a
+    # non-root `--local -n` re-execed WITHOUT -n and ran for real; --hostname,
+    # --encrypt-data and the whole data/verity family were lost too).
+    maybe_escalate_root "$@"
+
     # Print banner
     print_banner
 
@@ -134,6 +141,17 @@ main() {
             run_remote_installation
         fi
     fi
+}
+
+# Re-exec the whole command under sudo for the local modes that need root,
+# preserving the exact original arguments. Slot subcommands exit earlier;
+# --install-continue already runs as root inside the pivot.
+maybe_escalate_root() {
+    [ "$LOCAL_MODE" = "true" ] || return 0
+    [ "$INSTALL_CONTINUE" = "true" ] && return 0
+    [ "$(id -u)" -eq 0 ] && return 0
+    log_info "Escalating to root..."
+    exec sudo -E sh "$0" "$@"
 }
 
 # =============================================================================
@@ -292,33 +310,6 @@ run_remote_upgrade() {
 # =============================================================================
 
 run_local_ab_install() {
-    # Require root for A/B installation
-    if [ "$(id -u)" -ne 0 ]; then
-        log_info "Escalating to root for A/B installation..."
-        sudo_args="--local --install"
-        [ "$VERBOSE" = "true" ] && sudo_args="$sudo_args -v"
-        [ "$FORCE" = "true" ] && sudo_args="$sudo_args -f"
-        [ "$DRY_RUN" = "true" ] && sudo_args="$sudo_args -n"
-        [ -n "$ALPINE_VERSION" ] && sudo_args="$sudo_args -V $ALPINE_VERSION"
-        [ -n "$ALPINE_MIRROR" ] && sudo_args="$sudo_args -m $ALPINE_MIRROR"
-        [ -n "$KERNEL_FLAVOR" ] && sudo_args="$sudo_args -k $KERNEL_FLAVOR"
-        [ "$HARDENED_MODE" = "true" ] && sudo_args="$sudo_args --hardened"
-        [ -n "$OVERLAY_DEVICE" ] && sudo_args="$sudo_args --overlay=$OVERLAY_DEVICE"
-        [ -n "$EXTRA_PACKAGES" ] && sudo_args="$sudo_args --extra-packages=$EXTRA_PACKAGES"
-        [ -n "$CUSTOM_SCRIPT" ] && sudo_args="$sudo_args --custom-script=$CUSTOM_SCRIPT"
-        [ -n "$SSH_HOST_KEY_DIR" ] && sudo_args="$sudo_args --ssh-host-keys=$SSH_HOST_KEY_DIR"
-        [ -n "$TARGET_DISK" ] && sudo_args="$sudo_args --disk=$TARGET_DISK"
-        [ -n "$INIT_SYSTEM" ] && sudo_args="$sudo_args --init=$INIT_SYSTEM"
-        [ -n "$TARGET_SLOT" ] && sudo_args="$sudo_args --slot=$TARGET_SLOT"
-        [ -n "$IPV4_OVERRIDE" ] && sudo_args="$sudo_args --ipv4=$IPV4_OVERRIDE"
-        [ -n "$IPV4_GATEWAY_OVERRIDE" ] && sudo_args="$sudo_args --ipv4-gateway=$IPV4_GATEWAY_OVERRIDE"
-        [ -n "$IPV6_OVERRIDE" ] && sudo_args="$sudo_args --ipv6=$IPV6_OVERRIDE"
-        [ -n "$IPV6_GATEWAY_OVERRIDE" ] && sudo_args="$sudo_args --ipv6-gateway=$IPV6_GATEWAY_OVERRIDE"
-        [ -n "$DNS_OVERRIDE" ] && sudo_args="$sudo_args --dns=$DNS_OVERRIDE"
-        [ "$ASSUME_YES" = "true" ] && sudo_args="$sudo_args --yes"
-        exec sudo -E sh "$0" $sudo_args
-    fi
-
     log_info "Running A/B installation in local mode"
 
     # Setup directories
@@ -369,10 +360,15 @@ run_local_ab_install() {
     if [ -n "$TARGET_SLOT" ]; then
         local ab_disk cur_slot slot_partdev
         ab_disk="${TARGET_DISK:-$(get_boot_disk 2>/dev/null)}"
-        cur_slot=$(get_current_slot 2>/dev/null || echo "")
         if [ -n "$ab_disk" ]; then
             slot_partdev=$(get_part_dev "$ab_disk" "$(slot_to_partnum "$TARGET_SLOT")")
             if [ -b "$slot_partdev" ]; then
+                # Do NOT swallow get_current_slot's fail-closed die: writing a
+                # slot on an existing layout requires knowing which slot is live.
+                # If it cannot be determined we must refuse, not guess (an empty
+                # cur_slot would make the equality guard below vacuously pass).
+                cur_slot=$(get_current_slot) \
+                    || die "Cannot install into slot $TARGET_SLOT: active slot unknown (check 'aa status')"
                 if [ "$TARGET_SLOT" = "$cur_slot" ]; then
                     die "Refusing to overwrite the running slot ($cur_slot). Install into the other slot."
                 fi
@@ -520,18 +516,6 @@ run_local_upgrade() {
 # =============================================================================
 
 run_local_installation() {
-    # Require root for pivot_root
-    if [ "$(id -u)" -ne 0 ]; then
-        log_info "Escalating to root..."
-        sudo_args="--local"
-        [ "$VERBOSE" = "true" ] && sudo_args="$sudo_args -v"
-        [ "$FORCE" = "true" ] && sudo_args="$sudo_args -f"
-        [ -n "$ALPINE_VERSION" ] && sudo_args="$sudo_args -V $ALPINE_VERSION"
-        [ -n "$ALPINE_MIRROR" ] && sudo_args="$sudo_args -m $ALPINE_MIRROR"
-        [ "$HARDENED_MODE" = "true" ] && sudo_args="$sudo_args --hardened"
-        exec sudo -E sh "$0" $sudo_args
-    fi
-
     log_info "Running RAM-only live mode (pivot_root)"
 
     # Setup directories

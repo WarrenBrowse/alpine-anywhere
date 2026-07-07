@@ -2074,7 +2074,17 @@ install_secondary_slot() {
 
     partnum=$(slot_to_partnum "$slot")
     dev=$(get_part_dev "$disk" "$partnum")
-    [ -b "$dev" ] || die "Slot $slot partition ($dev) not found — run a full install first"
+    [ -b "$dev" ] || die "Slot $slot partition ($dev) not found - run a full install first"
+
+    # Same last-line guard as install_to_slot (upgrade path): never write a slot
+    # image over the partition backing the live root, whatever the caller thinks
+    # the target slot is. This is the second of the two functions that write a
+    # slot image on a live system, so it needs the guard too.
+    local live_dev
+    live_dev=$(live_root_backing_dev)
+    if [ -n "$live_dev" ] && [ "$live_dev" = "$dev" ]; then
+        die "Refusing to write slot $slot: $dev backs the live root filesystem (target the OTHER slot; check 'aa status')"
+    fi
 
     log_step "Installing to slot $slot ($dev) on the existing layout (init: ${INIT_SYSTEM})..."
 

@@ -275,6 +275,15 @@ switch_slot() {
     partnum=$(slot_to_partnum "$new_slot")
     slot_dev=$(get_part_dev "$disk" "$partnum")
 
+    # Refuse to point the bootloader at an empty slot: it has no installed image
+    # (no SLOT_x_VERSION), so its vmlinuz-<slot> never loads, the boot counter
+    # never advances, and auto-rollback cannot fire - a hang, not a fallback.
+    # (rollback_slot has the same guard; switch is reachable directly via `aa
+    # switch` on a fresh single-slot install.)
+    if [ -z "$(get_slot_meta "$new_slot" VERSION)" ]; then
+        die "Refusing to switch to slot $new_slot: no image installed there (SLOT_${new_slot}_VERSION empty)"
+    fi
+
     log_step "Switching boot to slot $new_slot..."
 
     # Per-slot verity: enable aaverity=1 iff THIS slot was built with dm-verity

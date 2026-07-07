@@ -30,7 +30,7 @@ Describe 'alpine-anywhere integration'
             After 'cleanup'
 
             It 'parses all command line options'
-                When call parse_arguments -V 3.21 -m https://uk.alpinelinux.org/alpine -k virt -p 2222 -i "$TEST_IDENTITY" -n -v -f --extra-packages vim,htop --reboot-delay 10 testuser@myserver.local
+                When call parse_arguments -V 3.21 -m https://uk.alpinelinux.org/alpine -k virt -p 2222 -i "$TEST_IDENTITY" -n -v -f --extra-packages vim,htop testuser@myserver.local
                 The variable ALPINE_VERSION should equal '3.21'
                 The variable ALPINE_MIRROR should equal 'https://uk.alpinelinux.org/alpine'
                 The variable KERNEL_FLAVOR should equal 'virt'
@@ -40,7 +40,6 @@ Describe 'alpine-anywhere integration'
                 The variable VERBOSE should equal 'true'
                 The variable FORCE should equal 'true'
                 The variable EXTRA_PACKAGES should equal 'vim,htop'
-                The variable REBOOT_DELAY should equal '10'
                 The variable TARGET_USER should equal 'testuser'
                 The variable TARGET_HOST should equal 'myserver.local'
                 The stderr should include 'DEBUG'
