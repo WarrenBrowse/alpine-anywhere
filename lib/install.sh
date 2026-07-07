@@ -764,10 +764,15 @@ generate_system_squashfs() {
     # archive can be integrity-checked against its published sha512 before any
     # of its contents touch the build tree.
     log_info "Extracting base system..."
+    local minirootfs_url="${ALPINE_MIRROR}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/alpine-minirootfs-${ALPINE_VERSION}.0-${DETECTED_ARCH}.tar.gz"
     if [ -f "${INSTALL_CACHE_DIR}/minirootfs.tar.gz" ]; then
+        # A pre-populated cache file must be verified here too: whoever wrote it
+        # (download_minirootfs) already checks it, but re-enforcing before extract
+        # keeps this the single choke point so a stale/unverified cache can never
+        # seed the build tree.
+        enforce_integrity "$minirootfs_url" "${INSTALL_CACHE_DIR}/minirootfs.tar.gz"
         require tar -xzf "${INSTALL_CACHE_DIR}/minirootfs.tar.gz" -C "$build_dir"
     else
-        local minirootfs_url="${ALPINE_MIRROR}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/alpine-minirootfs-${ALPINE_VERSION}.0-${DETECTED_ARCH}.tar.gz"
         local minirootfs_tgz="${build_dir}.minirootfs.tar.gz"
         download_file "$minirootfs_url" "$minirootfs_tgz"
         require tar -xzf "$minirootfs_tgz" -C "$build_dir"
@@ -1429,8 +1434,13 @@ wrap_boot_initramfs() {
     [ -f "$img" ] || { log_warn "initramfs $img missing; skipping boot-guard"; return 0; }
     log_info "Wrapping initramfs with A/B boot-guard (init.aa before switch_root)..."
     local tmp; tmp=$(mktemp -d)
+    # An unpack failure here means the freshly built initramfs cannot be read
+    # back (e.g. mkinitfs switched to a compression BusyBox cannot open). Skipping
+    # would ship an A/B slot with NO boot-guard and NO PARTUUID resolver, the
+    # exact guard-less brick the source-not-found checks below already die on, so
+    # fail closed rather than silently drop rollback.
     ( cd "$tmp" && gzip -dc "$img" 2>/dev/null | cpio -idm 2>/dev/null ) || {
-        log_warn "Could not unpack initramfs; skipping boot-guard"; rm -rf "$tmp"; return 0; }
+        rm -rf "$tmp"; die "wrap_boot_initramfs: could not unpack initramfs; refusing to build a guard-less A/B slot"; }
     [ -f "$tmp/init" ] || { log_warn "initramfs has no /init; skipping boot-guard"; rm -rf "$tmp"; return 0; }
     grep -q 'exec .*switch_root' "$tmp/init" || { log_warn "no 'exec ... switch_root' in init; skipping boot-guard"; rm -rf "$tmp"; return 0; }
 
@@ -1573,10 +1583,16 @@ wrap_boot_initramfs() {
             else
                 die "wrap_boot_initramfs: no root-mount anchor for verity in initramfs init (mkinitfs layout changed)"
             fi
+            # Fail CLOSED at boot: if aa-verity-open cannot produce a verified
+            # mapper, the raw slot partition still holds a mountable squashfs at
+            # offset 0, so falling through would boot a tampered rootfs unverified.
+            # Reboot instead. init.aa (injected above, i.e. earlier) has already
+            # bumped this slot's boot counter, so repeated verity failures trip
+            # the A/B auto-rollback to the other slot after the retry budget.
             awk -v anchor="$vanchor" '
                 $0 ~ anchor && !done {
                     match($0, /^[[:space:]]*/); ind=substr($0, 1, RLENGTH)
-                    print ind "if [ \"$KOPT_aaverity\" = 1 ]; then _aadev=$(/sbin/aa-verity-open \"$KOPT_root\" \"$sysroot\" 2>/dev/null); [ -n \"$_aadev\" ] && KOPT_root=\"$_aadev\" && root=\"$_aadev\"; fi"
+                    print ind "if [ \"$KOPT_aaverity\" = 1 ]; then _aadev=$(/sbin/aa-verity-open \"$KOPT_root\" \"$sysroot\" 2>/dev/null); if [ -n \"$_aadev\" ]; then KOPT_root=\"$_aadev\"; root=\"$_aadev\"; else echo \"aa-verity: cannot open verified root; refusing raw mount, rebooting for A/B rollback\" > /dev/kmsg 2>/dev/null; sync; reboot -f 2>/dev/null; echo b > /proc/sysrq-trigger 2>/dev/null; fi; fi"
                     done=1
                 }
                 { print }
@@ -1585,8 +1601,21 @@ wrap_boot_initramfs() {
         fi
     fi
 
-    ( cd "$tmp" && find . | cpio -o -H newc 2>/dev/null | gzip ) > "$img" \
-        || log_warn "Could not repack initramfs boot-guard"
+    # Repack into a temp file first: the `> "$img"` redirection truncates the
+    # target BEFORE the pipeline runs, so writing straight to $img and only
+    # warning on failure would ship a truncated/empty initramfs that the kernel
+    # cannot unpack, which never reaches init.aa (no counter, no rollback: the
+    # bootloader re-selects the same dead default forever). set -o pipefail is
+    # not portable to BusyBox ash here, so guard the pipeline explicitly.
+    local repacked="${tmp}.new.img"
+    if ( cd "$tmp" && find . | cpio -o -H newc 2>/dev/null | gzip ) > "$repacked" \
+        && [ -s "$repacked" ] \
+        && gzip -t "$repacked" 2>/dev/null; then
+        mv "$repacked" "$img"
+    else
+        rm -f "$repacked"; rm -rf "$tmp"
+        die "wrap_boot_initramfs: failed to repack initramfs boot-guard; refusing to ship a truncated initramfs"
+    fi
     rm -rf "$tmp"
 }
 
@@ -2120,14 +2149,18 @@ slot_to_partnum() {
 #   broken-but-mountable slot accumulates failed boots toward rollback.
 SLOT_KERNEL_OPTS="rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs panic=10 console=tty1 quiet"
 
-# Kernel opts including the optional dm-verity toggle. Computed at use time
-# because VERITY_MODE/HARDENED_MODE are set by parse_arguments, after sourcing.
+# Kernel opts including the optional dm-verity toggle and, under --hardened, the
+# KSPP-aligned hardening parameters. Computed at use time because
+# VERITY_MODE/HARDENED_MODE are set by parse_arguments, after sourcing.
 slot_kernel_opts() {
-    if verity_enabled; then
-        echo "${SLOT_KERNEL_OPTS} aaverity=1"
-    else
-        echo "${SLOT_KERNEL_OPTS}"
+    local opts="$SLOT_KERNEL_OPTS"
+    verity_enabled && opts="${opts} aaverity=1"
+    if [ "$HARDENED_MODE" = "true" ]; then
+        # Trim the trailing space generate_hardened_cmdline leaves.
+        local hardened; hardened=$(generate_hardened_cmdline)
+        opts="${opts} ${hardened% }"
     fi
+    echo "$opts"
 }
 
 # Place a slot's kernel + initramfs on the boot partition as vmlinuz-<slot>/initramfs-<slot>

@@ -11,24 +11,34 @@ Describe 'hardening.sh'
             The output should include 'lockdown=integrity'
         End
 
-        It 'includes iommu=force'
-            When call generate_hardened_cmdline
-            The output should include 'iommu=force'
-        End
-
         It 'includes slub_debug'
             When call generate_hardened_cmdline
             The output should include 'slub_debug='
         End
 
-        It 'includes init_on_alloc=1'
+        It 'includes init_on_alloc=1 and init_on_free=1'
             When call generate_hardened_cmdline
             The output should include 'init_on_alloc=1'
+            The output should include 'init_on_free=1'
         End
 
-        It 'includes spectre mitigations'
+        It 'includes kptr_restrict and stack-offset randomization'
             When call generate_hardened_cmdline
-            The output should include 'spectre_v2=on'
+            The output should include 'kptr_restrict=2'
+            The output should include 'randomize_kstack_offset=on'
+        End
+
+        # Deliberately excluded for cloud-KVM boot safety and exit throughput
+        # (see generate_hardened_cmdline). Pin the exclusion so it is not
+        # reintroduced without a real-node validation.
+        It 'does not force an IOMMU (would break virtio DMA on cloud KVM)'
+            When call generate_hardened_cmdline
+            The output should not include 'iommu=force'
+        End
+
+        It 'does not disable SMT (would halve exit throughput)'
+            When call generate_hardened_cmdline
+            The output should not include 'nosmt'
         End
     End
 

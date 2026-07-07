@@ -32,54 +32,46 @@ HARDENED_MODE="${HARDENED_MODE:-false}"
 # - Randomized kernel stack offset
 
 # Additional kernel command line parameters for hardening
+# KSPP-aligned hardening safe for a headless cloud-KVM VPN exit. Deliberately
+# EXCLUDED, because they are unsafe or costly on this exact target and the kernel
+# already mitigates the relevant issues by default:
+#   - iommu=force / intel_iommu=on / amd_iommu=on: force an IOMMU that cloud KVM
+#     may not expose, which can break virtio DMA and stop the guest booting.
+#   - mds=full,nosmt / l1tf=full,force: disable SMT, halving an exit node's
+#     throughput; the kernel's default per-CPU mitigations cover these without
+#     turning hyperthreading off.
+# The excluded set needs real-node validation before it is enabled fleet-wide.
 generate_hardened_cmdline() {
     cmdline=""
 
-    # Kernel lockdown mode (integrity or confidentiality)
+    # Kernel lockdown: block root-to-ring0 integrity bypasses (module loading of
+    # unsigned modules, kexec of unsigned images, direct hardware access, ...).
     cmdline="${cmdline}lockdown=integrity "
 
-    # Disable kernel module loading after boot (optional, strict)
-    # cmdline="${cmdline}modules.sig_enforce=1 "
-
-    # IOMMU for DMA protection
-    cmdline="${cmdline}iommu=force "
-    cmdline="${cmdline}intel_iommu=on "
-    cmdline="${cmdline}amd_iommu=on "
-
-    # Disable USB (if not needed)
-    # cmdline="${cmdline}nousb "
-
-    # Restrict kernel pointers in logs
+    # Restrict kernel pointers in logs (KASLR info leaks).
     cmdline="${cmdline}kptr_restrict=2 "
 
-    # Disable legacy vsyscall
-    cmdline="${cmdline}vsyscall=none "
-
-    # Panic on oops
-    cmdline="${cmdline}oops=panic "
-
-    # SLUB hardening
-    cmdline="${cmdline}slub_debug=FZP "
+    # Zero heap and freed pages: kills use-of-uninitialised and use-after-free
+    # info leaks at a small, well-understood cost.
     cmdline="${cmdline}init_on_alloc=1 "
     cmdline="${cmdline}init_on_free=1 "
 
-    # Page allocation randomization
+    # SLUB freelist/redzone hardening + no slab merging (defeats cross-cache
+    # exploitation) + freelist randomization.
+    cmdline="${cmdline}slub_debug=FZP "
+    cmdline="${cmdline}slab_nomerge "
     cmdline="${cmdline}page_alloc.shuffle=1 "
 
-    # Disable slab merging
-    cmdline="${cmdline}slab_nomerge "
-
-    # Randomize kernel page tables
+    # Randomize the kernel stack offset per syscall.
     cmdline="${cmdline}randomize_kstack_offset=on "
 
-    # Mitigate speculative execution attacks
-    cmdline="${cmdline}spectre_v2=on "
-    cmdline="${cmdline}spec_store_bypass_disable=on "
-    cmdline="${cmdline}l1tf=full,force "
-    cmdline="${cmdline}mds=full,nosmt "
-
-    # Disable dangerous kernel features
+    # Remove legacy attack surface.
+    cmdline="${cmdline}vsyscall=none "
     cmdline="${cmdline}debugfs=off "
+
+    # Turn an oops into a panic so PID-1/kernel faults reboot (panic=10 on the
+    # baked cmdline) and accumulate toward A/B rollback instead of half-running.
+    cmdline="${cmdline}oops=panic "
 
     echo "$cmdline"
 }
@@ -404,6 +396,12 @@ start() {
 }
 EOF
     chmod +x "${root}/etc/init.d/aa-lockdown"
+    # Only wired under OpenRC. It is intentionally NOT auto-enabled on the s6
+    # (prod exit) path: modules_disabled=1 freezes ALL later module loading, and
+    # the warren-exit datapath loads tun + nftables modules at RUNTIME when it
+    # starts. Freezing before that would break the exit. Enabling it under s6
+    # needs a real-node check that every datapath module is loaded first; until
+    # then, do not silently brick the fleet's datapath.
     if [ "$INIT_SYSTEM" = "openrc" ]; then
         chroot "$root" /sbin/rc-update add aa-lockdown default 2>/dev/null || true
     fi

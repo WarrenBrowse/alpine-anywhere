@@ -5,9 +5,9 @@
 # aaverity=1, as:  aa-verity-open "$KOPT_root"
 # On success it prints the mapper device to stdout (/dev/mapper/aa-root) and the
 # init rewrites $KOPT_root to that, so the stock mount logic mounts the verified
-# device. On failure it prints nothing and returns non-zero; the init then falls
-# through to the A/B boot-guard (init.aa) which counts a failed boot and rolls
-# back to the known-good slot.
+# device. On failure it prints nothing and returns non-zero; the patched init
+# then REFUSES to mount the raw slot and reboots (the boot-guard init.aa, which
+# runs earlier, has already counted this boot toward A/B rollback).
 #
 # The data device and hash device are the SAME slot partition: the squashfs
 # lives at offset 0 and the verity hash tree at SLOT_<x>_HASH_OFFSET (read from
@@ -48,13 +48,26 @@ meta_get() { sed -n "s/^SLOT_${slot}_$1=//p" "$meta" 2>/dev/null | head -n1; }
 root_hash=$(meta_get ROOT_HASH)
 data_size=$(meta_get DATA_SIZE)
 
-# Optional minisign signature of the root hash (Phase 8 upgrade-auth key).
-# If a public key was embedded in the initramfs AND a signature is present,
-# the hash must verify or we refuse (fail closed). If neither is present we
-# proceed on the hash alone (verity still defends corruption + offline tamper).
+# minisign signature of the root hash. A public key embedded in the initramfs
+# (/etc/alpine-anywhere/verity.pub) means signed root hashes are REQUIRED: an
+# unsigned or badly-signed hash is refused. Without this, an attacker with disk
+# access could strip ROOT_HASH_SIG and rewrite ROOT_HASH to match a tampered
+# squashfs (downgrade-by-suppression), and plain verity would happily "verify"
+# it. If no pubkey is embedded we fall back to the hash alone (defends corruption
+# and blind offline tampering, but not a hash rewrite: embed a key for that).
 pubkey="/etc/alpine-anywhere/verity.pub"
 sig=$(meta_get ROOT_HASH_SIG)
-if [ -f "$pubkey" ] && [ -n "$sig" ] && command -v minisign >/dev/null 2>&1; then
+if [ -f "$pubkey" ]; then
+    if ! command -v minisign >/dev/null 2>&1; then
+        vlog "verity pubkey present but minisign missing - refusing (cannot verify signature)"
+        umount "$AA_BOOT_DIR" 2>/dev/null
+        exit 1
+    fi
+    if [ -z "$sig" ]; then
+        vlog "verity pubkey present but slot $slot has no ROOT_HASH_SIG - refusing (downgrade)"
+        umount "$AA_BOOT_DIR" 2>/dev/null
+        exit 1
+    fi
     tmpd=$(mktemp -d 2>/dev/null || echo /tmp)
     printf '%s' "$root_hash" > "$tmpd/rh"
     printf '%s\n' "$sig" > "$tmpd/rh.minisig"

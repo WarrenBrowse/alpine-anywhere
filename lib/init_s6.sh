@@ -199,9 +199,13 @@ EOF
         contents="$contents mount-data"
     fi
 
-    # SSH daemon (supervised longrun)
+    # SSH daemon (supervised longrun). -s disables all password logins and -g
+    # disables password logins for root: key-only auth as defence in depth on an
+    # Internet-exposed exit (root's shadow is already '*', so this closes the
+    # gap belt-and-suspenders). -F foreground (s6 supervises), -R regenerates a
+    # host key only if one is missing (baked keys make this a no-op normally).
     if [ "$HARDENED_MODE" = "true" ]; then
-        _s6_longrun "$src" dropbear "/usr/sbin/dropbear -F -R -p 22"
+        _s6_longrun "$src" dropbear "/usr/sbin/dropbear -F -R -s -g -p 22"
         _s6_dep "$src" dropbear network
         _s6_dep "$src" aa-verify dropbear
         contents="$contents dropbear"
@@ -285,16 +289,22 @@ if s6-rc-init -c /etc/s6-rc/compiled -l /run/s6-rc /run/service; then
 else
     slog "s6-rc-init FAILED rc=$?"
 fi
+up_ok=1
 if s6-rc -v2 -l /run/s6-rc -up change "$rl"; then
     slog "s6-rc up '$rl' OK"
 else
+    up_ok=0
     slog "s6-rc up '$rl' FAILED rc=$?"
 fi
 
-# Emergency reachability (DEBUG): ensure SSH works even if services failed.
-( /usr/local/libexec/aa-s6/network-up 2>/dev/null
-  if [ -x /usr/sbin/dropbear ]; then /usr/sbin/dropbear -R -p 22 2>/dev/null
-  else mkdir -p /run/sshd; /usr/sbin/sshd 2>/dev/null; fi ) &
+# Emergency reachability: only when service bring-up FAILED, so a healthy boot
+# does not run a second, unsupervised SSH daemon fighting the supervised one for
+# port 22. Key-only (-s -g) here too.
+if [ "$up_ok" = 0 ]; then
+    ( /usr/local/libexec/aa-s6/network-up 2>/dev/null
+      if [ -x /usr/sbin/dropbear ]; then /usr/sbin/dropbear -R -s -g -p 22 2>/dev/null
+      else mkdir -p /run/sshd; /usr/sbin/sshd 2>/dev/null; fi ) &
+fi
 
 slog "rc.init done"
 umount /run/aa-log 2>/dev/null

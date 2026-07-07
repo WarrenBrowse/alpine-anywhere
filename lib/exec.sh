@@ -397,7 +397,11 @@ cache_download() {
 
     log_info "Downloading: $filename"
     if [ "$LOCAL_MODE" = "true" ]; then
-        http_fetch_file "$url" "$cache_file"
+        http_fetch_file "$url" "$cache_file" || die "Failed to download: $url"
+        # The kexec RAM installer boots this kernel/modloop, so a tampered mirror
+        # here compromises the install. Verify against the published checksum
+        # (fail closed, same policy as every other artifact).
+        enforce_integrity "$url" "$cache_file"
     else
         run_cmd "if command -v curl >/dev/null 2>&1; then curl -fSL --progress-bar -o '$cache_file' '$url'; else wget -O '$cache_file' '$url'; fi"
     fi

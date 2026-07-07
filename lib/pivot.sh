@@ -1259,10 +1259,15 @@ run_pivot_install() {
     log_info "Connect via: ssh root@${DETECTED_IP_ADDRESS}"
 }
 
-# Download minirootfs if needed
+# Download minirootfs if needed. The minirootfs is the root of the entire image
+# build, so it must pass the same fail-closed integrity check as every other
+# download (a compromised mirror here trojans the whole exit). Verify before it
+# lands in the cache, where build_system_image would otherwise extract it blind.
 download_minirootfs() {
     local url="${ALPINE_MIRROR}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/alpine-minirootfs-${ALPINE_VERSION}.0-${DETECTED_ARCH}.tar.gz"
+    local dest="${INSTALL_CACHE_DIR}/minirootfs.tar.gz"
 
     log_info "Downloading Alpine minirootfs..."
-    http_fetch_file "$url" "${INSTALL_CACHE_DIR}/minirootfs.tar.gz"
+    http_fetch_file "$url" "$dest" || die "Failed to download minirootfs: $url"
+    enforce_integrity "$url" "$dest"
 }
