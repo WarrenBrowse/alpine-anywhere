@@ -80,6 +80,10 @@ install:
 	@cp lib/*.sh $(LIBDIR)/
 	@chmod 644 $(LIBDIR)/*.sh
 	@cp lib/initramfs/* $(LIBDIR)/initramfs/
+	# Point the installed script's fallback LIB_DIR at this prefix so a custom
+	# PREFIX resolves its modules (the default /usr/local/lib/aa is unchanged).
+	@sed -i.bak 's|/usr/local/lib/aa|$(LIBDIR)|g' $(BINDIR)/alpine-anywhere
+	@rm -f $(BINDIR)/alpine-anywhere.bak
 	@echo "Installation complete!"
 
 # Uninstall alpine-anywhere
