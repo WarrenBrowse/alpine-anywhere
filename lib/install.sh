@@ -45,7 +45,7 @@ detect_root_disk() {
         # Running from RAM - pick the target physical disk.
         # DANGER: with both an SD card (mmcblk0) and a USB/NVMe disk present,
         # guessing "the first disk" could wipe the boot medium. So refuse to
-        # guess when there is more than one disk — require --disk.
+        # guess when there is more than one disk - require --disk.
         local disks ndisks
         disks=$(lsblk -dnpo NAME,TYPE 2>/dev/null | awk '$2=="disk"{print $1}')
         ndisks=$(printf '%s\n' "$disks" | grep -c .)
@@ -213,9 +213,9 @@ detect_disk_layout() {
 # kernel that merely cannot re-read the table (BLKRRPART -> EBUSY, e.g. right after
 # pivoting away from an overlay/squashfs root whose teardown is still settling) is
 # NOT a blocker: parted still writes the on-disk GPT, and ensure_partition_devices
-# accesses the new partitions by offset via loop devices. (An earlier version also
-# aborted on the re-read failure - that wrongly blocked the pivot's own loop-device
-# path, which is exactly how aa is meant to install onto a just-freed disk.)
+# accesses the new partitions by offset via loop devices. Do NOT abort on a
+# re-read failure: that blocks the pivot's own loop-device path, which is exactly
+# how aa installs onto a just-freed disk.
 assert_disk_not_mounted() {
     local disk="$1" base mounted
     base=$(basename "$disk")
@@ -412,7 +412,6 @@ EOF
     PART_BOOT_DEV="/dev/loop0"
     PART_SLOTA_DEV="/dev/loop1"
     PART_SLOTB_DEV="/dev/loop2"
-    PART_DATA_DEV="/dev/loop3"
 
     # Verify each mapped loop actually backs the target disk before any caller
     # writes to it.
@@ -687,7 +686,7 @@ format_data_partition() {
 # Copy the LUKS keyfile onto the boot partition (partition 1) as /aa-data.key,
 # root-only. The boot partition is unencrypted, so this is the autonomous-unlock
 # tradeoff: on a single disk the key sits next to the encrypted data, so it does
-# NOT defend against theft of the whole disk — it protects a pulled/decommissioned
+# NOT defend against theft of the whole disk - it protects a pulled/decommissioned
 # DATA disk (or a separate data disk) and avoids any network dependency at boot.
 stage_boot_keyfile() {
     _sbk_disk="$1"; _sbk_key="$2"
@@ -703,7 +702,7 @@ stage_boot_keyfile() {
     log_info "LUKS keyfile staged on the boot partition (autonomous unlock)"
 }
 
-# Write data.meta onto the FAT boot partition (partition 1), alongside slots.meta.
+# Write data.meta onto the boot partition (partition 1), alongside slots.meta.
 # Read by aa-mount-data / aa-unlock at boot.
 write_data_meta() {
     _wdm_disk="$1"; _wdm_dev="$2"; _wdm_uuid="$3"
@@ -896,6 +895,10 @@ EOF
 
     # Extra packages
     if [ -n "$EXTRA_PACKAGES" ]; then
+        # Intentional word-splitting: the comma-separated list becomes separate
+        # apk arguments. validate_safe_inputs -> assert_safe_token already rejects
+        # whitespace and shell metacharacters in EXTRA_PACKAGES, so this is safe.
+        # shellcheck disable=SC2046
         chroot "$build_dir" /sbin/apk add --no-cache $(echo "$EXTRA_PACKAGES" | tr ',' ' ')
     fi
 
@@ -961,13 +964,13 @@ EOF
 
     # A/B boot-guard: patch this slot's initramfs so a failed/unverified boot
     # rolls back to the other slot. Runs in the initramfs right before
-    # switch_root (modules loaded, busybox ready, disk accessible) — the one
+    # switch_root (modules loaded, busybox ready, disk accessible) - the one
     # environment where rdinit=/init=/early-/init all failed before.
     wrap_boot_initramfs /tmp/boot-files/initramfs
 
     # Create squashfs
     log_info "Creating squashfs image..."
-    # NOTE: gzip (not zstd) — the Alpine linux-rpi4 kernel builds squashfs
+    # NOTE: gzip (not zstd) - the Alpine linux-rpi4 kernel builds squashfs
     # without CONFIG_SQUASHFS_ZSTD, so a zstd image fails to mount (EINVAL)
     # at boot. gzip/xz/lz4/lzo are the supported decompressors.
     mksquashfs "$build_dir" "$squashfs_output" \
@@ -1101,6 +1104,16 @@ install_aa_cli() {
     cp "${srcbase}"/lib/*.sh "${root}${AA_LIB_DIR}/"
     cp "${srcbase}/alpine-anywhere" "${root}/usr/local/bin/aa"
     chmod +x "${root}/usr/local/bin/aa"
+    # Stamp the exact build version into the baked CLI: on a node there is no git
+    # repo, so `aa --version` would otherwise only ever report the fallback
+    # constant. Bake the control-host's `git describe` so the node is traceable
+    # to the commit it was installed/upgraded from.
+    local baked_ver
+    baked_ver=$(git -C "$srcbase" describe --tags --always --dirty 2>/dev/null || echo "")
+    if [ -n "$baked_ver" ]; then
+        sed_inplace_checked "${root}/usr/local/bin/aa" "^AA_VERSION=\"${baked_ver}\"\$" \
+            -e "s|^AA_VERSION=\".*\"\$|AA_VERSION=\"${baked_ver}\"|"
+    fi
     # The dropbear (hardened) login PATH is /usr/sbin:/usr/bin:/sbin:/bin and
     # does NOT include /usr/local/bin, so an interactive `aa` would be "not
     # found". Symlink it into /usr/sbin (which IS on PATH) so `aa status` works
@@ -1192,8 +1205,8 @@ EOF
     containers_enabled && setup_container_image "$root"
 }
 
-# /usr/local/sbin/aa-data — the workhorse. Standalone POSIX (no lib deps): it
-# re-derives the boot disk from /proc/cmdline, reads data.meta from the FAT boot
+# /usr/local/sbin/aa-data - the workhorse. Standalone POSIX (no lib deps): it
+# re-derives the boot disk from /proc/cmdline, reads data.meta from the boot partition
 # partition, and unlocks/mounts/seeds. Subcommands:
 #   autoboot   - boot service: only acts for non-ssh unlock methods
 #   open KEY?  - open LUKS (KEY from stdin/file) and mount everything
@@ -1203,7 +1216,7 @@ install_aa_data_helper() {
     local root="$1"
     cat > "${root}/usr/local/sbin/aa-data" << 'AADATA'
 #!/bin/sh
-# Persistent-data workhorse (reads data.meta from the FAT boot partition).
+# Persistent-data workhorse (reads data.meta from the boot partition).
 set -u
 BOOT_MNT=/run/aa-boot
 READY=/run/aa-data-ready
@@ -1314,7 +1327,7 @@ AADATA
     chmod +x "${root}/usr/local/sbin/aa-data"
 }
 
-# /usr/local/bin/aa-unlock — operator command (ssh method). Prompts for the
+# /usr/local/bin/aa-unlock - operator command (ssh method). Prompts for the
 # passphrase (or reads --key-file), opens LUKS, mounts /var, starts data services.
 install_aa_unlock() {
     local root="$1"
@@ -1385,7 +1398,7 @@ EOF
     fi
 }
 
-# /usr/local/bin/aa-snapshot — BTRFS snapshot + optional incremental send.
+# /usr/local/bin/aa-snapshot - BTRFS snapshot + optional incremental send.
 install_aa_snapshot() {
     local root="$1"
     cat > "${root}/usr/local/bin/aa-snapshot" << 'AASNAP'
@@ -1423,11 +1436,11 @@ AASNAP
 # We PATCH the Alpine init to call /sbin/init.aa right before its
 # `exec ... switch_root`. CRUCIAL DETAIL: at that point the init has ALREADY
 # run its "move mounts into $sysroot" loop, so /proc and /dev are NO LONGER at
-# their normal paths (/proc/cmdline is empty, /dev/<part> is gone) — they live
+# their normal paths (/proc/cmdline is empty, /dev/<part> is gone) - they live
 # under $sysroot now. So the patch passes the init's OWN variables to the guard:
 #     /sbin/init.aa "$KOPT_root" "$sysroot"
 # and init.aa reads root from the arg (fallback: $sysroot/proc/cmdline) and
-# finds the FAT boot node under /dev OR $sysroot/dev. busybox runs as a
+# finds the boot partition node under /dev OR $sysroot/dev. busybox runs as a
 # standalone shell, so applets (mount/sed/reboot/...) resolve without symlinks.
 wrap_boot_initramfs() {
     local img="$1"
@@ -1445,8 +1458,8 @@ wrap_boot_initramfs() {
     grep -q 'exec .*switch_root' "$tmp/init" || { log_warn "no 'exec ... switch_root' in init; skipping boot-guard"; rm -rf "$tmp"; return 0; }
 
     mkdir -p "$tmp/sbin"
-    # init.aa now lives as a standalone, testable file under lib/initramfs/.
-    # Resolve it from wherever the tool is installed/run.
+    # init.aa is a standalone, testable file under lib/initramfs/. Resolve it
+    # from wherever the tool is installed/run.
     local init_aa_src=""
     for cand in \
         "${SCRIPT_DIR}/lib/initramfs/init.aa" \
@@ -1457,7 +1470,7 @@ wrap_boot_initramfs() {
     done
     # A missing source means we would ship an A/B slot with NO boot-guard. Combined
     # with a missing PARTUUID resolver (the sources travel together) that slot dies
-    # in the initramfs and loops forever with no rollback — the exact field brick we
+    # in the initramfs and loops forever with no rollback - the exact field brick we
     # hit when an upgrade ran stale/baked code. FAIL LOUDLY instead of silently
     # skipping. (deploy_scripts_to_remote guarantees these are present on the node.)
     [ -n "$init_aa_src" ] || { rm -rf "$tmp"; die "wrap_boot_initramfs: init.aa source not found (looked under SCRIPT_DIR/INSTALL_LIB_DIR/INSTALL_BASE_DIR//boot); refusing to build a guard-less A/B slot"; }
@@ -1469,7 +1482,7 @@ wrap_boot_initramfs() {
     # mounts onto $sysroot. Both the PARTUUID resolver and the boot-guard inject
     # BEFORE this line, so they run after nlplug-findfs but before the root mount.
     # A fake/future init without a recognizable root mount falls back to anchoring
-    # the guard on `exec switch_root` (resolver injection is skipped — harmless for
+    # the guard on `exec switch_root` (resolver injection is skipped - harmless for
     # a direct root=/dev/... boot).
     local rmount_anchor=""
     if grep -qE '^[[:space:]]*mkdir -p /media/root-ro' "$tmp/init"; then
@@ -1523,9 +1536,9 @@ wrap_boot_initramfs() {
     # Pre-mount placement is what makes rollback survive an initramfs ROOT-MOUNT
     # failure: init.aa bumps the slot's boot counter every boot, so a slot whose
     # squashfs/PARTUUID will not mount still rolls back after its retry budget
-    # instead of looping forever. (Previously the guard sat after the mount, so a
-    # mount failure killed the init before the counter ever advanced — exactly why
-    # the broken upgrade reboot-looped instead of falling back.) We still pass the
+    # instead of looping forever. Do NOT move the guard after the root mount: a
+    # mount failure would then kill the init before the counter ever advances, so
+    # a broken slot reboot-loops instead of falling back. We still pass the
     # init's own $KOPT_root and $sysroot (LITERAL text expanded at boot; pre-mount,
     # $sysroot is just an unmounted path and init.aa falls back to /proc/cmdline).
     # awk (not `sed -i`) so it is portable + idempotent.
@@ -1621,8 +1634,8 @@ wrap_boot_initramfs() {
 
 # OpenRC service for A/B auto-rollback:
 #   aa-verify (default) - once booted far enough, mark the slot good (reset counter)
-# NOTE: the boot-attempt COUNT happens earlier, in the PID 1 boot-guard shim
-# (/sbin/aa-boot-init), so it works even when the init system itself is broken.
+# NOTE: the boot-attempt COUNT happens earlier, in the initramfs boot-guard
+# (init.aa, before switch_root), so it works even when the init system is broken.
 install_ab_services() {
     local root="$1"
     # OpenRC init script; s6 defines aa-verify in setup_s6_init.
@@ -1770,7 +1783,7 @@ capture_host_identity() {
 
 # Bake persistent SSH host keys into the image so the server identity is stable
 # across reboots AND A/B upgrades, and is PRESERVED when installing over an
-# existing server — independent of OpenSSH vs dropbear on either side.
+# existing server - independent of OpenSSH vs dropbear on either side.
 #
 # Source of truth is always canonical OpenSSH-format keys (from --ssh-host-keys,
 # an auto-captured dir, or the building system's /etc/ssh). They are emitted in
@@ -2151,10 +2164,10 @@ slot_to_partnum() {
 
 # Kernel cmdline shared by both slots (root= is appended per-slot).
 # The A/B boot-guard is /sbin/init.aa, invoked by the (patched) Alpine initramfs
-# init right BEFORE switch_root — i.e. in the initramfs once modules are loaded,
+# init right BEFORE switch_root - i.e. in the initramfs once modules are loaded,
 # busybox is ready and the disk is accessible, but before handing off to the
-# real init. (init=/sbin/aa-boot-init failed: switch_root couldn't exec it;
-# rdinit=/init.aa was ignored; a first-thing /init guard hit a too-bare env.)
+# real init. The guard must run here, not via kernel init=/rdinit= (those hand
+# off too late or to a too-bare environment to run the boot-counter reliably).
 # - panic=10: a dying init (PID 1 exit -> kernel panic) reboots after 10s so a
 #   broken-but-mountable slot accumulates failed boots toward rollback.
 SLOT_KERNEL_OPTS="rootfstype=squashfs overlaytmpfs=yes modules=loop,squashfs panic=10 console=tty1 quiet"
@@ -2210,7 +2223,7 @@ install_boot_config() {
     if [ "$DETECTED_PLATFORM" = "rpi" ]; then
         log_info "Configuring Raspberry Pi boot (slot $slot)..."
 
-        # NOTE: arm_64bit=1 is REQUIRED — the linux-rpi4 kernel is a 64-bit
+        # NOTE: arm_64bit=1 is REQUIRED - the linux-rpi4 kernel is a 64-bit
         # ARM64 Image; without this the firmware loads a multicolour screen
         # and never starts the kernel.
         cat > "${boot_mnt}/config.txt" << EOF

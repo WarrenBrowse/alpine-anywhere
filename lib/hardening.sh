@@ -316,7 +316,7 @@ apply_hardening_to_image() {
     log_info "Applying security hardening..."
 
     # 0. Install hardening runtime dependencies into the image (the configs
-    #    below are useless — or dangerous — without them). Install separately:
+    #    below are useless - or dangerous - without them). Install separately:
     #    apk add is atomic, so bundling an unavailable package (hardened-malloc
     #    is not in Alpine aarch64 repos) would also skip the available ones.
     log_info "Installing firewall (nftables)..."
@@ -335,7 +335,7 @@ apply_hardening_to_image() {
     mkdir -p "${root}/etc/conf.d"
     generate_dropbear_confd > "${root}/etc/conf.d/dropbear"
 
-    # 3. hardened_malloc — ONLY preload if the library is actually present,
+    # 3. hardened_malloc - ONLY preload if the library is actually present,
     #    using its real path. A dangling /etc/ld.so.preload entry can make
     #    every exec fail (effectively bricking the system).
     local malloc_lib

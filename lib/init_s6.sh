@@ -181,8 +181,9 @@ EOF
     chmod +x "${hd}"/*
 
     # --- s6-rc source services --------------------------------------------
-    # NOTE: boot-attempt counting is done by the PID 1 shim (/sbin/aa-boot-init),
-    # not an s6 service, so it works even if s6 itself fails to come up.
+    # NOTE: boot-attempt counting is done in the initramfs boot-guard (init.aa,
+    # run before switch_root), not an s6 service, so it works even if s6 itself
+    # fails to come up.
     _s6_oneshot "$src" mounts    "/usr/local/libexec/aa-s6/mounts-up"
     _s6_oneshot "$src" network   "/usr/local/libexec/aa-s6/network-up"
     _s6_oneshot "$src" aa-verify "/usr/local/libexec/aa-s6/verify"
@@ -245,7 +246,7 @@ EOF
         for svc in "${root}/etc/aa/custom-services.d"/*/; do
             [ -d "$svc" ] || continue
             name=$(basename "$svc")
-            rm -rf "${src}/${name}"
+            rm -rf "${src}/${name:?}"
             cp -R "$svc" "${src}/${name}"
             touch "${src}/default/contents.d/${name}"
             log_info "Wired custom s6 service: ${name}"
@@ -262,7 +263,7 @@ EOF
     local skel="${root}/etc/s6-linux-init/skel"
     mkdir -p "$skel"
     # rc.init: NOT `set -e` (a failing s6-rc must not abort the whole init).
-    # Logs breadcrumbs to the FAT boot partition (sda1) so a failed s6 boot can
+    # Logs breadcrumbs to the boot partition (sda1) so a failed s6 boot can
     # be diagnosed offline, and brings up an emergency network+dropbear so the
     # box stays reachable even if the s6-rc services fail to come up.
     cat > "${skel}/rc.init" << 'EOF'
@@ -322,11 +323,11 @@ EOF
     # (notably run-image), i.e. the maker's OUTPUT dir = /etc/s6-linux-init/current.
     # It is NOT the runtime live dir. Passing -c /run/s6-linux-init made bin/init
     # do `s6-linux-init -c /run/s6-linux-init`, so at boot it looked for the
-    # run-image at /run/s6-linux-init/run-image — which does not exist yet (that's
+    # run-image at /run/s6-linux-init/run-image - which does not exist yet (that's
     # the tmpfs being created) -> fatal "unable to copy run-image to /run: No such
     # file or directory" -> PID 1 dies (the s6 brick). The runtime live dir is
     # /run/s6-linux-init by default and is created by s6-linux-init itself.
-    # NOTE: no -d /dev — the Alpine initramfs already mounted devtmpfs on /dev;
+    # NOTE: no -d /dev - the Alpine initramfs already mounted devtmpfs on /dev;
     # having s6-linux-init mount a second devtmpfs over it can kill stage 1.
     chroot "$root" /bin/sh -c \
         's6-linux-init-maker -c /etc/s6-linux-init/current -p "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" -m 0022 -1 -f /etc/s6-linux-init/skel /etc/s6-linux-init/current' \
@@ -335,7 +336,7 @@ EOF
     ln -sf /etc/s6-linux-init/current/bin/init "${root}/sbin/init"
 
     # Route the standard shutdown commands to s6-linux-init-shutdownd. Alpine's
-    # /sbin/{reboot,halt,poweroff} are busybox applets that signal PID 1 — but
+    # /sbin/{reboot,halt,poweroff} are busybox applets that signal PID 1 - but
     # PID 1 here is s6-svscan, which ignores that signal, so `reboot` is a SILENT
     # NO-OP (the box never reboots: breaks upgrade activation AND auto-rollback).
     # The maker emits working reboot/halt/poweroff/shutdown in the basedir bin;

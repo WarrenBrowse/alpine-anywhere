@@ -1,5 +1,12 @@
 #!/bin/sh
 # common.sh - Utilities, logging, and argument parsing for alpine-anywhere
+#
+# This file DECLARES the config/detected global variables (DETECTED_*,
+# INSTALL_*_DIR, NETWORK_IS_DHCP, ...) that other library files populate and
+# consume. That cross-file data flow is invisible to shellcheck when it lints
+# each file on its own, so it reports every such global as unused. Disable
+# SC2034 file-wide here (only here) rather than annotate ~20 declarations.
+# shellcheck disable=SC2034
 
 set -eu
 
@@ -61,14 +68,14 @@ CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-crun}"  # OCI runtime: crun|runsc (runsc
 # a re-provisioned box, e.g. the old provider default).
 HOSTNAME_OVERRIDE="${HOSTNAME_OVERRIDE:-}"
 
-# Working directories (set by setup_install_dirs in exec.sh)
+# Working directories (set by setup_install_dirs in exec.sh) and detected values
+# (populated by exec.sh/network.sh, consumed by install.sh/pivot.sh/init_s6.sh).
 WORK_DIR=""
 INSTALL_BASE_DIR=""
 INSTALL_LIB_DIR=""
 INSTALL_CACHE_DIR=""
 INSTALL_LOG_DIR=""
 
-# Detected values (populated by network.sh)
 DETECTED_INTERFACE=""
 DETECTED_IP_ADDRESS=""
 DETECTED_NETMASK=""
@@ -554,6 +561,7 @@ Options:
   -f, --force                    Skip confirmation prompts
   --local                        Run locally (no SSH, for running on target server)
   --extra-packages PKGS          Additional packages (comma-separated)
+  --version                      Print the version (git describe) and exit
   -h, --help                     Show this help message
 
 Install options:
@@ -908,6 +916,10 @@ parse_arguments() {
                 show_usage
                 exit 0
                 ;;
+            --version)
+                aa_version
+                exit 0
+                ;;
             -*)
                 die "Unknown option: $1"
                 ;;
@@ -925,8 +937,8 @@ parse_arguments() {
 
     # `aa switch <A|B> [user@host]`: first positional is the target slot; an
     # optional second positional is a remote target (like the other slot
-    # subcommands). Previously any host was silently dropped and the flip was
-    # forced onto the LOCAL machine.
+    # subcommands). A host given here MUST route the flip to that host, never
+    # silently onto the local machine.
     if [ "$SLOT_ACTION" = "switch" ]; then
         [ -n "$pos_0" ] && TARGET_SLOT="$pos_0"
         if [ -n "$pos_1" ]; then

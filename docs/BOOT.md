@@ -54,7 +54,8 @@ GRUB-only box (UEFI without `extlinux/extlinux.conf` or `config.txt`, e.g. a
 Hetzner cloud server) is first-class: `switch_slot` and `init.aa` treat the
 `grub_aa_default.cfg` write itself as the slot flip.
 
-TODO: extend the QEMU VM integration matrix (`spec/integration/vm/`) with a
-GRUB-only (UEFI, no extlinux.conf) case; that layout is currently covered by
-unit specs only, so an on-box validation on the Hetzner exits is still required
-before trusting the persist path there.
+The GRUB-only persist path is real-node validated (the Hetzner exits, 2026-07-03).
+The remaining test gap: the QEMU VM integration matrix (`spec/integration/vm/`)
+still boots BIOS/extlinux only, so the GRUB-only (UEFI, no extlinux.conf) layout
+is covered by unit specs plus manual on-box validation, not an automated boot
+test. Extending the VM matrix with a UEFI/GRUB case is the outstanding follow-up.

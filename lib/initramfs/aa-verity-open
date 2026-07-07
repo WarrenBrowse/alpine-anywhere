@@ -11,7 +11,7 @@
 #
 # The data device and hash device are the SAME slot partition: the squashfs
 # lives at offset 0 and the verity hash tree at SLOT_<x>_HASH_OFFSET (read from
-# the signed slots.meta on the FAT boot partition).
+# the signed slots.meta on the boot partition).
 #
 # Strict POSIX sh / BusyBox ash. Best-effort logging to /dev/kmsg.
 ROOTARG="$1"; SYSROOT="$2"
@@ -30,7 +30,7 @@ case "$ROOTARG" in *mmcblk*|*nvme*) pfx="p" ;; *) pfx="" ;; esac
 disk=${ROOTARG%${pfx}[0-9]}
 base=${disk##*/}
 
-# Locate + mount the FAT boot partition read-only to read slots.meta.
+# Locate + mount the boot partition read-only to read slots.meta.
 bootname="${base}${pfx}1"
 boot=""
 for c in "/dev/${bootname}" "${SYSROOT}/dev/${bootname}"; do

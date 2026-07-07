@@ -11,7 +11,7 @@
 # linted and unit-tested; wrap_boot_initramfs copies it into the initramfs.
 ROOTARG="$1"; SYSROOT="$2"
 
-# Mount point for the FAT boot partition. Overridable for unit tests; defaults
+# Mount point for the boot partition. Overridable for unit tests; defaults
 # to /aa-boot in the real initramfs.
 AA_BOOT_DIR="${AA_BOOT_DIR:-/aa-boot}"
 
@@ -46,7 +46,7 @@ case "$root" in *mmcblk*|*nvme*) pfx="p" ;; *) pfx="" ;; esac
 disk=${root%${pfx}[0-9]}            # e.g. /dev/sda  /dev/mmcblk0
 base=${disk##*/}                    # e.g. sda       mmcblk0
 
-# 2) Locate the FAT boot partition node (part 1). /dev was likely moved to
+# 2) Locate the boot partition node (part 1). /dev was likely moved to
 #    $SYSROOT/dev, so search there too.
 bootname="${base}${pfx}1"
 boot=""
@@ -90,7 +90,7 @@ if [ "$(sed -n 's/^BOOT_HALTED=//p' "$meta" | head -n1)" = "1" ]; then
     exit 0
 fi
 
-# Increment this slot's boot counter (persisted on the FAT boot partition).
+# Increment this slot's boot counter (persisted on the boot partition).
 cnt=$(sed -n "s/^SLOT_${slot}_BOOT_COUNT=//p" "$meta" | head -n1); cnt=$((${cnt:-0}+1))
 ver=$(sed -n "s/^SLOT_${slot}_VERIFIED=//p" "$meta" | head -n1)
 meta_set "SLOT_${slot}_BOOT_COUNT" "$cnt"

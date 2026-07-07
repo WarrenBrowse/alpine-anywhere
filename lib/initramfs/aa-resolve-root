@@ -9,7 +9,7 @@
 # unique and disambiguates correctly. BUT the mkinitfs initramfs userspace is
 # busybox-only: busybox mount/findfs understand filesystem UUID=/LABEL= but NOT
 # PARTUUID=, and the mdev persistent-storage helper only creates
-# /dev/disk/by-partuuid/<guid> when a full (util-linux) blkid is present — which
+# /dev/disk/by-partuuid/<guid> when a full (util-linux) blkid is present - which
 # the initramfs does not ship. So nlplug-findfs locates the device, yet nothing
 # translates the tag to a node, and the init's `mount $KOPT_root /media/root-ro`
 # gets the literal string and dies:
@@ -46,7 +46,7 @@ DEV="${AA_DEV:-/dev}"
 # The GPT header (LBA1) holds the entry-array LBA @72 and entry size @84 (both
 # little-endian); on an LE host hexdump '/N "%u"' reads them natively. Entry K
 # (1-indexed) sits at entryLBA*512 + (K-1)*entrySize; its unique GUID is at +16,
-# stored mixed-endian (first three groups byte-reversed) — reorder to the textual
+# stored mixed-endian (first three groups byte-reversed) - reorder to the textual
 # form. Falls back to the universal defaults (LBA 2, 128-byte entries) if the
 # header reads look bogus.
 gpt_partuuid() {

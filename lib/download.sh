@@ -129,4 +129,6 @@ download_file() {
 # specific artifact's checksum was both fragile (artifact/layout varies by mode
 # and arch) and wrong for install mode (which uses apk + minirootfs, not the
 # netboot kernel).
+# Consumed by find_working_mirror_local in the main script (cross-file).
+# shellcheck disable=SC2034
 FALLBACK_MIRRORS="https://dl-cdn.alpinelinux.org/alpine https://uk.alpinelinux.org/alpine https://nl.alpinelinux.org/alpine https://ftp.halifax.rwth-aachen.de/alpine"

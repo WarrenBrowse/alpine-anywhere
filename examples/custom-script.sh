@@ -8,7 +8,7 @@
 # Usage:
 #   alpine-anywhere --install --custom-script ./examples/custom-script.sh root@host
 #
-# Keep it POSIX sh and fail loud — a non-zero exit aborts the build.
+# Keep it POSIX sh and fail loud - a non-zero exit aborts the build.
 set -e
 
 # 1. Install extra packages

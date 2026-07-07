@@ -1,17 +1,31 @@
 #!/bin/sh
 #
-# alpine-anywhere - Boot any Linux server into Alpine Linux RAM-only mode
+# alpine-anywhere - install any Linux server into an immutable Alpine A/B system
 #
-# Similar to nixos-anywhere, this tool uses kexec to boot a remote server
-# into Alpine Linux running entirely in RAM, without touching the disk.
+# Primary mode (--install): take over a running server over SSH, kexec into an
+# Alpine RAM installer, repartition, and install an immutable musl A/B squashfs
+# system (s6 + dropbear when --hardened) with atomic no-reboot upgrades and
+# initramfs auto-rollback. Also supports a temporary RAM-only live boot (default
+# mode, reverts on reboot) and on-device slot management (aa status/verify/
+# rollback/switch/upgrade).
 #
-# Usage: alpine-anywhere [OPTIONS] <user@host>
+# Usage: alpine-anywhere [OPTIONS] <user@host>   (see --help)
 #
-# Copyright (c) 2024
 # License: MIT
 #
 
 set -eu
+
+# Version. Overridden with the exact `git describe` at build time by
+# install_aa_cli when the baked `aa` command is generated, so a node can report
+# which commit it was installed/upgraded from.
+AA_VERSION="0.1.0"
+
+# Resolve a traceable version: the git describe of the checkout when run from a
+# repo (dev/control host), else the baked AA_VERSION (installed node).
+aa_version() {
+    git -C "$SCRIPT_DIR" describe --tags --always --dirty 2>/dev/null || echo "$AA_VERSION"
+}
 
 # =============================================================================
 # Script Initialization
@@ -68,7 +82,7 @@ EOF
     elif [ "$UPGRADE_MODE" = "true" ]; then
         mode_desc="Upgrade mode (atomic A/B switch)"
     fi
-    echo "alpine-anywhere v2.0.0 - Immutable Alpine Linux with A/B updates"
+    echo "alpine-anywhere $(aa_version) - Immutable Alpine Linux with A/B updates"
     echo "Mode: $mode_desc"
     echo ""
 }
@@ -86,8 +100,7 @@ main() {
     validate_safe_inputs
 
     # Lightweight A/B slot subcommands (status/verify/rollback/bootcount).
-    # Handled before the banner/work-dir setup so they stay quiet and fast
-    # (bootcount runs at every boot from an OpenRC service).
+    # Handled before the banner/work-dir setup so they stay quiet and fast.
     if [ -n "$SLOT_ACTION" ]; then
         run_slot_action
         exit $?
@@ -291,7 +304,7 @@ run_remote_upgrade() {
     # init.aa) to the remote, exactly like install does. Without this the upgrade
     # ran whatever stale/baked code happened to be on the node, and
     # wrap_boot_initramfs could not find its initramfs payloads (/boot is not
-    # mounted at upgrade time) — so the new slot shipped a STOCK initramfs that
+    # mounted at upgrade time) - so the new slot shipped a STOCK initramfs that
     # cannot resolve root=PARTUUID= and died at boot with
     #   mount ...: No such file or directory  (an unbootable, non-rolling-back slot).
     # Deploying also sets INSTALL_BASE_DIR so run_on_remote executes the freshly
@@ -336,8 +349,7 @@ run_local_ab_install() {
     # Step 4: Generate config
     log_step "Step 4/6: Configuration generation"
     find_working_mirror_local
-    local apkovl_file
-    apkovl_file=$(generate_apkovl "$ssh_keys")
+    generate_apkovl "$ssh_keys" >/dev/null
 
     # Step 5: Download files
     log_step "Step 5/6: Downloading Alpine files"
@@ -495,7 +507,7 @@ run_local_upgrade() {
     # RTC-less targets can boot at 1970 -> TLS fails on the image build.
     ensure_sane_clock
 
-    # Populate DETECTED_* (arch/platform/hostname/network) — the image build in
+    # Populate DETECTED_* (arch/platform/hostname/network) - the image build in
     # the upgrade needs them just like a fresh install does.
     detect_local_network
 

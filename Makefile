@@ -2,16 +2,17 @@
 
 .PHONY: all test test-unit test-integration test-vm install uninstall lint shellcheck syntax help clean
 
-# Installation prefix
+# Installation prefix. LIBDIR must be $(PREFIX)/lib/aa: the script resolves its
+# modules there at runtime (see the LIB_DIR fallback in alpine-anywhere).
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
-LIBDIR ?= $(PREFIX)/lib/alpine-anywhere
+LIBDIR ?= $(PREFIX)/lib/aa
 
 # Project files
 MAIN_SCRIPT := alpine-anywhere
 LIB_FILES := $(wildcard lib/*.sh)
 # Standalone initramfs payloads (not *.sh; run before switch_root in BusyBox ash)
-INITRAMFS_FILES := lib/initramfs/init.aa lib/initramfs/aa-verity-open
+INITRAMFS_FILES := lib/initramfs/init.aa lib/initramfs/aa-verity-open lib/initramfs/aa-resolve-root
 
 # Default target
 all: lint test
@@ -73,14 +74,12 @@ shellcheck:
 # Install alpine-anywhere
 install:
 	@echo "Installing alpine-anywhere to $(BINDIR)..."
-	@mkdir -p $(BINDIR)
-	@mkdir -p $(LIBDIR)
+	@mkdir -p $(BINDIR) $(LIBDIR)/initramfs
 	@cp $(MAIN_SCRIPT) $(BINDIR)/alpine-anywhere
 	@chmod 755 $(BINDIR)/alpine-anywhere
 	@cp lib/*.sh $(LIBDIR)/
 	@chmod 644 $(LIBDIR)/*.sh
-	@sed -i.bak 's|SCRIPT_DIR=.*|SCRIPT_DIR="$(LIBDIR)"|; s|source "$${SCRIPT_DIR}/lib/|source "$(LIBDIR)/|' $(BINDIR)/alpine-anywhere
-	@rm -f $(BINDIR)/alpine-anywhere.bak
+	@cp lib/initramfs/* $(LIBDIR)/initramfs/
 	@echo "Installation complete!"
 
 # Uninstall alpine-anywhere
@@ -99,7 +98,7 @@ clean:
 
 # Display help
 help:
-	@echo "alpine-anywhere - Boot any Linux server into Alpine Linux via kexec"
+	@echo "alpine-anywhere - install any Linux server into an immutable Alpine A/B system"
 	@echo ""
 	@echo "Available targets:"
 	@echo "  all             - Lint and run all tests (default)"

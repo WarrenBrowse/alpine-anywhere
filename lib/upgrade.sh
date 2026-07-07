@@ -57,7 +57,7 @@ strip_partition() {
 
 # Device the running system was booted from (root=... in the kernel cmdline).
 # x86_64 slots boot with root=PARTUUID=..., which busybox cannot resolve to a
-# /dev node (no PARTUUID support) — strip_partition on the raw tag would yield
+# /dev node (no PARTUUID support) - strip_partition on the raw tag would yield
 # garbage and mount_boot then fails. The running immutable root IS a squashfs
 # mounted from the slot partition, so its source is the real device we booted;
 # use that for any tag-style (or absent) root. Paths are overridable for tests.
@@ -93,7 +93,7 @@ boot_is_mounted() {
     grep -q " ${BOOT_MNT} " /proc/mounts 2>/dev/null
 }
 
-# Mount the FAT boot partition (partition 1) at $BOOT_MNT
+# Mount the boot partition (partition 1) at $BOOT_MNT
 mount_boot() {
     local disk part1
     disk=$(get_boot_disk)
@@ -156,7 +156,7 @@ set_slot_meta() {
     # Rebuild the whole file in one pass and write it atomically (tmp+fsync+
     # rename+dir sync). The previous "grep -v > tmp; mv; then >> append" had a
     # window where a crash between the mv and the append lost the key entirely,
-    # and never fsync'd - dangerous on the FAT boot partition under power loss.
+    # and never fsync'd - dangerous on the boot partition under power loss.
     { grep -v "^${full}=" "$meta" 2>/dev/null || true; echo "${full}=${value}"; } \
         | atomic_write "$meta"
 }
@@ -267,7 +267,7 @@ install_to_slot() {
 
 # Point the bootloader at a slot by editing the EXISTING boot config in place.
 # Runs on the installed device, so it must not depend on build-time vars like
-# DETECTED_PLATFORM — it detects the bootloader from the files actually present.
+# DETECTED_PLATFORM - it detects the bootloader from the files actually present.
 switch_slot() {
     local new_slot="$1"
     local disk slot_dev partnum
@@ -378,7 +378,7 @@ rollback_slot() {
 
     prev_ver=$(get_slot_meta "$previous" "VERSION")
     if [ -z "$prev_ver" ]; then
-        aa_log "rollback: ABORTED — slot $previous has no installed image"
+        aa_log "rollback: ABORTED - slot $previous has no installed image"
         umount_boot
         log_error "Cannot roll back: slot $previous has no installed image"
         return 1
@@ -476,7 +476,7 @@ show_status() {
     echo "Running slot:  $running   (booted from $(get_root_device))"
     echo "Boot slot:     $boot_slot   (next boot -> ${boot_root:-unknown})"
     if [ "$running" != "$boot_slot" ]; then
-        echo "  NOTE: boot slot differs from running slot — reboot will switch to $boot_slot"
+        echo "  NOTE: boot slot differs from running slot - reboot will switch to $boot_slot"
     fi
     echo ""
 

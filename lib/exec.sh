@@ -232,6 +232,8 @@ detect_local_network() {
     if echo "$ip_info" | grep -qE '^[0-9.]+/[0-9]+$'; then
         DETECTED_IP_ADDRESS="${ip_info%/*}"
         DETECTED_CIDR="${ip_info#*/}"
+        # Consumed cross-file (network.sh / install.sh), invisible to shellcheck.
+        # shellcheck disable=SC2034
         DETECTED_NETMASK=$(cidr_to_netmask "$DETECTED_CIDR")
     else
         die "Could not parse IP address: $ip_info"
@@ -303,12 +305,14 @@ detect_local_network() {
     model=$(cat /proc/device-tree/model 2>/dev/null | tr -d '\0' || true)
     case "$model" in
         *"Raspberry Pi"*)
+            # Consumed cross-file (install.sh / pivot.sh), invisible to shellcheck.
+            # shellcheck disable=SC2034
             DETECTED_PLATFORM="rpi"
             case "$model" in
                 *"Pi 5"*)
                     DETECTED_RPI_VERSION="5"
                     ;;
-                *"Pi 4"*|*"Pi 400"*)
+                *"Pi 4"*)
                     DETECTED_RPI_VERSION="4"
                     ;;
                 *"Pi 3"*)

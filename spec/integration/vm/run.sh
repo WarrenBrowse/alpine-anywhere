@@ -227,9 +227,9 @@ phase_autorollback() {
     vm_ssh 'aa switch B' 2>/dev/null || { fail "aa switch B"; return 1; }
     expect "boot slot set to B" test "$(boot_slot)" = B
     # Arm B as a failing slot. Mounting the ext4 boot partition needs no modprobe:
-    # the installed OS loads ext4 at boot via the aa-modules service this MR adds
-    # (STEP 5's `aa rollback`, which rewrites extlinux on this same partition,
-    # already depended on it). If ext4 were missing, this mount - and aa itself -
+    # the installed OS loads ext4 at boot via the aa-modules service (STEP 5's
+    # `aa rollback`, which rewrites extlinux on this same partition, already
+    # depended on it). If ext4 were missing, this mount - and aa itself -
     # would fail, so we deliberately do NOT paper over it with a modprobe here.
     vm_ssh 'mp=/mnt/aab; mkdir -p "$mp"; mount /dev/vda1 "$mp" 2>/dev/null || exit 1; \
         sed -i "s/^SLOT_B_VERIFIED=.*/SLOT_B_VERIFIED=false/; s/^SLOT_B_BOOT_COUNT=.*/SLOT_B_BOOT_COUNT=1/" "$mp/slots.meta"; \

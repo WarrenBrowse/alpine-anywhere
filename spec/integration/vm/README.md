@@ -1,4 +1,4 @@
-# VM integration test — the path that can brick a box
+# VM integration test - the path that can brick a box
 
 The `shellspec` suites under `spec/lib/` and `spec/integration/` mock SSH, curl
 and the disk entirely. They never boot, never partition and never reboot, so the
@@ -72,7 +72,7 @@ hardware" applied to the boot path.
 The seed must be a **partitioned** provider image, because alpine-anywhere's
 reboot-into-RAM installer stages `installer.img` onto **partition 1 of the
 running root disk** (`lib/pivot.sh`). Debian genericcloud is GPT with `vda1` =
-root — exactly a real provider's shape. An Alpine "nocloud" image puts root on
+root - exactly a real provider's shape. An Alpine "nocloud" image puts root on
 the whole unpartitioned device (no `vda1`), which breaks the staging, so it is
 **not** a valid seed here. `AA_VM_SEED_URL` may point at any other partitioned
 cloud qcow2 (e.g. Ubuntu genericcloud); the seed prep is distro-aware (apt or

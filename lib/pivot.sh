@@ -581,7 +581,7 @@ FAKEINIT
     # === TAKEOVER-INIT (busybox/OpenRC source) ===
     # busybox init re-execs this (as PID 1) via an inittab `restart` action on
     # SIGQUIT. It runs FIRST on the OLD root, whose userland is a minimal Alpine
-    # with no bash — so this MUST be POSIX sh (/bin/sh = busybox), unlike the
+    # with no bash - so this MUST be POSIX sh (/bin/sh = busybox), unlike the
     # bash fakeinit used for systemd sources.
     run_privileged tee "${PIVOT_DIR}/sbin/takeover-init" > /dev/null << 'TAKEOVERINIT'
 #!/bin/sh
@@ -591,7 +591,7 @@ OLD_ROOT="/mnt/oldroot"
 
 exec > /dev/console 2>&1
 
-# Persistent breadcrumb log on the FAT boot partition (sda1), so a failed
+# Persistent breadcrumb log on the boot partition (sda1), so a failed
 # takeover can be diagnosed after the fact (no serial console needed).
 # NOTE: if the takeover SUCCEEDS, run_ab_install later repartitions the disk
 # and this log is overwritten - that's fine, we only need it on failure.
