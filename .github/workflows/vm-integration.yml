@@ -33,15 +33,20 @@ jobs:
     runs-on: [self-hosted, Linux, X64, warren]
     steps:
       - uses: actions/checkout@v4
-      - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
-      # Repo-wide syntax check (the Makefile `syntax` target) + shellcheck on the
-      # new harness only. Repo-wide shellcheck carries pre-existing findings that
-      # are out of scope for this change, so we do not gate the whole tree on it.
-      - name: Syntax (sh -n, repo-wide)
-        run: make syntax
-      - name: Shellcheck the VM harness
-        run: shellcheck -x -s sh -S warning spec/integration/vm/run.sh spec/integration/vm/lib/*.sh
+      - name: Install shellcheck + shellspec
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          if ! command -v shellspec >/dev/null 2>&1; then
+            curl -fsSL https://git.io/shellspec | sh -s -- --yes --prefix "$HOME/.local"
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # Repo-wide: POSIX syntax + shellcheck (the whole tree is clean and gated),
+      # then the full shellspec unit + integration suite. The VM harness (below)
+      # covers the boot/brick path; these gate every merge on the fast checks.
+      - name: Lint (sh -n + shellcheck, repo-wide)
+        run: make lint
+      - name: Unit + integration tests (shellspec)
+        run: make test
 
   vm:
     runs-on: [self-hosted, Linux, X64, warren]

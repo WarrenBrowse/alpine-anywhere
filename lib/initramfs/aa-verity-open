@@ -55,7 +55,7 @@ data_size=$(meta_get DATA_SIZE)
 # squashfs (downgrade-by-suppression), and plain verity would happily "verify"
 # it. If no pubkey is embedded we fall back to the hash alone (defends corruption
 # and blind offline tampering, but not a hash rewrite: embed a key for that).
-pubkey="/etc/alpine-anywhere/verity.pub"
+pubkey="${AA_VERITY_PUBKEY:-/etc/alpine-anywhere/verity.pub}"
 sig=$(meta_get ROOT_HASH_SIG)
 if [ -f "$pubkey" ]; then
     if ! command -v minisign >/dev/null 2>&1; then

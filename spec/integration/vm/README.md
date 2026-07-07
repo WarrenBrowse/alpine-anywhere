@@ -27,7 +27,7 @@ power-cycle the guest and assert **which slot actually booted** at each step.
 | 3 | Write a file to `/`, reboot | change **did not persist** (immutable squashfs + tmpfs overlay) |
 | 4 | `alpine-anywhere upgrade`, reboot | **next boot = B**, then booted **slot B** |
 | 5 | `aa rollback` (force-reboots) | back on **slot A** |
-| 6 | `aa switch B` then reboot twice **without** `aa verify` | unverified slot **auto-rolls back to A** |
+| 6 | `aa switch B`, arm B's boot counter as failed, reboot **without** `aa verify` | unverified slot **auto-rolls back to A** |
 
 Exit code: `0` if every assertion passes **or** if it cleanly SKIPs (QEMU
 absent); `1` on any failure. On failure it dumps the guest serial console.
@@ -48,7 +48,8 @@ is slow. When QEMU is not installed the test prints `SKIP` and exits `0`, so
 `make test` stays green on dev machines.
 
 In CI (`.github/workflows/vm-integration.yml`) it runs on the org's self-hosted
-Debian x86_64 runner (label `warren`) on push/PR. This is the gate to run
+Debian x86_64 runner (label `warren`) on pull_request and manual dispatch
+(pushes run via the open PR). This is the gate to run
 **before each exit-fleet bump** (see warren-core `CLAUDE.md` §6 quater): the same
 logic that says "networking integration tests don't suffice, validate on real
 hardware" applied to the boot path.
