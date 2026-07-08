@@ -244,6 +244,9 @@ CONTAINER_RUNTIME="${CONTAINER_RUNTIME}"
 FORCE="${FORCE}"
 VERBOSE="${VERBOSE}"
 INSTALL_CACHE_DIR="/root/.local/share/alpine-anywhere/cache"
+# Control-host version, carried across the kexec/pivot so install_aa_cli can
+# stamp the baked node CLI (the RAM installer inherits no environment).
+AA_VERSION_OVERRIDE="$(aa_version)"
 EOF
 
     # Always copy alpine-anywhere scripts to the pivoted system
