@@ -63,6 +63,12 @@ _ssh_opts() {
         opts="$opts -i $SSH_IDENTITY"
     fi
 
+    # Extra caller-supplied options (e.g. "-J root@jump" from warren
+    # deploy tooling when the operator's VPN blocks direct SSH).
+    if [ -n "${AA_SSH_EXTRA_OPTS:-}" ]; then
+        opts="$opts $AA_SSH_EXTRA_OPTS"
+    fi
+
     echo "$opts"
 }
 
@@ -85,6 +91,12 @@ _ssh_opts_no_batch() {
         opts="$opts -i $SSH_IDENTITY"
     fi
 
+    # Extra caller-supplied options (e.g. "-J root@jump" from warren
+    # deploy tooling when the operator's VPN blocks direct SSH).
+    if [ -n "${AA_SSH_EXTRA_OPTS:-}" ]; then
+        opts="$opts $AA_SSH_EXTRA_OPTS"
+    fi
+
     echo "$opts"
 }
 
@@ -104,6 +116,12 @@ _scp_opts() {
 
     if [ -n "$SSH_IDENTITY" ]; then
         opts="$opts -i $SSH_IDENTITY"
+    fi
+
+    # Extra caller-supplied options (e.g. "-J root@jump" from warren
+    # deploy tooling when the operator's VPN blocks direct SSH).
+    if [ -n "${AA_SSH_EXTRA_OPTS:-}" ]; then
+        opts="$opts $AA_SSH_EXTRA_OPTS"
     fi
 
     echo "$opts"
