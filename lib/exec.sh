@@ -164,8 +164,12 @@ run_on_remote() {
         stage_data_passphrase
     fi
 
-    # Build the command line to pass to remote
-    local remote_cmd="${remote_aa} --local"
+    # Build the command line to pass to remote. Propagate the control host's
+    # resolved version so install_aa_cli can stamp it into the baked `aa` (the
+    # target has no git repo to derive it from).
+    local aa_ver remote_cmd
+    aa_ver=$(aa_version)
+    remote_cmd="AA_VERSION_OVERRIDE=$(shell_quote "$aa_ver") ${remote_aa} --local"
 
     # Pass through relevant options. Values are shell_quote'd (defence in depth
     # on top of validate_safe_inputs) so a metacharacter in any value cannot

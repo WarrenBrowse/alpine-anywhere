@@ -16,15 +16,23 @@
 
 set -eu
 
-# Version. Overridden with the exact `git describe` at build time by
-# install_aa_cli when the baked `aa` command is generated, so a node can report
-# which commit it was installed/upgraded from.
+# Version. Overridden with the exact control-host `git describe` when the baked
+# `aa` command is generated (install_aa_cli), so a node reports which commit it
+# was installed/upgraded from.
 AA_VERSION="0.1.0"
+# Set by run_on_remote so the version resolves to the CONTROL host's git describe
+# on the target (which has no git repo of its own).
+AA_VERSION_OVERRIDE="${AA_VERSION_OVERRIDE:-}"
 
-# Resolve a traceable version: the git describe of the checkout when run from a
-# repo (dev/control host), else the baked AA_VERSION (installed node).
+# Resolve a traceable version: an explicit override (propagated to the target),
+# else the git describe of the checkout (dev/control host), else the baked
+# AA_VERSION (installed node with no repo).
 aa_version() {
-    git -C "$SCRIPT_DIR" describe --tags --always --dirty 2>/dev/null || echo "$AA_VERSION"
+    if [ -n "$AA_VERSION_OVERRIDE" ]; then
+        echo "$AA_VERSION_OVERRIDE"
+    else
+        git -C "$SCRIPT_DIR" describe --tags --always --dirty 2>/dev/null || echo "$AA_VERSION"
+    fi
 }
 
 # =============================================================================

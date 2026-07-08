@@ -1106,10 +1106,11 @@ install_aa_cli() {
     chmod +x "${root}/usr/local/bin/aa"
     # Stamp the exact build version into the baked CLI: on a node there is no git
     # repo, so `aa --version` would otherwise only ever report the fallback
-    # constant. Bake the control-host's `git describe` so the node is traceable
-    # to the commit it was installed/upgraded from.
+    # constant. Prefer the version propagated from the control host
+    # (AA_VERSION_OVERRIDE, set by run_on_remote); fall back to a local git
+    # describe for a direct on-repo install.
     local baked_ver
-    baked_ver=$(git -C "$srcbase" describe --tags --always --dirty 2>/dev/null || echo "")
+    baked_ver="${AA_VERSION_OVERRIDE:-$(git -C "$srcbase" describe --tags --always --dirty 2>/dev/null || echo "")}"
     if [ -n "$baked_ver" ]; then
         sed_inplace_checked "${root}/usr/local/bin/aa" "^AA_VERSION=\"${baked_ver}\"\$" \
             -e "s|^AA_VERSION=\".*\"\$|AA_VERSION=\"${baked_ver}\"|"
