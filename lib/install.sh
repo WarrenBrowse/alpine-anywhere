@@ -1103,18 +1103,20 @@ install_aa_cli() {
     mkdir -p "${root}${AA_LIB_DIR}" "${root}/usr/local/bin"
     cp "${srcbase}"/lib/*.sh "${root}${AA_LIB_DIR}/"
     cp "${srcbase}/alpine-anywhere" "${root}/usr/local/bin/aa"
-    chmod +x "${root}/usr/local/bin/aa"
     # Stamp the exact build version into the baked CLI: on a node there is no git
     # repo, so `aa --version` would otherwise only ever report the fallback
     # constant. Prefer the version propagated from the control host
-    # (AA_VERSION_OVERRIDE, set by run_on_remote); fall back to a local git
-    # describe for a direct on-repo install.
+    # (AA_VERSION_OVERRIDE, set by run_on_remote and carried across the pivot in
+    # config.env); fall back to a local git describe for a direct on-repo install.
+    # Stamp BEFORE chmod +x: sed_inplace_checked rewrites via a temp file + mv,
+    # which does not preserve the exec bit, so the final chmod must come last.
     local baked_ver
     baked_ver="${AA_VERSION_OVERRIDE:-$(git -C "$srcbase" describe --tags --always --dirty 2>/dev/null || echo "")}"
     if [ -n "$baked_ver" ]; then
         sed_inplace_checked "${root}/usr/local/bin/aa" "^AA_VERSION=\"${baked_ver}\"\$" \
             -e "s|^AA_VERSION=\".*\"\$|AA_VERSION=\"${baked_ver}\"|"
     fi
+    chmod +x "${root}/usr/local/bin/aa"
     # The dropbear (hardened) login PATH is /usr/sbin:/usr/bin:/sbin:/bin and
     # does NOT include /usr/local/bin, so an interactive `aa` would be "not
     # found". Symlink it into /usr/sbin (which IS on PATH) so `aa status` works

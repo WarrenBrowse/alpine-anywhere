@@ -289,8 +289,29 @@ run_remote_ab_install() {
     log_info "Scripts deployed. Running A/B installation on remote..."
     echo ""
 
-    # Pass --install flag to remote
-    run_on_remote "--install"
+    # The connection drops when the remote pivots into the RAM installer, and the
+    # detached kexec can cut SSH before the remote script returns cleanly, so this
+    # call's exit code is racy (sometimes 0, sometimes 255) and MUST NOT be trusted
+    # as success/failure. Observe the host coming back as the installed Alpine
+    # instead (same discipline as run_remote_installation).
+    run_on_remote "--install" || true
+
+    if [ "$DRY_RUN" = "true" ]; then
+        log_info "[DRY-RUN] Skipping post-pivot verification"
+        show_install_completion_message
+        return 0
+    fi
+
+    log_step "Verifying the host came back as the installed Alpine system..."
+    # Drop the multiplexed master pinned to the pre-pivot session; it would poison
+    # the reconnect.
+    close_ssh_multiplexing 2>/dev/null || true
+    # The RAM installer is headless (no SSH) and reboots into the final system, so
+    # SSH only answers once the installed Alpine is up. Generous timeout: the A/B
+    # build (minirootfs + apk + custom-script + mksquashfs + reboot) is slower than
+    # the live-mode pivot.
+    wait_for_host 420
+    verify_alpine_boot
 
     show_install_completion_message
 }
