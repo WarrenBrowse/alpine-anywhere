@@ -42,6 +42,32 @@ Describe 'upgrade.sh'
         End
     End
 
+    Describe 'mount_boot() stale-state recovery'
+        # A prior upgrade killed mid-flight (SSH severed on a control-host load
+        # spike) leaves its EXIT-trap umount unrun, so the mountpoint keeps
+        # residual files that shadow the real boot partition and make
+        # switch_slot die "No known bootloader config". mount_boot must recover.
+        setup_mb() {
+            get_boot_disk() { echo /dev/sda; }
+            get_part_dev() { echo "/dev/sda$2"; }
+            BOOT_MNT=$(mktemp -d)
+            printf 'SLOT_A_VERSION=stale\n' > "$BOOT_MNT/slots.meta"
+            MOUNTED=""
+            mount() { MOUNTED="$*"; }
+            umount() { :; }
+            boot_is_mounted() { return 1; }
+        }
+        cleanup_mb() { rm -rf "$BOOT_MNT"; }
+        Before 'setup_mb'
+        After 'cleanup_mb'
+
+        It 'clears residual files then mounts the real boot partition'
+            When call mount_boot
+            The variable MOUNTED should include "/dev/sda1"
+            The path "$BOOT_MNT/slots.meta" should not be exist
+        End
+    End
+
     Describe 'strip_partition()'
         It 'strips a plain sdX partition'
             When call strip_partition "/dev/sda3"

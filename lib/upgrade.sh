@@ -98,6 +98,19 @@ mount_boot() {
     local disk part1
     disk=$(get_boot_disk)
     part1=$(get_part_dev "$disk" 1)
+    # Recover from a prior run killed mid-flight (SSH severed on a control-host
+    # load spike): its EXIT-trap umount never fired, leaving a stale mount or
+    # residual files here that shadow the real boot partition, so switch_slot
+    # then dies "No known bootloader config on /mnt/aa-boot". Drop any stale
+    # mount, and clear residual files ONLY when the mountpoint is genuinely not
+    # a live mount - never rm through a still-mounted boot partition, that would
+    # delete the bootloader.
+    if boot_is_mounted; then
+        umount "$BOOT_MNT" 2>/dev/null || umount -l "$BOOT_MNT" 2>/dev/null || true
+    fi
+    if ! boot_is_mounted; then
+        rm -rf "$BOOT_MNT" 2>/dev/null || true
+    fi
     mkdir -p "$BOOT_MNT"
     if ! boot_is_mounted; then
         mount "$part1" "$BOOT_MNT" || die "Cannot mount boot partition $part1"
