@@ -267,6 +267,11 @@ install_to_slot() {
         set_slot_meta "$target_slot" "SALT" "$2"
         set_slot_meta "$target_slot" "DATA_SIZE" "$3"
         set_slot_meta "$target_slot" "HASH_OFFSET" "$4"
+        local slot_sig; slot_sig=$(verity_sig_for_hash "$1")
+        verity_assert_sig_or_die "$slot_sig"
+        if [ -n "$slot_sig" ]; then
+            set_slot_meta "$target_slot" "ROOT_HASH_SIG" "$slot_sig"
+        fi
     else
         # Non-verity image: drop any stale verity metadata from a prior verity
         # install of this slot, so `switch` won't spuriously add aaverity=1.

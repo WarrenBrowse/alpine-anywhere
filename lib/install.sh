@@ -1583,6 +1583,18 @@ wrap_boot_initramfs() {
         require cp "$vopen_src" "$tmp/sbin/aa-verity-open"
         chmod +x "$tmp/sbin/aa-verity-open"
 
+        # Embed the minisign pubkey so aa-verity-open REQUIRES a valid signature
+        # over the slot root hash. Without it the verifier falls back to hash-only
+        # (defends corruption/blind tampering but not a hash rewrite); with it a
+        # downgrade-by-suppression that strips ROOT_HASH_SIG is refused. Fail the
+        # build if the configured pubkey is missing rather than silently ship a
+        # hash-only initramfs the operator believed was signature-gated.
+        if [ -n "$VERITY_PUBKEY" ]; then
+            [ -f "$VERITY_PUBKEY" ] || die "VERITY_PUBKEY=$VERITY_PUBKEY not found; cannot embed verity.pub"
+            mkdir -p "$tmp/etc/alpine-anywhere"
+            require cp "$VERITY_PUBKEY" "$tmp/etc/alpine-anywhere/verity.pub"
+        fi
+
         if ! grep -q '/sbin/aa-verity-open' "$tmp/init"; then
             # Open verity right before the root device is mounted, AFTER
             # nlplug-findfs has plugged the real slot node. In the real Alpine
@@ -2035,6 +2047,10 @@ run_ab_install() {
 SLOT_A_SALT=$2
 SLOT_A_DATA_SIZE=$3
 SLOT_A_HASH_OFFSET=$4"
+        local slota_sig; slota_sig=$(verity_sig_for_hash "$1")
+        verity_assert_sig_or_die "$slota_sig"
+        [ -n "$slota_sig" ] && slota_verity_lines="${slota_verity_lines}
+SLOT_A_ROOT_HASH_SIG=${slota_sig}"
     fi
 
     cat <<EOF | atomic_write "${boot_mnt}/slots.meta"
@@ -2140,6 +2156,11 @@ install_secondary_slot() {
         set_slot_meta "$slot" "SALT" "$2"
         set_slot_meta "$slot" "DATA_SIZE" "$3"
         set_slot_meta "$slot" "HASH_OFFSET" "$4"
+        local slot_sig; slot_sig=$(verity_sig_for_hash "$1")
+        verity_assert_sig_or_die "$slot_sig"
+        if [ -n "$slot_sig" ]; then
+            set_slot_meta "$slot" "ROOT_HASH_SIG" "$slot_sig"
+        fi
     else
         # Non-verity image: clear any stale verity metadata from a prior verity
         # install of this slot, so `switch` won't spuriously add aaverity=1.

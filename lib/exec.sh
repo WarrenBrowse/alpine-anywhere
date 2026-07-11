@@ -185,6 +185,11 @@ run_on_remote() {
     [ "$HARDENED_MODE" = "true" ] && remote_cmd="$remote_cmd --hardened"
     [ "$VERITY_MODE" = "on" ] && remote_cmd="$remote_cmd --verity"
     [ "$VERITY_MODE" = "off" ] && remote_cmd="$remote_cmd --no-verity"
+    # Verity signing inputs are node-local paths: the caller stages verity.pub
+    # and the offline .minisig onto the node first (see the exit runbook).
+    [ -n "$VERITY_PUBKEY" ] && remote_cmd="$remote_cmd --verity-pubkey=$(shell_quote "$VERITY_PUBKEY")"
+    [ -n "$VERITY_SIGN_KEY" ] && remote_cmd="$remote_cmd --verity-sign-key=$(shell_quote "$VERITY_SIGN_KEY")"
+    [ -n "$VERITY_SIG" ] && remote_cmd="$remote_cmd --verity-sig=$(shell_quote "$VERITY_SIG")"
     [ "$NO_VERIFY" = "true" ] && remote_cmd="$remote_cmd --no-verify"
     [ "$PERSIST_DATA" = "true" ] && remote_cmd="$remote_cmd --persist"
     [ "$ENCRYPT_DATA" = "true" ] && remote_cmd="$remote_cmd --encrypt-data"
