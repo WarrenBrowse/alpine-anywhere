@@ -54,6 +54,11 @@ HARDENED_MODE="${HARDENED_MODE:-false}"   # Security hardened mode
 NO_VERIFY="${NO_VERIFY:-false}"           # Skip artifact checksum verification (UNSAFE)
 CHECKSUM_DIR="${CHECKSUM_DIR:-}"          # Local dir of *.sha512 files (air-gapped mirror)
 VERITY_MODE="${VERITY_MODE:-auto}"        # dm-verity on slots: auto|on|off (auto = on iff hardened)
+# Verity root-hash signing (turns plain dm-verity into signature-authenticated
+# boot). All three are optional; unset keeps the pre-signing behaviour.
+VERITY_PUBKEY="${VERITY_PUBKEY:-}"        # minisign pubkey embedded at /etc/alpine-anywhere/verity.pub; its presence makes aa-verity-open REQUIRE a valid signature
+VERITY_SIGN_KEY="${VERITY_SIGN_KEY:-}"    # minisign secret key to sign the root hash INLINE (dev/test only; a password-less `minisign -G -W` key). The real release key stays OFFLINE, never here
+VERITY_SIG="${VERITY_SIG:-}"              # pre-computed detached .minisig over the root hash, produced offline on the API box and injected back (production path)
 
 # Data persistence (immutable A/B root stays RAM; only the data partition persists)
 PERSIST_DATA="${PERSIST_DATA:-false}"     # Persist /var (+ /srv /home) on the data partition (sda4)
@@ -232,6 +237,73 @@ verity_enabled() {
         auto) [ "$HARDENED_MODE" = "true" ] ;;
         *) return 1 ;;
     esac
+}
+
+# True when a signing source is configured: either a pre-signed detached
+# signature to inject (offline production path) or an inline signing key
+# (dev/test). Without one, verity stays plain (hash-only, no signature).
+verity_signing_configured() {
+    { [ -n "$VERITY_SIG" ] && [ -f "$VERITY_SIG" ]; } || \
+    { [ -n "$VERITY_SIGN_KEY" ] && [ -f "$VERITY_SIGN_KEY" ]; }
+}
+
+# Produce the single-line SLOT_<x>_ROOT_HASH_SIG value for a verity root hash,
+# or nothing when signing is not configured. The value is the base64 of the
+# whole detached minisig: slots.meta is line-based KEY=VALUE, and a minisig is
+# four lines (comment, sig, trusted comment, global sig), so it is base64'd to a
+# single line here and decoded back by aa-verity-open before verification.
+#
+# The signed message is the raw root-hash bytes with NO trailing newline, which
+# is exactly what aa-verity-open reconstructs (`printf '%s' "$root_hash"`); the
+# offline signer MUST sign the same bytes.
+verity_sig_for_hash() {
+    local root_hash="$1" sigfile="" tmpd="" out=""
+    [ -n "$root_hash" ] || return 0
+    if [ -n "$VERITY_SIG" ] && [ -f "$VERITY_SIG" ]; then
+        # Offline injection: signature produced on the API box with the offline
+        # release-signer key; the key never touches this builder.
+        sigfile="$VERITY_SIG"
+    elif [ -n "$VERITY_SIGN_KEY" ] && [ -f "$VERITY_SIGN_KEY" ]; then
+        command_exists minisign || die "VERITY_SIGN_KEY set but minisign missing on the builder"
+        tmpd=$(mktemp -d)
+        printf '%s' "$root_hash" > "${tmpd}/rh"
+        # Inline signing is dev/test only and assumes a password-less key
+        # (`minisign -G -W`); production signs offline (VERITY_SIG).
+        minisign -Sm "${tmpd}/rh" -s "$VERITY_SIGN_KEY" >/dev/null 2>&1 \
+            || die "inline minisign signing of the verity root hash failed"
+        sigfile="${tmpd}/rh.minisig"
+    else
+        return 0
+    fi
+
+    # Fail CLOSED at build time: if a pubkey is configured, the injected/inline
+    # signature MUST verify against it and over THIS root hash. Otherwise a stale
+    # or wrong-hash signature would only be caught at boot, where the node just
+    # rollback-loops. Catch it here instead.
+    if [ -n "$VERITY_PUBKEY" ] && [ -f "$VERITY_PUBKEY" ] && command_exists minisign; then
+        local vtmp; vtmp=$(mktemp -d)
+        printf '%s' "$root_hash" > "${vtmp}/rh"
+        if ! minisign -Vm "${vtmp}/rh" -p "$VERITY_PUBKEY" -x "$sigfile" >/dev/null 2>&1; then
+            rm -rf "$vtmp" "$tmpd"
+            die "verity root-hash signature does not verify against $VERITY_PUBKEY (wrong hash or wrong key); refusing to ship an unbootable slot"
+        fi
+        rm -rf "$vtmp"
+    fi
+
+    out=$(base64 < "$sigfile" 2>/dev/null | tr -d '\n')
+    rm -rf "$tmpd"
+    [ -n "$out" ] || die "could not base64-encode the verity signature"
+    printf '%s' "$out"
+}
+
+# Guard against shipping a pubkey-embedded initramfs paired with an unsigned
+# slot: with the pubkey present aa-verity-open REQUIRES a signature, so an empty
+# sig means the node fails closed and rollback-loops. Fail the build instead.
+verity_assert_sig_or_die() {
+    local sig="$1"
+    if [ -n "$VERITY_PUBKEY" ] && [ -f "$VERITY_PUBKEY" ] && [ -z "$sig" ]; then
+        die "VERITY_PUBKEY is set (signatures required at boot) but no signature was produced; set VERITY_SIG (offline) or VERITY_SIGN_KEY (dev) or drop the pubkey"
+    fi
 }
 
 # =============================================================================
@@ -823,6 +895,30 @@ parse_arguments() {
                 ;;
             --no-verity)
                 VERITY_MODE=off
+                shift
+                ;;
+            --verity-pubkey)
+                VERITY_PUBKEY="$2"
+                shift 2
+                ;;
+            --verity-pubkey=*)
+                VERITY_PUBKEY="${1#*=}"
+                shift
+                ;;
+            --verity-sign-key)
+                VERITY_SIGN_KEY="$2"
+                shift 2
+                ;;
+            --verity-sign-key=*)
+                VERITY_SIGN_KEY="${1#*=}"
+                shift
+                ;;
+            --verity-sig)
+                VERITY_SIG="$2"
+                shift 2
+                ;;
+            --verity-sig=*)
+                VERITY_SIG="${1#*=}"
                 shift
                 ;;
             --persist)

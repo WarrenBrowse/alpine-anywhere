@@ -68,9 +68,23 @@ if [ -f "$pubkey" ]; then
         umount "$AA_BOOT_DIR" 2>/dev/null
         exit 1
     fi
+    # ROOT_HASH_SIG holds the base64 of the whole detached minisig: slots.meta is
+    # single-line KEY=VALUE but a minisig is four lines, so the producer base64's
+    # it and we decode it back here. base64 is treated like minisign: if it is
+    # missing we fail closed (a verity node without it cannot verify, so refuse
+    # rather than mount raw).
+    if ! command -v base64 >/dev/null 2>&1; then
+        vlog "verity pubkey present but base64 missing - refusing (cannot decode signature)"
+        umount "$AA_BOOT_DIR" 2>/dev/null
+        exit 1
+    fi
     tmpd=$(mktemp -d 2>/dev/null || echo /tmp)
     printf '%s' "$root_hash" > "$tmpd/rh"
-    printf '%s\n' "$sig" > "$tmpd/rh.minisig"
+    if ! printf '%s' "$sig" | base64 -d > "$tmpd/rh.minisig" 2>/dev/null; then
+        vlog "root hash signature not decodable for slot $slot - refusing"
+        umount "$AA_BOOT_DIR" 2>/dev/null
+        exit 1
+    fi
     if ! minisign -Vm "$tmpd/rh" -p "$pubkey" -x "$tmpd/rh.minisig" >/dev/null 2>&1; then
         vlog "root hash signature INVALID for slot $slot - refusing"
         umount "$AA_BOOT_DIR" 2>/dev/null
