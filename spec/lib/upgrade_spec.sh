@@ -50,14 +50,19 @@ Describe 'upgrade.sh'
         setup_mb() {
             get_boot_disk() { echo /dev/sda; }
             get_part_dev() { echo "/dev/sda$2"; }
-            BOOT_MNT=$(mktemp -d)
+            MB_DIR=$(mktemp -d)
+            BOOT_MNT="$MB_DIR/mnt"
+            mkdir -p "$BOOT_MNT"
             printf 'SLOT_A_VERSION=stale\n' > "$BOOT_MNT/slots.meta"
+            # Readable mounts table that does not list $BOOT_MNT: the real
+            # boot_is_mounted sees a trustworthy "not mounted".
+            export AA_MOUNTS_FILE="$MB_DIR/mounts"
+            printf '/dev/sda2 /media/root-ro squashfs ro 0 0\n' > "$AA_MOUNTS_FILE"
             MOUNTED=""
             mount() { MOUNTED="$*"; }
             umount() { :; }
-            boot_is_mounted() { return 1; }
         }
-        cleanup_mb() { rm -rf "$BOOT_MNT"; }
+        cleanup_mb() { rm -rf "$MB_DIR"; unset AA_MOUNTS_FILE; }
         Before 'setup_mb'
         After 'cleanup_mb'
 
@@ -65,6 +70,16 @@ Describe 'upgrade.sh'
             When call mount_boot
             The variable MOUNTED should include "/dev/sda1"
             The path "$BOOT_MNT/slots.meta" should not be exist
+        End
+
+        It 'skips the residual-file rm when the mounts table is unreadable'
+            # An absent/unreadable /proc/mounts is NOT proof the boot partition
+            # is unmounted: rm-ing here could delete bootloader files through a
+            # live mount. Fail closed and keep the files.
+            export AA_MOUNTS_FILE="$MB_DIR/absent/mounts"
+            When call mount_boot
+            The variable MOUNTED should include "/dev/sda1"
+            The path "$BOOT_MNT/slots.meta" should be exist
         End
     End
 

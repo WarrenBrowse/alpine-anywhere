@@ -90,7 +90,17 @@ get_boot_disk() {
 
 # Is $BOOT_MNT currently a mountpoint? (busybox-safe, no `mountpoint` dependency)
 boot_is_mounted() {
-    grep -q " ${BOOT_MNT} " /proc/mounts 2>/dev/null
+    grep -q " ${BOOT_MNT} " "${AA_MOUNTS_FILE:-/proc/mounts}" 2>/dev/null
+}
+
+# Confirmed-unmounted check for destructive recovery: only a readable mounts
+# table with no $BOOT_MNT entry (grep exit 1) is a trusted negative. An
+# unreadable/absent table (grep exit 2) must read as "maybe mounted" so a
+# caller never rm's bootloader files through a live mount.
+boot_is_definitely_unmounted() {
+    _bdu_rc=0
+    grep -q " ${BOOT_MNT} " "${AA_MOUNTS_FILE:-/proc/mounts}" 2>/dev/null || _bdu_rc=$?
+    [ "$_bdu_rc" -eq 1 ]
 }
 
 # Mount the boot partition (partition 1) at $BOOT_MNT
@@ -102,13 +112,14 @@ mount_boot() {
     # load spike): its EXIT-trap umount never fired, leaving a stale mount or
     # residual files here that shadow the real boot partition, so switch_slot
     # then dies "No known bootloader config on /mnt/aa-boot". Drop any stale
-    # mount, and clear residual files ONLY when the mountpoint is genuinely not
-    # a live mount - never rm through a still-mounted boot partition, that would
-    # delete the bootloader.
+    # mount, and clear residual files ONLY when the mounts table positively
+    # proves the mountpoint is not a live mount - never rm through a
+    # still-mounted (or unprovable) boot partition, that would delete the
+    # bootloader.
     if boot_is_mounted; then
         umount "$BOOT_MNT" 2>/dev/null || umount -l "$BOOT_MNT" 2>/dev/null || true
     fi
-    if ! boot_is_mounted; then
+    if boot_is_definitely_unmounted; then
         rm -rf "$BOOT_MNT" 2>/dev/null || true
     fi
     mkdir -p "$BOOT_MNT"
