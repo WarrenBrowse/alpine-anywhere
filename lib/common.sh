@@ -280,7 +280,9 @@ verity_sig_for_hash() {
     # signature MUST verify against it and over THIS root hash. Otherwise a stale
     # or wrong-hash signature would only be caught at boot, where the node just
     # rollback-loops. Catch it here instead.
-    if [ -n "$VERITY_PUBKEY" ] && [ -f "$VERITY_PUBKEY" ] && command_exists minisign; then
+    if [ -n "$VERITY_PUBKEY" ] && [ -f "$VERITY_PUBKEY" ]; then
+        command_exists minisign \
+            || die "VERITY_PUBKEY set but minisign missing on the builder; cannot verify the verity root-hash signature"
         local vtmp; vtmp=$(mktemp -d)
         printf '%s' "$root_hash" > "${vtmp}/rh"
         if ! minisign -Vm "${vtmp}/rh" -p "$VERITY_PUBKEY" -x "$sigfile" >/dev/null 2>&1; then

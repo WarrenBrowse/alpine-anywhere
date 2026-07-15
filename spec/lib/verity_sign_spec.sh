@@ -91,6 +91,20 @@ exit 0'
             The stderr should be defined
         End
 
+        It 'dies when a pubkey is set but minisign is missing on the builder'
+            # Offline-injection path: without minisign the mandatory build-time
+            # verification cannot run, so the build must die, not silently ship
+            # a signature that may only fail at boot (rollback loop).
+            VERITY_SIG="${WORKD}/rh.minisig"
+            printf 'untrusted comment: x\nRWQsig\ntrusted comment: t\nRWQglobal\n' > "$VERITY_SIG"
+            VERITY_PUBKEY="${WORKD}/verity.pub"
+            printf 'untrusted comment: pk\nRWQpub\n' > "$VERITY_PUBKEY"
+            command_exists() { [ "$1" != "minisign" ] && command -v "$1" >/dev/null 2>&1; }
+            When run verity_sig_for_hash deadbeef
+            The status should be failure
+            The stderr should include "minisign missing"
+        End
+
         It 'accepts an injected signature that verifies against the pubkey'
             VERITY_SIG="${WORKD}/rh.minisig"
             printf 'untrusted comment: x\nRWQsig\ntrusted comment: t\nRWQglobal\n' > "$VERITY_SIG"
