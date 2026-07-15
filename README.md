@@ -79,6 +79,9 @@ network access). See [`examples/custom-script.sh`](examples/custom-script.sh).
   key is embedded (`/etc/alpine-anywhere/verity.pub`), a valid minisign
   signature of the root hash is **required** (closes downgrade-by-suppression).
   The Warren fleet currently runs `--no-verity`.
+- Signing invocation: `--verity-pubkey verity.pub` to require signatures at boot,
+  plus either `--verity-sig rh.minisig` (detached signature produced offline on
+  the release box, production) or `--verity-sign-key dev.key` (inline dev/test).
 
 ## Install / development
 

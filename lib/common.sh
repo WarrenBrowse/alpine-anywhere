@@ -686,6 +686,9 @@ Integrity options:
                                    ON in --hardened): per-slot hash tree, root
                                    verified block-by-block at boot
   --no-verity                    Disable dm-verity (debug / unsupported kernels)
+  --verity-pubkey FILE           Embed minisign pubkey: signature REQUIRED at boot
+  --verity-sign-key FILE         Sign the root hash inline (dev/test key only)
+  --verity-sig FILE              Inject the offline-signed root-hash signature
 
 Data persistence options (immutable A/B root stays RAM; only data persists):
   --persist                      Persist /var (+ /srv /home) on the data partition
