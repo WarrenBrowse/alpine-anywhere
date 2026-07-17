@@ -1080,7 +1080,10 @@ parse_arguments() {
 confirm_action() {
     local message=$1
 
-    if [ "$FORCE" = "true" ]; then
+    # -y/--yes (ASSUME_YES) means non-interactive: answer yes to every prompt,
+    # like --force does. Kept in sync with the pivot install-continue builders
+    # that thread both -f and -y into the re-invocation.
+    if [ "$FORCE" = "true" ] || [ "$ASSUME_YES" = "true" ]; then
         return 0
     fi
 
