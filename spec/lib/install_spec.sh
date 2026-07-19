@@ -443,6 +443,114 @@ exit 0'
             The output should include "VERITY_AFTER_NLPLUG_BEFORE_MOUNT"
         End
 
+        # When VERITY_PUBKEY is set, aa-verity-open REQUIRES `minisign -Vm` at boot,
+        # so the verifier binary AND its shared-library closure must be staged into
+        # the initramfs. elf_needed_libs is stubbed to name two fixture libs so the
+        # test is hermetic (no ldd nor a real dynamic ELF needed on the host); the
+        # copy must preserve each lib's absolute path under the initramfs root.
+        overlay_init_fixture() {
+            {
+                printf '#!/bin/sh\n'
+                printf 'nlplug-findfs -p /sbin/mdev $KOPT_root\n'
+                printf 'mkdir -p /media/root-ro /media/root-rw $sysroot/media/root-ro\n'
+                printf 'mount -t squashfs -o ro $KOPT_root /media/root-ro\n'
+                printf 'mount -t overlay -o lowerdir=/media/root-ro overlayfs $sysroot\n'
+                printf 'exec switch_root $sysroot /sbin/init "$@"\n'
+            } > "$SRC/init"
+            chmod +x "$SRC/init"
+            ( cd "$SRC" && find . | cpio -o -H newc 2>/dev/null | gzip ) > "$WD/initramfs"
+        }
+
+        wrap_verity_minisign_inspect() {
+            VERITY_MODE=on
+            MOCK_BIN_DIR="$WD/mockbin"; mkdir -p "$MOCK_BIN_DIR"
+            PATH="$MOCK_BIN_DIR:$PATH"
+            make_mock_bin minisign 'exit 0'
+            VERITY_PUBKEY="$WD/verity.pub"
+            printf 'untrusted comment: pk\nRWQpub\n' > "$VERITY_PUBKEY"
+            LIBSODIUM="$WD/fakeroot/usr/lib/libsodium.so.test"
+            LOADER="$WD/fakeroot/lib/ld-musl-test.so.1"
+            mkdir -p "$(dirname "$LIBSODIUM")" "$(dirname "$LOADER")"
+            printf 'SODIUM' > "$LIBSODIUM"; printf 'LOADER' > "$LOADER"
+            elf_needed_libs() { printf '%s\n' "$LIBSODIUM" "$LOADER"; }
+            overlay_init_fixture
+            wrap_boot_initramfs "$WD/initramfs" >/dev/null 2>&1
+            rm -rf "$WD/out"; mkdir -p "$WD/out"
+            ( cd "$WD/out" && gzip -dc "$WD/initramfs" | cpio -idm 2>/dev/null )
+            [ -x "$WD/out/usr/bin/minisign" ] && echo "HAS_MINISIGN"
+            [ -f "$WD/out/etc/alpine-anywhere/verity.pub" ] && echo "HAS_PUBKEY"
+            # each resolved lib lands at its absolute source path under the root
+            [ -f "$WD/out$LIBSODIUM" ] && echo "HAS_LIBSODIUM"
+            [ -f "$WD/out$LOADER" ] && echo "HAS_LOADER"
+        }
+
+        It 'stages minisign and its shared libs when VERITY_PUBKEY is set'
+            command -v cpio >/dev/null 2>&1 || Skip "cpio not available"
+            When call wrap_verity_minisign_inspect
+            The output should include "HAS_MINISIGN"
+            The output should include "HAS_PUBKEY"
+            The output should include "HAS_LIBSODIUM"
+            The output should include "HAS_LOADER"
+        End
+
+        # Gating is on VERITY_PUBKEY, not merely verity_enabled: with verity on but
+        # no pubkey, aa-verity-open falls back to hash-only and needs no verifier,
+        # so minisign must NOT be staged.
+        wrap_verity_nopubkey_inspect() {
+            VERITY_MODE=on
+            VERITY_PUBKEY=""
+            MOCK_BIN_DIR="$WD/mockbin"; mkdir -p "$MOCK_BIN_DIR"
+            PATH="$MOCK_BIN_DIR:$PATH"
+            make_mock_bin minisign 'exit 0'
+            overlay_init_fixture
+            wrap_boot_initramfs "$WD/initramfs" >/dev/null 2>&1
+            rm -rf "$WD/out"; mkdir -p "$WD/out"
+            ( cd "$WD/out" && gzip -dc "$WD/initramfs" | cpio -idm 2>/dev/null )
+            [ -x "$WD/out/sbin/aa-verity-open" ] && echo "HAS_VERITY_FILE"
+            [ -e "$WD/out/usr/bin/minisign" ] || echo "NO_MINISIGN"
+        }
+
+        It 'does not stage minisign when verity is on but no pubkey is embedded'
+            command -v cpio >/dev/null 2>&1 || Skip "cpio not available"
+            When call wrap_verity_nopubkey_inspect
+            The output should include "HAS_VERITY_FILE"
+            The output should include "NO_MINISIGN"
+        End
+
+        # verity off (the fleet default): the initramfs must be byte-for-byte the
+        # A/B-guard-only shape, with no verity artifacts at all, minisign included.
+        wrap_noverity_no_minisign_inspect() {
+            VERITY_MODE=off
+            overlay_init_fixture
+            wrap_boot_initramfs "$WD/initramfs" >/dev/null 2>&1
+            rm -rf "$WD/out"; mkdir -p "$WD/out"
+            ( cd "$WD/out" && gzip -dc "$WD/initramfs" | cpio -idm 2>/dev/null )
+            [ -e "$WD/out/usr/bin/minisign" ] || echo "NO_MINISIGN"
+            [ -e "$WD/out/sbin/aa-verity-open" ] || echo "NO_VERITY_OPEN"
+        }
+
+        It 'stages neither minisign nor aa-verity-open when verity is off'
+            command -v cpio >/dev/null 2>&1 || Skip "cpio not available"
+            When call wrap_noverity_no_minisign_inspect
+            The output should include "NO_MINISIGN"
+            The output should include "NO_VERITY_OPEN"
+        End
+
+        Describe 'elf_needed_libs()'
+            # Hermetic: stub ldd with canned output covering the three line shapes
+            # (soname => /abs/path, the bare loader line, and a vdso line with no
+            # path that must be skipped) so the parser is exercised on any host.
+            It 'extracts the absolute lib paths from ldd output, skipping the vdso'
+                MOCK_BIN_DIR="$WD/elfmock"; mkdir -p "$MOCK_BIN_DIR"
+                PATH="$MOCK_BIN_DIR:$PATH"
+                make_mock_bin ldd 'printf "\tlinux-vdso.so.1 (0x0)\n\tlibsodium.so.26 => /usr/lib/libsodium.so.26 (0x1)\n\t/lib/ld-musl-x86_64.so.1 (0x2)\n"'
+                When call elf_needed_libs /usr/bin/minisign
+                The status should be success
+                The line 1 of output should equal "/usr/lib/libsodium.so.26"
+                The line 2 of output should equal "/lib/ld-musl-x86_64.so.1"
+            End
+        End
+
         # The PARTUUID resolver must be embedded and called after nlplug-findfs but
         # before the root mount, so a root=PARTUUID= becomes a real /dev node that
         # busybox mount can use (busybox cannot resolve PARTUUID= itself).

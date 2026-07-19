@@ -1435,6 +1435,73 @@ AASNAP
     chmod +x "${root}/usr/local/bin/aa-snapshot"
 }
 
+# Echo, one per line, the absolute paths of the shared libraries a dynamic ELF
+# needs (the dynamic loader included); empty for a static binary. Prefers ldd
+# (present on every glibc builder and on Alpine via musl); falls back to scanelf
+# from pax-utils, which mkinitfs already pulls in, resolving each NEEDED soname
+# against the standard library dirs. Used to build a self-contained copy of a
+# host binary inside the initramfs.
+elf_needed_libs() {
+    _enl_bin="$1"
+    if command_exists ldd; then
+        # musl and glibc ldd both print "soname => /abs/path (0x..)" plus the
+        # loader as a bare "/abs/path (0x..)"; take the first absolute token of
+        # each line (the vdso line has no path and is skipped).
+        ldd "$_enl_bin" 2>/dev/null | awk '{
+            for (i = 1; i <= NF; i++) if (substr($i, 1, 1) == "/") { print $i; break }
+        }'
+    elif command_exists scanelf; then
+        scanelf -q -F '%n#F' "$_enl_bin" 2>/dev/null | tr ',' '\n' | while read -r _enl_soname; do
+            [ -n "$_enl_soname" ] || continue
+            for _enl_dir in /lib /usr/lib /usr/local/lib; do
+                [ -e "${_enl_dir}/${_enl_soname}" ] && { printf '%s\n' "${_enl_dir}/${_enl_soname}"; break; }
+            done
+        done
+    fi
+}
+
+# Stage the minisign signature verifier into the initramfs so aa-verity-open can
+# check the signed slot root hash BEFORE switch_root. minisign on Alpine is
+# dynamically linked (musl libc + libsodium) with no static variant published,
+# so its shared-library closure is copied to the SAME absolute paths inside the
+# initramfs; without them the boot-time `minisign -Vm` fails closed and the node
+# rollback-loops. Called ONLY when VERITY_PUBKEY is set (a pubkey makes signed
+# root hashes mandatory at boot).
+stage_minisign_into_initramfs() {
+    _smi_root="$1"
+    # veritysetup is fetched the same way from cryptsetup in format_verity_slot:
+    # aa runs the build on the target itself, so builder deps are ensured inline.
+    if ! command_exists minisign; then
+        log_info "Installing minisign on the builder for the boot-time verity verifier..."
+        apk add --no-cache minisign >/dev/null 2>&1 || true
+    fi
+    command_exists minisign || die "minisign not found (apk add minisign) - required to embed the verity signature verifier in the initramfs"
+    _smi_bin=$(command -v minisign)
+
+    require mkdir -p "${_smi_root}/usr/bin"
+    require cp "$_smi_bin" "${_smi_root}/usr/bin/minisign"
+    chmod +x "${_smi_root}/usr/bin/minisign"
+
+    if ! command_exists ldd && ! command_exists scanelf; then
+        apk add --no-cache pax-utils >/dev/null 2>&1 || true
+    fi
+    _smi_libs=$(elf_needed_libs "$_smi_bin")
+    # Alpine ships no static minisign, so an empty closure means the resolver
+    # failed, not a static binary; refuse rather than stage a verifier that cannot
+    # load its libs at boot (which would fail closed and rollback-loop the node).
+    [ -n "$_smi_libs" ] || die "could not resolve minisign shared libraries (need ldd or scanelf on the builder); refusing to stage a non-runnable verifier"
+    _smi_n=0
+    for _smi_lib in $_smi_libs; do
+        [ -e "$_smi_lib" ] || continue
+        require mkdir -p "${_smi_root}$(dirname "$_smi_lib")"
+        # The initramfs already ships the musl loader (busybox links against it);
+        # keep its own copy rather than clobber it with the builder's.
+        [ -e "${_smi_root}${_smi_lib}" ] || require cp "$_smi_lib" "${_smi_root}${_smi_lib}"
+        _smi_n=$((_smi_n + 1))
+    done
+    log_info "Staged minisign + ${_smi_n} shared lib(s) into the initramfs verity verifier"
+}
+
 # Wrap the Alpine mkinitfs initramfs with the A/B boot-guard, in place.
 # We PATCH the Alpine init to call /sbin/init.aa right before its
 # `exec ... switch_root`. CRUCIAL DETAIL: at that point the init has ALREADY
@@ -1593,6 +1660,10 @@ wrap_boot_initramfs() {
             [ -f "$VERITY_PUBKEY" ] || die "VERITY_PUBKEY=$VERITY_PUBKEY not found; cannot embed verity.pub"
             mkdir -p "$tmp/etc/alpine-anywhere"
             require cp "$VERITY_PUBKEY" "$tmp/etc/alpine-anywhere/verity.pub"
+            # The embedded pubkey makes aa-verity-open REQUIRE `minisign -Vm` at
+            # boot; ship the verifier (with its shared libs) inside the initramfs
+            # so it can actually run before switch_root.
+            stage_minisign_into_initramfs "$tmp"
         fi
 
         if ! grep -q '/sbin/aa-verity-open' "$tmp/init"; then
