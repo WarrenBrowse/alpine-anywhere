@@ -1046,11 +1046,24 @@ _ensure_kexec_local() {
 # setups - and its module set covers cloud storage/NICs. arch-aware via
 # DETECTED_ARCH (x86_64 / aarch64).
 _fetch_alpine_installer_kernel() {
-    local flavor=virt base
-    base="${ALPINE_MIRROR}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}/netboot"
-    cache_download "${base}/vmlinuz-${flavor}" "aa-installer-vmlinuz" 2>/dev/null || return 1
-    cache_download "${base}/modloop-${flavor}" "aa-installer-modloop" 2>/dev/null || return 1
+    local flavor=virt base tarball
     local v="${INSTALL_CACHE_DIR}/aa-installer-vmlinuz" m="${INSTALL_CACHE_DIR}/aa-installer-modloop"
+    if [ ! -s "$v" ] || [ ! -s "$m" ]; then
+        # The mirror publishes NO per-file checksum for the raw netboot/
+        # vmlinuz-virt + modloop-virt, so fetching them directly always died
+        # in the fail-closed integrity check and this "kexec-clean" path was
+        # dead code (every install fell back to the host kernel, which can
+        # panic post-kexec on some KVM setups). The netboot TARBALL ships a
+        # published .sha512: fetch that, verify, extract the two files.
+        base="${ALPINE_MIRROR}/v${ALPINE_VERSION}/releases/${DETECTED_ARCH}"
+        tarball="alpine-netboot-${ALPINE_VERSION}.0-${DETECTED_ARCH}.tar.gz"
+        cache_download "${base}/${tarball}" "aa-netboot.tar.gz" 2>/dev/null || return 1
+        tar -xzf "${INSTALL_CACHE_DIR}/aa-netboot.tar.gz" -C "${INSTALL_CACHE_DIR}" \
+            "boot/vmlinuz-${flavor}" "boot/modloop-${flavor}" 2>/dev/null || return 1
+        mv "${INSTALL_CACHE_DIR}/boot/vmlinuz-${flavor}" "$v" || return 1
+        mv "${INSTALL_CACHE_DIR}/boot/modloop-${flavor}" "$m" || return 1
+        rmdir "${INSTALL_CACHE_DIR}/boot" 2>/dev/null || true
+    fi
     [ -s "$v" ] && [ -s "$m" ] || return 1
     printf '%s %s\n' "$v" "$m"
 }

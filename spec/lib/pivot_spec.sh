@@ -127,3 +127,40 @@ Describe 'pivot.sh'
         End
     End
 End
+
+Describe '_fetch_alpine_installer_kernel()'
+    Include lib/common.sh
+    Include lib/pivot.sh
+
+    setup() {
+        T=$(mktemp -d); INSTALL_CACHE_DIR="$T"
+        DETECTED_ARCH=x86_64; ALPINE_VERSION=3.20
+        ALPINE_MIRROR=https://example.invalid/alpine
+    }
+    cleanup_dir() { rm -rf "$T"; }
+    BeforeEach 'setup'
+    AfterEach 'cleanup_dir'
+
+    It 'returns the cached pair without downloading'
+        printf k > "$T/aa-installer-vmlinuz"
+        printf m > "$T/aa-installer-modloop"
+        When call _fetch_alpine_installer_kernel
+        The status should be success
+        The output should include "aa-installer-vmlinuz"
+        The output should include "aa-installer-modloop"
+    End
+
+    It 'extracts kernel + modloop from the checksummed netboot tarball'
+        # cache_download mock materialises a tarball shaped like the mirror's.
+        Mock cache_download
+            mkdir -p "$T/pack/boot"
+            printf kernel > "$T/pack/boot/vmlinuz-virt"
+            printf modules > "$T/pack/boot/modloop-virt"
+            tar -czf "$INSTALL_CACHE_DIR/$2" -C "$T/pack" boot
+        End
+        When call _fetch_alpine_installer_kernel
+        The status should be success
+        The contents of file "$T/aa-installer-vmlinuz" should equal "kernel"
+        The contents of file "$T/aa-installer-modloop" should equal "modules"
+    End
+End
