@@ -118,6 +118,15 @@ Describe 'data persistence'
             When call cat "$ROOT/usr/local/sbin/aa-data"
             The output should include "/var/lib/docker"
         End
+
+        It 'aa-data resolves a tag-style root= via the squashfs mount source'
+            # x86_64 slots boot root=PARTUUID=...; deriving the boot disk from
+            # the raw tag yields garbage and data.meta is never found.
+            install_aa_data_helper "$ROOT"
+            When call cat "$ROOT/usr/local/sbin/aa-data"
+            The output should include "PARTUUID=*"
+            The output should include "squashfs"
+        End
     End
 
     Describe 'setup_persistence_image() fstab'

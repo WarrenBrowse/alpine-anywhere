@@ -1233,6 +1233,14 @@ READY=/run/aa-data-ready
 
 _boot_disk() {
     r=$(sed -n 's/.*[ ]root=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null | head -n1)
+    # x86_64 slots boot root=PARTUUID=..., which busybox cannot resolve to a
+    # /dev node; the running root IS a squashfs mounted from the slot device,
+    # so use its source (same dodge as get_root_device in upgrade.sh).
+    case "$r" in
+        ""|PARTUUID=*|UUID=*|LABEL=*)
+            r=$(awk '$3=="squashfs"{print $1; exit}' /proc/mounts 2>/dev/null)
+            ;;
+    esac
     case "$r" in
         *mmcblk*|*nvme*) echo "${r%p[0-9]}" ;;
         *) echo "$r" | sed 's/[0-9]*$//' ;;
