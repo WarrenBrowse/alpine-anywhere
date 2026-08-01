@@ -883,7 +883,13 @@ UDHCPC
     fi
 fi
 # Ensure name resolution even if DHCP pushed no DNS (the mirror is a hostname).
-[ -s /etc/resolv.conf ] || printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
+# A -s test is not enough: a systemd-resolved source leaves its stub file
+# (comments + nameserver 127.0.0.53) behind, non-empty yet dead inside the RAM
+# env, and the whole install then aborts at the network pre-check. Keep only
+# usable non-loopback IPv4 resolvers, else fall back to public ones.
+if ! grep -E '^nameserver +[0-9]+\.' /etc/resolv.conf 2>/dev/null | grep -vq ' 127\.'; then
+    printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
+fi
 
 # Optional SSH for live monitoring/rescue (dropbear in hardened mode)
 if [ "$HARDENED_MODE" = "true" ]; then
