@@ -178,10 +178,12 @@ if ! ip -4 addr show dev "\$IF" 2>/dev/null | grep -q 'inet '; then
     fi
 fi
 
-# IPv6 safety net.
+# IPv6 safety net. onlink: some providers route through a gateway outside the
+# assigned prefix (e.g. 2a06:1700::1 for a ::/64 host); without it the route
+# add fails "no route to host". Harmless for an on-prefix gateway.
 if [ -n "\$AA_NET_V6_ADDR" ] && ! ip -6 addr show dev "\$IF" scope global 2>/dev/null | grep -q inet6; then
     ip -6 addr add "\$AA_NET_V6_ADDR/\${AA_NET_V6_CIDR:-64}" dev "\$IF" 2>/dev/null || true
-    [ -n "\$AA_NET_V6_GW" ] && ip -6 route add default via "\$AA_NET_V6_GW" dev "\$IF" 2>/dev/null || true
+    [ -n "\$AA_NET_V6_GW" ] && ip -6 route add default via "\$AA_NET_V6_GW" dev "\$IF" onlink 2>/dev/null || true
 fi
 EOF
 
