@@ -268,6 +268,10 @@ EOF
         _s6_dep "$src" docker mounts
         _s6_dep "$src" docker network
         [ "$PERSIST_DATA" = "true" ] && _s6_dep "$src" docker mount-data
+        # iptables-nft puts docker's chains in the SAME ruleset the nftables
+        # oneshot loads; without this ordering a `flush ruleset` there races
+        # dockerd and can silently wipe every container's nat/masquerade.
+        [ "$HARDENED_MODE" = "true" ] && _s6_dep "$src" docker nftables
         contents="$contents docker"
     fi
 
