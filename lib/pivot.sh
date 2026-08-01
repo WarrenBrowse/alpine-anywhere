@@ -905,7 +905,7 @@ echo "[ram-installer] $INSTALL_CMD"
 # the last element (tee), which is ~always 0 - so a failed A/B install would
 # report success and reboot into a possibly-unbootable disk. BusyBox ash has no
 # PIPESTATUS, so stash the real rc through a file.
-{ $INSTALL_CMD 2>&1; echo $? > /tmp/aa-install.rc; } | tee /dev/console
+{ $INSTALL_CMD 2>&1; echo $? > /tmp/aa-install.rc; } | tee /dev/console /tmp/aa-install.log
 rc=$(cat /tmp/aa-install.rc 2>/dev/null || echo 1)
 echo "[ram-installer] install finished rc=$rc"
 sync
@@ -914,8 +914,23 @@ if [ "$rc" -eq 0 ]; then
     sleep 5
     reboot -f
 else
-    echo "[ram-installer] INSTALL FAILED rc=$rc - dropping to shell, system left as-is"
-    exec /bin/sh
+    # Post-mortem for consoleless VPS: persist the captured log onto the
+    # source disk (untouched on an early failure), then keep PID 1 alive so
+    # dropbear stays reachable. `exec /bin/sh` here is a trap: without a tty
+    # the shell exits at once, PID 1 dies, and the kernel panic-reset boots
+    # the old disk, destroying every trace.
+    echo "[ram-installer] INSTALL FAILED rc=$rc - persisting log + staying up for ssh"
+    mkdir -p /mnt/aa-src
+    for p in /dev/vda1 /dev/sda1 /dev/vda2 /dev/sda2 /dev/nvme0n1p1; do
+        mount "$p" /mnt/aa-src 2>/dev/null || continue
+        if [ -d /mnt/aa-src/etc ]; then
+            cp /tmp/aa-install.log /mnt/aa-src/aa-installer-failure.log 2>/dev/null
+            sync
+        fi
+        umount /mnt/aa-src 2>/dev/null
+        break
+    done
+    while :; do sleep 3600; done
 fi
 INSTALLERINIT
     run_privileged chmod +x "${dest}/init"
