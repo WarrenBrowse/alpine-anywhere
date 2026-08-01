@@ -271,10 +271,14 @@ detect_local_network() {
         log_info "No global IPv6 detected (v4-only host)"
     fi
 
-    # DNS
-    DETECTED_DNS=$(grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' | head -3 | tr '\n' ' ' | xargs)
+    # DNS. A systemd-resolved host exposes only its 127.0.0.53 stub in
+    # /etc/resolv.conf; baking that into the image (and the build chroot)
+    # leaves them without name resolution. Read the real uplinks from the
+    # non-stub file first, drop loopback resolvers, then fall back public.
+    DETECTED_DNS=$(cat /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null \
+        | grep -E '^nameserver' | awk '$2 !~ /^127\./ {print $2}' | head -3 | tr '\n' ' ' | xargs)
     if [ -z "$DETECTED_DNS" ]; then
-        DETECTED_DNS="8.8.8.8"
+        DETECTED_DNS="1.1.1.1 8.8.8.8"
     fi
     log_info "Detected DNS: $DETECTED_DNS"
 
