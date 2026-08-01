@@ -30,6 +30,26 @@ _s6_longrun() {
 
 _s6_dep() { mkdir -p "$1/$2/dependencies.d"; touch "$1/$2/dependencies.d/$3"; }
 
+# Docker run wrapper (s6). Not a bare execline body: dockerd must never start
+# on the RAM overlay, or images/volumes silently land in tmpfs and vanish on
+# reboot. With persistence the graph lives on the @docker subvol, so wait for
+# aa-data's ready marker; with the ssh unlock method that marker only appears
+# after the operator runs aa-unlock, and the service sits "up" waiting, then
+# starts the daemon the moment the data is mounted (the s6 twin of OpenRC's
+# _start_data_services).
+install_s6_docker_run() {
+    local hd="$1"
+    cat > "${hd}/docker-run" << 'EOF'
+#!/bin/sh
+if grep -q ' /var/lib/docker ' /etc/fstab 2>/dev/null; then
+    while [ ! -e /run/aa-data-ready ]; do sleep 2; done
+fi
+mkdir -p /var/lib/docker /var/lib/containers/storage /run/docker 2>/dev/null
+exec /usr/bin/dockerd --data-root=/var/lib/docker
+EOF
+    chmod +x "${hd}/docker-run"
+}
+
 setup_s6_init() {
     local root="$1"
     local src="${root}/etc/s6-rc/source"
@@ -44,6 +64,13 @@ setup_s6_init() {
 mountpoint -q /proc 2>/dev/null || mount -t proc proc /proc
 mountpoint -q /sys  2>/dev/null || mount -t sysfs sysfs /sys
 mount -o remount,rw / 2>/dev/null || true
+# cgroup v2: dockerd/containerd refuse to start without a cgroup hierarchy and
+# nothing else mounts one on the minimal s6 image (OpenRC's cgroups service
+# covers this on that path). Harmless when unused.
+if ! mountpoint -q /sys/fs/cgroup 2>/dev/null; then
+    mkdir -p /sys/fs/cgroup 2>/dev/null
+    mount -t cgroup2 -o nsdelegate cgroup2 /sys/fs/cgroup 2>/dev/null || true
+fi
 # Standard /dev fd symlinks. The kernel devtmpfs + minimal s6 init do not create
 # them (OpenRC's devfs service normally does), yet many tools open /dev/stdin etc.
 # -- e.g. `nft -f -` opens /dev/stdin and fails "No such file or directory" without
@@ -227,6 +254,16 @@ EOF
     _s6_longrun "$src" chronyd "/usr/sbin/chronyd -d"
     _s6_dep "$src" chronyd network
     contents="$contents chronyd"
+
+    # Docker daemon (supervised longrun via the wait-for-data wrapper above).
+    if containers_enabled && container_is docker; then
+        install_s6_docker_run "$hd"
+        _s6_longrun "$src" docker "/usr/local/libexec/aa-s6/docker-run"
+        _s6_dep "$src" docker mounts
+        _s6_dep "$src" docker network
+        [ "$PERSIST_DATA" = "true" ] && _s6_dep "$src" docker mount-data
+        contents="$contents docker"
+    fi
 
     # aa-verify last: also depend on network
     _s6_dep "$src" aa-verify network
