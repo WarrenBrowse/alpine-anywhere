@@ -112,6 +112,40 @@ Describe 'data persistence'
             The output should include "btrfs subvolume snapshot"
             The output should include "btrfs send"
         End
+
+        It 'aa-data mounts the dedicated docker subvolume mountpoint'
+            install_aa_data_helper "$ROOT"
+            When call cat "$ROOT/usr/local/sbin/aa-data"
+            The output should include "/var/lib/docker"
+        End
+    End
+
+    Describe 'setup_persistence_image() fstab'
+        setup() {
+            ROOT=$(mktemp -d)
+            mkdir -p "$ROOT/etc/init.d" "$ROOT/etc/conf.d" "$ROOT/var"
+            PERSIST_DATA=true; ENCRYPT_DATA=false; DATA_FS=btrfs
+            DATA_MAPPER=aa-data; INIT_SYSTEM=s6; CONTAINERS=docker
+        }
+        cleanup_dir() { rm -rf "$ROOT"; }
+        BeforeEach 'setup'
+        AfterEach 'cleanup_dir'
+
+        It 'writes a dedicated @docker mount for /var/lib/docker (docker runtime)'
+            When call setup_persistence_image "$ROOT"
+            The status should be success
+            The stderr should be defined
+            The contents of file "$ROOT/etc/fstab" should include "/var/lib/docker btrfs subvol=@docker"
+            The contents of file "$ROOT/etc/fstab" should include "subvol=@containers"
+        End
+
+        It 'writes no @docker mount for a podman-only runtime'
+            BeforeCall 'CONTAINERS=podman'
+            When call setup_persistence_image "$ROOT"
+            The status should be success
+            The stderr should be defined
+            The contents of file "$ROOT/etc/fstab" should not include "subvol=@docker"
+        End
     End
 
     Describe 'format_data_partition() + data.meta'
@@ -149,6 +183,17 @@ Describe 'data persistence'
             The contents of file "$BOOTDIR/data.meta" should include "DATA_ENCRYPTED=true"
             The contents of file "$BOOTDIR/data.meta" should include "DATA_UNLOCK=ssh"
             The contents of file "$BOOTDIR/data.meta" should include "DATA_LUKS_UUID=1111-2222"
+        End
+
+        It 'creates the @docker subvolume with nodatacow'
+            BeforeCall 'MOCK_LOG="$T/mock.log"; export MOCK_LOG
+                        make_mock_bin btrfs "echo \"btrfs \$*\" >> \"\$MOCK_LOG\""
+                        make_mock_bin chattr "echo \"chattr \$*\" >> \"\$MOCK_LOG\""'
+            When call format_data_partition "$T/disk" "$T/p4"
+            The status should be success
+            The stderr should be defined
+            The contents of file "$T/mock.log" should include "subvolume create /mnt/aa-data-fmt/@docker"
+            The contents of file "$T/mock.log" should include "chattr +C /mnt/aa-data-fmt/@docker"
         End
 
         It 'keyfile method (no key source) generates a key and stages it on the boot partition'

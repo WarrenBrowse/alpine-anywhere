@@ -603,7 +603,7 @@ data_stack_supported() {
 # Format the data partition for persistence: optional LUKS2, then the chosen FS
 # (btrfs with subvolumes, or ext4), and write data.meta onto the boot FAT so the
 # boot-time mount service knows the layout deterministically.
-# Subvolumes: @var @srv @home @containers @snapshots (btrfs only).
+# Subvolumes: @var @srv @home @containers @docker @snapshots (btrfs only).
 format_data_partition() {
     _fdp_disk="$1"; _fdp_dev="$2"
     is_block_device "$_fdp_dev" || die "format_data_partition: $_fdp_dev is not a block device"
@@ -655,11 +655,12 @@ format_data_partition() {
         require mount "$fs_dev" "$m"
         assert_mounted "$m"
         local sv
-        for sv in @var @srv @home @containers @snapshots; do
+        for sv in @var @srv @home @containers @docker @snapshots; do
             require btrfs subvolume create "${m}/${sv}"
         done
         # nodatacow on container storage to avoid CoW fragmentation
         chattr +C "${m}/@containers" 2>/dev/null || true
+        chattr +C "${m}/@docker" 2>/dev/null || true
         require umount "$m"
     else
         log_info "Creating ext4 on $fs_dev..."
@@ -1167,6 +1168,12 @@ setup_persistence_image() {
         if containers_enabled; then
             echo "/dev/mapper/${DATA_MAPPER} /var/lib/containers ${DATA_FS} subvol=@containers,noatime,nodev,nosuid,noauto 0 0"
         fi
+        # Docker gets its own subvolume (not a dir under @var): independent
+        # snapshots/quotas, and nodatacow applies to the graph without touching
+        # the rest of /var. Ordered after /var so the mountpoint exists.
+        if container_is docker; then
+            echo "/dev/mapper/${DATA_MAPPER} /var/lib/docker ${DATA_FS} subvol=@docker,noatime,nodev,nosuid,noauto 0 0"
+        fi
     } >> "${root}/etc/fstab"
     # When NOT encrypted the data device is the raw partition, not a mapper.
     if ! encrypt_enabled; then
@@ -1269,7 +1276,8 @@ _seed_var() {
 }
 _mount_all() {
     # /etc/fstab has the persist mounts as noauto; mount them explicitly.
-    for m in /var /srv /home /var/lib/containers; do
+    # Order matters: /var first so /var/lib/* mountpoints land on the subvol.
+    for m in /var /srv /home /var/lib/containers /var/lib/docker; do
         grep -q " $m " /etc/fstab 2>/dev/null || continue
         mkdir -p "$m" 2>/dev/null || true
         mountpoint -q "$m" 2>/dev/null || mount "$m" 2>/dev/null || \
