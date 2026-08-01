@@ -79,6 +79,10 @@ ln -sf /proc/self/fd  /dev/fd     2>/dev/null || true
 ln -sf /proc/self/fd/0 /dev/stdin  2>/dev/null || true
 ln -sf /proc/self/fd/1 /dev/stdout 2>/dev/null || true
 ln -sf /proc/self/fd/2 /dev/stderr 2>/dev/null || true
+# Some kernels' devtmpfs creates the standard char devices 0660 and nothing
+# on the minimal s6 path replays the mdev.conf modes; every non-root process
+# then loses /dev/null and fails in bizarre ways (seen on Alpine 3.24).
+chmod 666 /dev/null /dev/zero /dev/full /dev/random /dev/urandom /dev/tty /dev/ptmx 2>/dev/null || true
 # Coldplug hardware: load a driver for every present device by modalias, exactly
 # like OpenRC's hwdrivers. Without this the minimal s6 image never autoloads the
 # NIC driver (ixgbe/igb/tg3/...) and the box comes up with NO network. mdev.conf's
