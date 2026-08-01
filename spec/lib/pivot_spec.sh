@@ -134,6 +134,8 @@ Describe '_fetch_alpine_installer_kernel()'
 
     setup() {
         T=$(mktemp -d); INSTALL_CACHE_DIR="$T"
+        # Exported: the cache_download Mock runs as an external command.
+        export T INSTALL_CACHE_DIR
         DETECTED_ARCH=x86_64; ALPINE_VERSION=3.20
         ALPINE_MIRROR=https://example.invalid/alpine
     }
@@ -160,6 +162,7 @@ Describe '_fetch_alpine_installer_kernel()'
         End
         When call _fetch_alpine_installer_kernel
         The status should be success
+        The output should include "aa-installer-vmlinuz"
         The contents of file "$T/aa-installer-vmlinuz" should equal "kernel"
         The contents of file "$T/aa-installer-modloop" should equal "modules"
     End
