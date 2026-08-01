@@ -28,6 +28,27 @@ _s6_longrun() {
     chmod +x "${src}/${name}/run"
 }
 
+# Attach a dedicated s6-log consumer to a longrun (same shape as the fleet's
+# warren-exit-log): the service's stdout AND stderr (fdmove) flow to a rotated,
+# size-bounded log dir instead of vanishing on the console (the maker runs
+# with -1, so there is no catch-all logger). Read live with:
+# tail -F <dir>/current
+_s6_logger() {
+    local src="$1" name="$2" dir="$3"
+    printf '%s\n' "${name}-log" > "${src}/${name}/producer-for"
+    # Re-emit the run file with stderr merged into the piped stdout.
+    local body
+    body=$(sed -n '2,$p' "${src}/${name}/run")
+    printf '#!/bin/execlineb -P\nfdmove -c 2 1\n%s\n' "$body" > "${src}/${name}/run"
+    chmod +x "${src}/${name}/run"
+    mkdir -p "${src}/${name}-log"
+    echo longrun > "${src}/${name}-log/type"
+    printf '%s\n' "$name" > "${src}/${name}-log/consumer-for"
+    printf '#!/bin/sh\nmkdir -p %s\nexec s6-log -b n10 s1000000 T %s\n' "$dir" "$dir" \
+        > "${src}/${name}-log/run"
+    chmod +x "${src}/${name}-log/run"
+}
+
 _s6_dep() { mkdir -p "$1/$2/dependencies.d"; touch "$1/$2/dependencies.d/$3"; }
 
 # Docker run wrapper (s6). Not a bare execline body: dockerd must never start
@@ -240,6 +261,9 @@ EOF
     # host key only if one is missing (baked keys make this a no-op normally).
     if [ "$HARDENED_MODE" = "true" ]; then
         _s6_longrun "$src" dropbear "/usr/sbin/dropbear -F -R -s -g -p 22"
+        # RAM-only log dir: the SSH logger must never depend on the data
+        # mount, or an unlock-over-ssh setup deadlocks at boot.
+        _s6_logger "$src" dropbear /run/log/dropbear
         _s6_dep "$src" dropbear network
         _s6_dep "$src" aa-verify dropbear
         contents="$contents dropbear"
@@ -251,6 +275,7 @@ EOF
         contents="$contents nftables sysctl"
     else
         _s6_longrun "$src" sshd "/usr/sbin/sshd -D -e"
+        _s6_logger "$src" sshd /run/log/sshd
         _s6_dep "$src" sshd network
         _s6_dep "$src" aa-verify sshd
         contents="$contents sshd"
@@ -258,6 +283,7 @@ EOF
 
     # chronyd (time sync)
     _s6_longrun "$src" chronyd "/usr/sbin/chronyd -d"
+    _s6_logger "$src" chronyd /run/log/chronyd
     _s6_dep "$src" chronyd network
     contents="$contents chronyd"
 
@@ -265,6 +291,15 @@ EOF
     if containers_enabled && container_is docker; then
         install_s6_docker_run "$hd"
         _s6_longrun "$src" docker "/usr/local/libexec/aa-s6/docker-run"
+        # Persistent log dir when the data partition exists: the logger then
+        # waits for the mount too, or it would hold an fd on the tmpfs
+        # /var/log that the @var mount shadows.
+        if [ "$PERSIST_DATA" = "true" ]; then
+            _s6_logger "$src" docker /var/log/docker
+            _s6_dep "$src" docker-log mount-data
+        else
+            _s6_logger "$src" docker /run/log/docker
+        fi
         _s6_dep "$src" docker mounts
         _s6_dep "$src" docker network
         [ "$PERSIST_DATA" = "true" ] && _s6_dep "$src" docker mount-data

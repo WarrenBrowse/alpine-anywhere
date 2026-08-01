@@ -26,6 +26,30 @@ Describe 's6 init'
         End
     End
 
+    Describe '_s6_logger()'
+        setup() { SRC=$(mktemp -d); }
+        cleanup_dir() { rm -rf "$SRC"; }
+        BeforeEach 'setup'
+        AfterEach 'cleanup_dir'
+
+        It 'wires an s6-rc pipeline with stderr folded into the pipe'
+            _s6_longrun "$SRC" chronyd "/usr/sbin/chronyd -d"
+            _s6_logger "$SRC" chronyd /run/log/chronyd
+            When call cat "$SRC/chronyd/producer-for" "$SRC/chronyd-log/consumer-for" "$SRC/chronyd/run" "$SRC/chronyd-log/run"
+            The output should include "chronyd-log"
+            The output should include "fdmove -c 2 1"
+            The output should include "/usr/sbin/chronyd -d"
+            The output should include "s6-log -b n10 s1000000 T /run/log/chronyd"
+        End
+
+        It 'keeps the logger run a valid sh script'
+            _s6_longrun "$SRC" x "/bin/true"
+            _s6_logger "$SRC" x /run/log/x
+            When call sh -n "$SRC/x-log/run"
+            The status should be success
+        End
+    End
+
     Describe 'boot-time mounts'
         # Regression guard: dockerd cannot start without a cgroup hierarchy, and
         # only mounts-up provides one on the s6 path (OpenRC has its own service).
