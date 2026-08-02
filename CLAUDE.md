@@ -10,4 +10,15 @@ Remote Alpine Linux installer used to provision Warren exit nodes.
 
 ## Repo-specific rules
 
-_None yet. Add rules unique to this repo here; keep shared rules in the workspace._
+- **Non-interactive means non-interactive at every stage, including after the
+  pivot.** The installer runs in two phases and the second one lives in the RAM
+  installer, so a flag threaded only into the first phase leaves a prompt reading
+  `/dev/console` on a box nobody is watching. That is exactly how
+  `deploy-exit.sh install --yes` (without `--force`) hung a provisioning run in
+  July 2026: `ASSUME_YES` reached the pivot but `confirm_action` honoured only
+  `FORCE`. Both are now honoured, `ASSUME_YES` persists into `config.env`, and
+  `-y` is threaded into the three `--install-continue` builders in `lib/pivot.sh`.
+  Adding a prompt anywhere means checking both flags reach it.
+- **This repo provisions production exits.** A change here is validated on a
+  throwaway box before it touches the fleet; the `warren-exit-fleet` skill has the
+  procedure.
