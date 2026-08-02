@@ -19,6 +19,8 @@ Remote Alpine Linux installer used to provision Warren exit nodes.
   `FORCE`. Both are now honoured, `ASSUME_YES` persists into `config.env`, and
   `-y` is threaded into the three `--install-continue` builders in `lib/pivot.sh`.
   Adding a prompt anywhere means checking both flags reach it.
+- **Local gates first: `make lint test`** (shellcheck + shellspec `spec/`),
+  exactly what CI runs; the throwaway-box validation comes after, never instead.
 - **This repo provisions production exits.** A change here is validated on a
   throwaway box before it touches the fleet; the `warren-exit-fleet` skill has the
   procedure.
