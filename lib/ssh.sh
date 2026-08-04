@@ -396,8 +396,14 @@ ${root_keys}"
         fi
     fi
 
-    # Remove duplicates and empty lines
-    keys=$(echo "$keys" | sort -u | grep -v '^$' || true)
+    # Remove duplicates and empty lines. Also drop the cloud-image
+    # forced-command trap: many VPS Debian/Ubuntu images ship root's
+    # authorized_keys with a `command="echo 'Please login as the user
+    # \"...\" rather than the user \"root\".';..."` wrapper on the injected
+    # key. Baked verbatim, dropbear matches it FIRST and refuses root SSH
+    # (which `aa upgrade` needs) after the box reboots into the image. Keep
+    # only clean key lines.
+    keys=$(echo "$keys" | grep -v 'Please login as' | sort -u | grep -v '^$' || true)
 
     if [ -z "$keys" ]; then
         log_warn "No SSH authorized keys found on remote host!"

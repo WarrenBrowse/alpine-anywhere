@@ -48,4 +48,18 @@ Describe 'ssh.sh'
             The stderr should be defined
         End
     End
+
+    Describe 'get_remote_authorized_keys() forced-command strip'
+        It 'drops the cloud image "Please login as" trap, keeps clean keys'
+            ssh_exec_capture() {
+                printf 'command="echo Please login as the user warren",restrict ssh-ed25519 AAAAtrap\n'
+                printf 'ssh-ed25519 AAAAgood aya\n'
+            }
+            BeforeCall 'TARGET_USER=root'
+            When call get_remote_authorized_keys
+            The output should include "AAAAgood"
+            The output should not include "Please login as"
+            The stderr should be defined
+        End
+    End
 End
