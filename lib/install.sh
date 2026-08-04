@@ -989,7 +989,7 @@ EOF
 # Example custom-script.sh:
 #   #!/bin/sh
 #   apk add --no-cache git
-#   git clone --depth 1 https://github.com/aya/myos /usr/local/share/myos
+#   git clone --depth 1 https://github.com/example/myproject /usr/local/share/myproject
 run_custom_script() {
     local root="$1"
     [ -n "$CUSTOM_SCRIPT" ] || return 0

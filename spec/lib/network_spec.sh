@@ -80,9 +80,9 @@ Describe 'network.sh'
         Context 'static v4 + v6'
             setup() {
                 DETECTED_INTERFACE="eth0"
-                DETECTED_IP_ADDRESS="50.7.46.90"
+                DETECTED_IP_ADDRESS="203.0.113.10"
                 DETECTED_NETMASK="255.255.255.248"
-                DETECTED_GATEWAY="50.7.46.89"
+                DETECTED_GATEWAY="203.0.113.9"
                 NETWORK_IS_DHCP=false
                 DETECTED_IPV6_ADDRESS="2001:49f0:d086:1003::2"
                 DETECTED_IPV6_CIDR="64"
@@ -108,7 +108,7 @@ Describe 'network.sh'
             End
             It 'still emits the v4 static stanza'
                 When call generate_interfaces_config
-                The output should include 'address 50.7.46.90'
+                The output should include 'address 203.0.113.10'
             End
             It 'honors a runtime interface override argument'
                 When call generate_interfaces_config wlan0

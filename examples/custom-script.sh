@@ -16,16 +16,16 @@ apk add --no-cache git tmux htop
 
 # 2. Fetch a project into /usr/local/share
 #    (git is installed above; or use wget/curl for a tarball)
-rm -rf /usr/local/share/myos
-git clone --depth 1 https://github.com/aya/myos /usr/local/share/myos
+rm -rf /usr/local/share/myproject
+git clone --depth 1 https://github.com/example/myproject /usr/local/share/myproject
 
 # Tarball alternative (no git dependency):
-#   mkdir -p /usr/local/share/myos
-#   wget -qO- https://github.com/aya/myos/archive/refs/heads/main.tar.gz \
-#     | tar -xz --strip-components=1 -C /usr/local/share/myos
+#   mkdir -p /usr/local/share/myproject
+#   wget -qO- https://github.com/example/myproject/archive/refs/heads/main.tar.gz \
+#     | tar -xz --strip-components=1 -C /usr/local/share/myproject
 
 # 3. Drop a config / enable a service, etc.
-#   cp -r /usr/local/share/myos/etc/* /etc/
+#   cp -r /usr/local/share/myproject/etc/* /etc/
 #   rc-update add myservice default
 
 echo "custom-script: done"

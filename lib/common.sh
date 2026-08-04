@@ -651,7 +651,7 @@ Image customization:
   --custom-script FILE           Shell script run inside the image chroot at build
                                    time (network available). Use to install extra
                                    software or fetch a project, e.g.:
-                                     wget -O- https://github.com/aya/myos/...tar.gz \\
+                                     wget -O- https://github.com/example/myproject/...tar.gz \\
                                        | tar -xz -C /usr/local/share
   --custom-files PATH            File or directory staged into the chroot and exposed
                                    to --custom-script via $AA_CUSTOM_FILES_DIR (e.g. a
