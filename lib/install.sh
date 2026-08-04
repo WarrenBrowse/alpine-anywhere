@@ -1823,10 +1823,24 @@ setup_system_ssh() {
             -C "$root" ./root/.ssh/authorized_keys 2>/dev/null || true
     fi
 
-    # Fallback
+    # Fallback: the apkovl carried no keys, so read them off this host.
+    #
+    # De-duplicated, and each source counted once. Running as root, which is how
+    # a node persists itself, `$HOME/.ssh/authorized_keys` and
+    # `/root/.ssh/authorized_keys` are the SAME file: appending both doubled the
+    # key list, every persist re-baked the doubled file into the next image, and
+    # a fleet exit reached 321 lines for 4 distinct keys.
     if [ ! -s "${root}/root/.ssh/authorized_keys" ]; then
-        cat ~/.ssh/authorized_keys >> "${root}/root/.ssh/authorized_keys" 2>/dev/null || true
-        cat /root/.ssh/authorized_keys >> "${root}/root/.ssh/authorized_keys" 2>/dev/null || true
+        _ak_home="$HOME/.ssh/authorized_keys"
+        _ak_root="${ROOT_AUTHORIZED_KEYS:-/root/.ssh/authorized_keys}"
+        _ak_srcs="$_ak_home"
+        [ "$(readlink -f "$_ak_root" 2>/dev/null || echo "$_ak_root")" \
+            = "$(readlink -f "$_ak_home" 2>/dev/null || echo "$_ak_home")" ] \
+            || _ak_srcs="$_ak_srcs $_ak_root"
+        # shellcheck disable=SC2086  # deliberate word split: a list of paths
+        cat $_ak_srcs 2>/dev/null | sort -u | grep -v '^[[:space:]]*$' \
+            > "${root}/root/.ssh/authorized_keys" || true
+        unset _ak_home _ak_root _ak_srcs
     fi
 
     chown -R 0:0 "${root}/root/.ssh"

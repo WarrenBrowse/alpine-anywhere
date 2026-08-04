@@ -728,3 +728,38 @@ Describe 'partition safety (mounted gate + tolerant parted)'
         End
     End
 End
+
+Describe 'setup_system_ssh() authorized_keys fallback'
+    Include lib/common.sh
+    Include lib/install.sh
+
+    # Regression: running as root, `~/.ssh/authorized_keys` and
+    # `/root/.ssh/authorized_keys` are the SAME file, and the fallback cat'ed
+    # both into the image with no de-duplication. Every persist re-baked the
+    # doubled list, so a fleet exit reached 321 lines for 4 distinct keys.
+    setup() {
+        WORK="$SHELLSPEC_TMPBASE/ssh-fallback"
+        rm -rf "$WORK"
+        mkdir -p "$WORK/home/.ssh" "$WORK/target"
+        HOME="$WORK/home"
+        printf '%s\n' \
+            "ssh-rsa AAAAKEYONE poka" \
+            "ssh-ed25519 AAAAKEYTWO aya" > "$WORK/home/.ssh/authorized_keys"
+        # What the installer sees when it runs as root on a node: the two source
+        # paths are one and the same file.
+        ROOT_AUTHORIZED_KEYS="$WORK/home/.ssh/authorized_keys"
+        log_info() { :; }
+        chown() { :; }
+    }
+    Before 'setup'
+
+    keyfile() { grep -c . "$WORK/target/root/.ssh/authorized_keys"; }
+
+    It 'writes each key once when both source paths resolve to one file'
+        When call setup_system_ssh "$WORK/target"
+        The status should be success
+        The contents of file "$WORK/target/root/.ssh/authorized_keys" should include "AAAAKEYONE"
+        The contents of file "$WORK/target/root/.ssh/authorized_keys" should include "AAAAKEYTWO"
+        The result of function keyfile should equal 2
+    End
+End
