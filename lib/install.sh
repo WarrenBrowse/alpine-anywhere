@@ -2317,7 +2317,9 @@ place_slot_kernel() {
 _partuuid() {
     local dev="$1" pu=""
     command -v blkid >/dev/null 2>&1 || { printf ''; return 0; }
-    pu=$(blkid -s PARTUUID -o value "$dev" 2>/dev/null)
+    # The || keeps errexit from aborting the fallback path when blkid exits
+    # non-zero (device absent or no PARTUUID).
+    pu=$(blkid -s PARTUUID -o value "$dev" 2>/dev/null) || pu=""
     case "$pu" in
         ''|*[!0-9a-fA-F-]*) pu="" ;;   # reject busybox's full-line output
     esac
