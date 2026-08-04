@@ -118,7 +118,12 @@ is_usable_data_partition() {
 # Auto-detect best overlay device
 # Returns: device path or empty if none found
 auto_detect_overlay_device() {
+    # Initialize explicitly: under set -u, dash (and some ash builds) abort on
+    # a declared-but-unassigned local, unlike bash which treats it as empty.
     local root_disk preferred_part usable_part unformatted_part
+    preferred_part=""
+    usable_part=""
+    unformatted_part=""
 
     root_disk=$(detect_root_disk)
     log_debug "Root disk: $root_disk"
