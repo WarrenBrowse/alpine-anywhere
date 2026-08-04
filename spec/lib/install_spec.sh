@@ -207,7 +207,7 @@ exit 0'
 
     Describe 'is_usable_data_partition()'
         It 'is defined as a function'
-            The value "$(type -t is_usable_data_partition)" should equal "function"
+            The value "$(type is_usable_data_partition 2>/dev/null)" should include "function"
         End
 
         It 'returns unformatted when fstype is empty'
@@ -220,19 +220,19 @@ exit 0'
 
     Describe 'auto_detect_overlay_device()'
         It 'is defined as a function'
-            The value "$(type -t auto_detect_overlay_device)" should equal "function"
+            The value "$(type auto_detect_overlay_device 2>/dev/null)" should include "function"
         End
     End
 
     Describe 'list_available_disks()'
         It 'is defined as a function'
-            The value "$(type -t list_available_disks)" should equal "function"
+            The value "$(type list_available_disks 2>/dev/null)" should include "function"
         End
     End
 
     Describe 'detect_disk_layout()'
         It 'is defined as a function'
-            The value "$(type -t detect_disk_layout)" should equal "function"
+            The value "$(type detect_disk_layout 2>/dev/null)" should include "function"
         End
     End
 
@@ -662,12 +662,13 @@ exit 0'
             FAKE_SSH=$(mktemp -d)   # stand-in we point at via a tiny wrapper
         }
         cleanup() { rm -rf "$DEST" "$FAKE_SSH"; }
+        host_has_openssh_keys() { ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1; }
         Before 'setup'
             After 'cleanup'
 
         It 'returns non-zero when the source has no host keys'
-            # /etc/ssh and /etc/dropbear have no ssh_host_*/dropbear_* on the CI box
-            ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1 && Skip "host has OpenSSH keys"
+            # Only meaningful on a box whose /etc/ssh has no host keys
+            Skip if "host has OpenSSH keys" host_has_openssh_keys
             When call capture_host_identity "$DEST"
             The status should be failure
             The stderr should be defined
