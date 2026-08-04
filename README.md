@@ -101,3 +101,7 @@ This repo provisions the Warren exit nodes. The deploy tooling
 (`warren-core/infra/aadeploy/deploy-exit.sh`) drives `alpine-anywhere` for
 install and the hot-swap + persist upgrade flow; see the Warren workspace runbook
 for the fleet rollout procedure.
+
+## License
+
+MIT, see [`LICENSE`](LICENSE).
