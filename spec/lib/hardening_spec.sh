@@ -87,7 +87,12 @@ Describe 'hardening.sh'
     Describe 'generate_dropbear_confd()'
         It 'disables password authentication'
             When call generate_dropbear_confd
-            The output should include 'DROPBEAR_OPTS="-s -g"'
+            The output should include 'DROPBEAR_OPTS="-s -g'
+        End
+
+        It 'widens the receive window past the 24 KB default'
+            When call generate_dropbear_confd
+            The output should include '-W 1048576'
         End
 
         It 'sets default port to 22'

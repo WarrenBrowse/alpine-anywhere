@@ -199,8 +199,11 @@ generate_dropbear_confd() {
     cat << 'EOF'
 # Dropbear SSH configuration
 
-# Disable password authentication (key-only)
-DROPBEAR_OPTS="-s -g"
+# Disable password authentication (key-only). The 1 MB receive window
+# replaces dropbear's 24 KB default, which caps any inbound stream at
+# window/RTT (~480 KB/s at 50 ms, measured): large uploads such as the
+# update-channel installers need the larger window to use the link.
+DROPBEAR_OPTS="-s -g -W 1048576"
 
 # Port
 DROPBEAR_PORT="22"
