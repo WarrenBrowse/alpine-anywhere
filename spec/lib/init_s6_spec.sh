@@ -50,6 +50,17 @@ Describe 's6 init'
         End
     End
 
+    Describe 'hardened dropbear longrun'
+        # Regression guard: dropbear's 24 KB default receive window caps any
+        # inbound stream at window/RTT (~480 KB/s at 50 ms, measured), which
+        # starved the update-channel uploads. The s6 run script hardcodes the
+        # daemon options, so the window must be widened here, not in conf.d.
+        It 'widens the receive window past the 24 KB default'
+            When call cat lib/init_s6.sh
+            The output should include "dropbear -F -R -s -g -W 1048576 -p 22"
+        End
+    End
+
     Describe 'boot-time mounts'
         # Regression guard: dockerd cannot start without a cgroup hierarchy, and
         # only mounts-up provides one on the s6 path (OpenRC has its own service).

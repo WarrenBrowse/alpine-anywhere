@@ -259,8 +259,10 @@ EOF
     # Internet-exposed exit (root's shadow is already '*', so this closes the
     # gap belt-and-suspenders). -F foreground (s6 supervises), -R regenerates a
     # host key only if one is missing (baked keys make this a no-op normally).
+    # -W widens the 24 KB default receive window, which caps any inbound
+    # stream at window/RTT (~480 KB/s at 50 ms, measured on the update host).
     if [ "$HARDENED_MODE" = "true" ]; then
-        _s6_longrun "$src" dropbear "/usr/sbin/dropbear -F -R -s -g -p 22"
+        _s6_longrun "$src" dropbear "/usr/sbin/dropbear -F -R -s -g -W 1048576 -p 22"
         # RAM-only log dir: the SSH logger must never depend on the data
         # mount, or an unlock-over-ssh setup deadlocks at boot.
         _s6_logger "$src" dropbear /run/log/dropbear
