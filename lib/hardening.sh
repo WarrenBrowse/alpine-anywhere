@@ -217,6 +217,9 @@ EOF
 # Firewall Rules (nftables)
 # =============================================================================
 
+# The port argument exists for callers and the spec; in-file call sites
+# deliberately take the default.
+# shellcheck disable=SC2120
 generate_nftables_config() {
     ssh_port="${1:-22}"
 
