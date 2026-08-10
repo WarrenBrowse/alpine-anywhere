@@ -1,3 +1,7 @@
+<p align="center">
+  <img src=".github/warren-logo.svg" alt="Warren" width="130"/>
+</p>
+
 # alpine-anywhere
 
 Take over a running Linux server over SSH and install an **immutable Alpine
