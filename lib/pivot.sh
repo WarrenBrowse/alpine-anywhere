@@ -1060,15 +1060,25 @@ _ensure_kexec_local() {
     return 1
 }
 
-# Fetch the Alpine "virt" netboot kernel + matching modloop into the cache.
-# Echoes "<vmlinuz> <modloop>" on success. We boot THIS kernel (not the host's
-# own) post-kexec because the Alpine virt kernel is built to kexec cleanly on
-# cloud hypervisors - a stock distro kernel can panic post-kexec on some KVM
-# setups - and its module set covers cloud storage/NICs. arch-aware via
+# Fetch the Alpine netboot kernel + matching modloop into the cache. Echoes
+# "<vmlinuz> <modloop>" on success. We boot THIS kernel (not the host's own)
+# post-kexec because an Alpine netboot kernel kexecs cleanly where a stock
+# distro kernel can panic post-kexec on some KVM setups. arch-aware via
 # DETECTED_ARCH (x86_64 / aarch64).
+#
+# The flavor follows KERNEL_FLAVOR, which is already the flavor the INSTALLED
+# system runs, because the installer must carry the drivers of the machine it is
+# about to install. `virt` covers cloud hardware only: it ships no igb and no
+# ixgbe, so a bare-metal server kexecs into a RAM installer that cannot bring its
+# NIC up, and a machine with no network in the installer has no way to report
+# that it is stuck. `lts` is a strict superset (virtio_*, e1000, e1000e, nvme are
+# all in both), so following the flavor is safe for cloud targets too.
+# The cache key carries the flavor: without it a box that already cached the virt
+# pair keeps booting it after the flavor changes.
 _fetch_alpine_installer_kernel() {
-    local flavor=virt base tarball
-    local v="${INSTALL_CACHE_DIR}/aa-installer-vmlinuz" m="${INSTALL_CACHE_DIR}/aa-installer-modloop"
+    local flavor="${KERNEL_FLAVOR:-virt}" base tarball
+    local v="${INSTALL_CACHE_DIR}/aa-installer-vmlinuz-${flavor}"
+    local m="${INSTALL_CACHE_DIR}/aa-installer-modloop-${flavor}"
     if [ ! -s "$v" ] || [ ! -s "$m" ]; then
         # The mirror publishes NO per-file checksum for the raw netboot/
         # vmlinuz-virt + modloop-virt, so fetching them directly always died
@@ -1130,14 +1140,16 @@ pivot_kexec_installer() {
     kexec_bin=$(_ensure_kexec_local) \
         || die "kexec-tools unavailable on this host; cannot free the boot disk for an in-place install (install kexec-tools, or run from a non-systemd source that can pivot without kexec)"
 
-    # Prefer the Alpine 'virt' netboot kernel + its modloop modules (kexec-clean
-    # on cloud KVM, broad driver coverage), bundled into our self-contained
-    # initramfs. Fall back to the host's own kernel if the mirror is unreachable.
+    # Prefer the Alpine netboot kernel of KERNEL_FLAVOR + its modloop modules
+    # (kexec-clean on cloud KVM, and on bare metal the flavor is what decides
+    # whether the installer can see the NIC at all), bundled into our
+    # self-contained initramfs. Fall back to the host's own kernel if the mirror
+    # is unreachable.
     kpair=$(_fetch_alpine_installer_kernel) \
         && kimg=$(printf '%s' "$kpair" | awk '{print $1}') \
         && modloop=$(printf '%s' "$kpair" | awk '{print $2}')
     if [ -n "$kimg" ] && [ -f "$kimg" ] && [ -n "$modloop" ] && _bundle_modloop_modules "$PIVOT_DIR" "$modloop"; then
-        log_info "installer kernel: Alpine netboot virt ($kimg)"
+        log_info "installer kernel: Alpine netboot ${KERNEL_FLAVOR:-virt} ($kimg)"
     else
         log_warn "Alpine netboot kernel/modloop unavailable; falling back to the host kernel"
         kimg=$(_find_running_kernel_image) \

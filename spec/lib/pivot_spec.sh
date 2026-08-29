@@ -143,16 +143,19 @@ Describe '_fetch_alpine_installer_kernel()'
     BeforeEach 'setup'
     AfterEach 'cleanup_dir'
 
+    # KERNEL_FLAVOR defaults to lts (lib/common.sh), so an unset flavor caches
+    # and returns the lts pair.
     It 'returns the cached pair without downloading'
-        printf k > "$T/aa-installer-vmlinuz"
-        printf m > "$T/aa-installer-modloop"
+        printf k > "$T/aa-installer-vmlinuz-lts"
+        printf m > "$T/aa-installer-modloop-lts"
         When call _fetch_alpine_installer_kernel
         The status should be success
-        The output should include "aa-installer-vmlinuz"
-        The output should include "aa-installer-modloop"
+        The output should include "aa-installer-vmlinuz-lts"
+        The output should include "aa-installer-modloop-lts"
     End
 
     It 'extracts kernel + modloop from the checksummed netboot tarball'
+        KERNEL_FLAVOR=virt
         # cache_download mock materialises a tarball shaped like the mirror's.
         Mock cache_download
             mkdir -p "$T/pack/boot"
@@ -162,8 +165,46 @@ Describe '_fetch_alpine_installer_kernel()'
         End
         When call _fetch_alpine_installer_kernel
         The status should be success
-        The output should include "aa-installer-vmlinuz"
-        The contents of file "$T/aa-installer-vmlinuz" should equal "kernel"
-        The contents of file "$T/aa-installer-modloop" should equal "modules"
+        The output should include "aa-installer-vmlinuz-virt"
+        The contents of file "$T/aa-installer-vmlinuz-virt" should equal "kernel"
+        The contents of file "$T/aa-installer-modloop-virt" should equal "modules"
+    End
+
+    # A bare-metal target needs the drivers of its real hardware: the virt
+    # modloop carries no igb and no ixgbe, so an Intel I210 box kexecs into a
+    # RAM installer with no network and no way to say so.
+    It 'follows KERNEL_FLAVOR so a bare-metal install gets the lts drivers'
+        KERNEL_FLAVOR=lts
+        Mock cache_download
+            mkdir -p "$T/pack/boot"
+            printf virtkernel > "$T/pack/boot/vmlinuz-virt"
+            printf virtmodules > "$T/pack/boot/modloop-virt"
+            printf ltskernel > "$T/pack/boot/vmlinuz-lts"
+            printf ltsmodules > "$T/pack/boot/modloop-lts"
+            tar -czf "$INSTALL_CACHE_DIR/$2" -C "$T/pack" boot
+        End
+        When call _fetch_alpine_installer_kernel
+        The status should be success
+        The output should include "aa-installer-vmlinuz-lts"
+        The contents of file "$T/aa-installer-vmlinuz-lts" should equal "ltskernel"
+        The contents of file "$T/aa-installer-modloop-lts" should equal "ltsmodules"
+    End
+
+    # The cache key carries the flavor, so a box that already cached the virt
+    # pair does not silently keep booting it after the flavor changes.
+    It 'ignores a cached pair of a different flavor'
+        KERNEL_FLAVOR=lts
+        printf k > "$T/aa-installer-vmlinuz-virt"
+        printf m > "$T/aa-installer-modloop-virt"
+        Mock cache_download
+            mkdir -p "$T/pack/boot"
+            printf ltskernel > "$T/pack/boot/vmlinuz-lts"
+            printf ltsmodules > "$T/pack/boot/modloop-lts"
+            tar -czf "$INSTALL_CACHE_DIR/$2" -C "$T/pack" boot
+        End
+        When call _fetch_alpine_installer_kernel
+        The status should be success
+        The output should include "aa-installer-vmlinuz-lts"
+        The contents of file "$T/aa-installer-vmlinuz-lts" should equal "ltskernel"
     End
 End
