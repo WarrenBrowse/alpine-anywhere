@@ -816,51 +816,7 @@ _emit_installer_init() {
 #!/bin/sh
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
-# Everything PID 1 prints must land BOTH on the console and in a file. A box
-# with no IPMI has no console anyone can read, and only the install command's
-# output used to be captured, so the phase that fails first on bare metal
-# (module load, interface resolution, addressing) reached the console and
-# nowhere else: an abort was then indistinguishable from a hang. BusyBox ash has
-# no process substitution, hence the fifo plus a background tee.
-AA_LOG=/tmp/aa-installer.log
-# /tmp is created further down for the rest of the script; this runs before it.
-mkdir -p /tmp 2>/dev/null || true
-# The LOG is the primary sink and the console is a background mirror, never the
-# reverse. Opening a regular file cannot block, so PID 1 can never wedge on its
-# own logging. A fifo here does: `exec > fifo` blocks until a reader opens it, so
-# if the background tee fails to start the installer deadlocks at line 1 and
-# produces NO output at all, which is strictly worse than the console-only
-# behaviour it replaced. If the mirror cannot start we lose the console, which on
-# a box without IPMI was unreadable anyway; the log still fills and is persisted.
-: > "$AA_LOG" 2>/dev/null
-exec >> "$AA_LOG" 2>&1
-tail -f "$AA_LOG" > /dev/console 2>/dev/null &
-
-# Persist the captured log onto the SOURCE disk, which is still intact whenever
-# the installer aborts before its destructive phase - the network pre-check is
-# exactly that case, and it is the one that leaves an operator with an
-# unreachable box and nothing to read. Hangs off EXIT so an early abort is
-# covered, not just a failed install. Values of token/secret/key/mnemonic/
-# password assignments are stripped: this file survives on a disk we are then
-# NOT going to wipe.
-_aa_persist_log() {
-    [ -s "$AA_LOG" ] || return 0
-    sed -e 's/\(_\(TOKEN\|SECRET\|KEY\|MNEMONIC\|PASSWORD\)=\)[^[:space:]]*/\1<REDACTED>/g' \
-        "$AA_LOG" > /tmp/aa-installer.redacted 2>/dev/null \
-        || cp "$AA_LOG" /tmp/aa-installer.redacted 2>/dev/null
-    mkdir -p /mnt/aa-src
-    for p in /dev/vda1 /dev/sda1 /dev/vda2 /dev/sda2 /dev/nvme0n1p1; do
-        mount "$p" /mnt/aa-src 2>/dev/null || continue
-        if [ -d /mnt/aa-src/etc ]; then
-            cp /tmp/aa-installer.redacted /mnt/aa-src/aa-installer-failure.log 2>/dev/null
-            sync
-        fi
-        umount /mnt/aa-src 2>/dev/null
-        break
-    done
-}
-trap _aa_persist_log EXIT
-
+exec > /dev/console 2>&1
 echo "[ram-installer] === PID 1 (initramfs) ==="
 
 mount -t proc proc /proc 2>/dev/null
@@ -975,13 +931,12 @@ INSTALL_CMD="sh /root/.local/share/alpine-anywhere/alpine-anywhere --local --ins
 [ -n "$ALPINE_VERSION" ] && INSTALL_CMD="$INSTALL_CMD -V $ALPINE_VERSION"
 [ -n "$ALPINE_MIRROR" ] && INSTALL_CMD="$INSTALL_CMD -m $ALPINE_MIRROR"
 echo "[ram-installer] $INSTALL_CMD"
-# stdout and stderr are already teed to the console AND to $AA_LOG, so run the
-# installer plainly and read its OWN exit code. It used to run through a pipe
-# into tee, where `rc=$?` reflects tee (~always 0) and a failed A/B install
-# reported success and rebooted into a possibly-unbootable disk; BusyBox ash has
-# no PIPESTATUS to fix that. With no pipeline the problem does not arise.
-$INSTALL_CMD 2>&1
-rc=$?
+# Capture the INSTALLER's exit code, not tee's. In a pipeline `rc=$?` reflects
+# the last element (tee), which is ~always 0 - so a failed A/B install would
+# report success and reboot into a possibly-unbootable disk. BusyBox ash has no
+# PIPESTATUS, so stash the real rc through a file.
+{ $INSTALL_CMD 2>&1; echo $? > /tmp/aa-install.rc; } | tee /dev/console /tmp/aa-install.log
+rc=$(cat /tmp/aa-install.rc 2>/dev/null || echo 1)
 echo "[ram-installer] install finished rc=$rc"
 sync
 if [ "$rc" -eq 0 ]; then
@@ -995,9 +950,16 @@ else
     # the shell exits at once, PID 1 dies, and the kernel panic-reset boots
     # the old disk, destroying every trace.
     echo "[ram-installer] INSTALL FAILED rc=$rc - persisting log + staying up for ssh"
-    # Explicit, not left to the EXIT trap: the sleep loop below never exits, so
-    # the trap would never fire on this path.
-    _aa_persist_log
+    mkdir -p /mnt/aa-src
+    for p in /dev/vda1 /dev/sda1 /dev/vda2 /dev/sda2 /dev/nvme0n1p1; do
+        mount "$p" /mnt/aa-src 2>/dev/null || continue
+        if [ -d /mnt/aa-src/etc ]; then
+            cp /tmp/aa-install.log /mnt/aa-src/aa-installer-failure.log 2>/dev/null
+            sync
+        fi
+        umount /mnt/aa-src 2>/dev/null
+        break
+    done
     while :; do sleep 3600; done
 fi
 INSTALLERINIT

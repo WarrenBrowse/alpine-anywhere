@@ -112,40 +112,6 @@ Describe 'pivot.sh'
             The output should include "/sys/class/net"
             The output should include "carrier"
         End
-
-        # Only the install command's output used to be captured, so the phase
-        # that actually fails on a bare-metal box (module load, interface
-        # resolution, addressing) reached /dev/console and nowhere else. On a
-        # machine whose console the operator cannot see, that makes an abort
-        # indistinguishable from a hang.
-        It 'captures everything PID 1 prints, not just the install command'
-            When call emit_and_cat
-            The output should include "/tmp/aa-installer.log"
-            The output should include 'exec >> "$AA_LOG" 2>&1'
-        End
-
-        # A fifo would deadlock PID 1 at line 1 whenever its reader fails to
-        # start, producing no output at all: strictly worse than console-only.
-        It 'never makes PID 1 block on its own logging'
-            When call emit_and_cat
-            The output should not include "mkfifo"
-        End
-
-        # An abort BEFORE the install command (the network pre-check is one)
-        # must still leave the log behind, so persistence hangs off EXIT rather
-        # than off the failure branch it used to live in.
-        It 'persists the log on any exit path, not only a failed install'
-            When call emit_and_cat
-            The output should include "trap _aa_persist_log EXIT"
-            The output should include "aa-installer-failure.log"
-        End
-
-        # The staged install env carries an enrollment token; a log written to a
-        # disk that SURVIVES the abort must not carry it.
-        It 'redacts secret-looking assignments before writing to disk'
-            When call emit_and_cat
-            The output should include "REDACTED"
-        End
     End
 
     Describe '_pack_installer_img()'
