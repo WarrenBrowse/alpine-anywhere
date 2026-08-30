@@ -120,8 +120,15 @@ Describe 'pivot.sh'
         # indistinguishable from a hang.
         It 'captures everything PID 1 prints, not just the install command'
             When call emit_and_cat
-            The output should include "mkfifo"
             The output should include "/tmp/aa-installer.log"
+            The output should include 'exec >> "$AA_LOG" 2>&1'
+        End
+
+        # A fifo would deadlock PID 1 at line 1 whenever its reader fails to
+        # start, producing no output at all: strictly worse than console-only.
+        It 'never makes PID 1 block on its own logging'
+            When call emit_and_cat
+            The output should not include "mkfifo"
         End
 
         # An abort BEFORE the install command (the network pre-check is one)

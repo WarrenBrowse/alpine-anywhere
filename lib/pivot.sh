@@ -823,17 +823,18 @@ export PATH
 # nowhere else: an abort was then indistinguishable from a hang. BusyBox ash has
 # no process substitution, hence the fifo plus a background tee.
 AA_LOG=/tmp/aa-installer.log
-AA_FIFO=/tmp/aa-installer.fifo
-# /tmp is created further down for the rest of the script; this runs before it,
-# and without the directory the mkfifo fails and the capture silently degrades
-# to console-only, which is the whole problem this exists to solve.
+# /tmp is created further down for the rest of the script; this runs before it.
 mkdir -p /tmp 2>/dev/null || true
-if mkfifo "$AA_FIFO" 2>/dev/null; then
-    tee -a "$AA_LOG" < "$AA_FIFO" > /dev/console 2>/dev/null &
-    exec > "$AA_FIFO" 2>&1
-else
-    exec > /dev/console 2>&1
-fi
+# The LOG is the primary sink and the console is a background mirror, never the
+# reverse. Opening a regular file cannot block, so PID 1 can never wedge on its
+# own logging. A fifo here does: `exec > fifo` blocks until a reader opens it, so
+# if the background tee fails to start the installer deadlocks at line 1 and
+# produces NO output at all, which is strictly worse than the console-only
+# behaviour it replaced. If the mirror cannot start we lose the console, which on
+# a box without IPMI was unreadable anyway; the log still fills and is persisted.
+: > "$AA_LOG" 2>/dev/null
+exec >> "$AA_LOG" 2>&1
+tail -f "$AA_LOG" > /dev/console 2>/dev/null &
 
 # Persist the captured log onto the SOURCE disk, which is still intact whenever
 # the installer aborts before its destructive phase - the network pre-check is
