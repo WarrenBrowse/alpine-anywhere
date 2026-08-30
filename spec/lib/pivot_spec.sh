@@ -100,6 +100,18 @@ Describe 'pivot.sh'
             When call emit_and_cat
             The output should include "--install-continue"
         End
+
+        # The detection host names NICs the systemd way (eno1, ens..) while this
+        # RAM installer runs busybox/mdev kernel names (eth0..). Configuring the
+        # baked name blind leaves the installer with no network, its mirror
+        # pre-check aborts before touching the disk, and the box is unreachable
+        # with nothing to say why: the installed system already guards this
+        # (init_s6.sh network-up), the installer must too.
+        It 'resolves the interface at runtime instead of trusting the baked name'
+            When call emit_and_cat
+            The output should include "/sys/class/net"
+            The output should include "carrier"
+        End
     End
 
     Describe '_pack_installer_img()'

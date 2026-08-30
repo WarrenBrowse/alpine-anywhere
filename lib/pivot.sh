@@ -845,6 +845,30 @@ echo "[ram-installer] block devices:"; ls -l /dev/vd* /dev/sd* /dev/nvme* /dev/m
 
 echo "[ram-installer] networking..."
 ifconfig lo 127.0.0.1 up 2>/dev/null || ip link set lo up 2>/dev/null || true
+# The detection host names NICs the systemd way (eno1, ens..) while this RAM
+# installer runs busybox/mdev kernel names (eth0..), so the baked name can simply
+# not exist here. Same guard the installed system already carries (init_s6.sh
+# network-up): prefer the baked name, else the port that has carrier, else the
+# first non-lo. Without it the static address lands on nothing, the mirror
+# pre-check aborts before touching the disk, and the box goes dark with no way to
+# report why: the operator sees an unreachable machine and no console output.
+if [ -n "$NETWORK_INTERFACE" ] && [ ! -e "/sys/class/net/$NETWORK_INTERFACE" ]; then
+    echo "[ram-installer] baked interface '$NETWORK_INTERFACE' absent, resolving..."
+    for d in /sys/class/net/*; do
+        b=${d##*/}; [ "$b" = lo ] && continue
+        ip link set "$b" up 2>/dev/null || ifconfig "$b" up 2>/dev/null || true
+    done
+    sleep 3
+    NETWORK_INTERFACE=""
+    for d in /sys/class/net/*; do
+        b=${d##*/}; [ "$b" = lo ] && continue
+        [ "$(cat "$d/carrier" 2>/dev/null)" = 1 ] && { NETWORK_INTERFACE="$b"; break; }
+    done
+    [ -n "$NETWORK_INTERFACE" ] || for d in /sys/class/net/*; do
+        b=${d##*/}; [ "$b" = lo ] || { NETWORK_INTERFACE="$b"; break; }
+    done
+    echo "[ram-installer] using interface '$NETWORK_INTERFACE'"
+fi
 if [ -n "$NETWORK_INTERFACE" ]; then
     ip link set "$NETWORK_INTERFACE" up 2>/dev/null || ifconfig "$NETWORK_INTERFACE" up 2>/dev/null || true
     if [ "$NETWORK_DHCP" = "true" ]; then
