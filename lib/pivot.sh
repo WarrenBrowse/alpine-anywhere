@@ -816,7 +816,45 @@ _emit_installer_init() {
 #!/bin/sh
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
-exec > /dev/console 2>&1
+# Capture EVERYTHING into a file, mirrored to the console in the background. The
+# log is the primary sink and the console the mirror, never the reverse: opening
+# a regular file cannot block, whereas a fifo here deadlocks PID 1 at line 1 the
+# moment its reader fails to start (tried, and it produced no output at all).
+# The mirror is best-effort; on a box behind an IPMI KVM the console is blank
+# anyway, because kexec does not re-run the video BIOS.
+AA_LOG=/tmp/aa-installer.log
+mkdir -p /tmp 2>/dev/null || true
+: > "$AA_LOG" 2>/dev/null
+exec >> "$AA_LOG" 2>&1
+tail -f "$AA_LOG" > /dev/console 2>/dev/null &
+# Full command trace: this init runs once, unattended, on a machine that may have
+# no readable console, so verbosity costs nothing and absence of it costs a power
+# cycle per hypothesis. Secret-looking values are stripped when the log is
+# persisted, see _aa_persist_log.
+set -x
+
+# Persist the captured log onto the SOURCE disk, which an early abort leaves
+# intact. Values of token/secret/key/mnemonic/password assignments are stripped:
+# this file survives on a disk we are then NOT going to wipe.
+_aa_persist_log() {
+    set +x
+    [ -s "$AA_LOG" ] || return 0
+    sed -e 's/\(_\(TOKEN\|SECRET\|KEY\|MNEMONIC\|PASSWORD\)=\)[^[:space:]]*/\1<REDACTED>/g' \
+        "$AA_LOG" > /tmp/aa-debug.redacted 2>/dev/null \
+        || cp "$AA_LOG" /tmp/aa-debug.redacted 2>/dev/null
+    mkdir -p /mnt/aa-src
+    for p in /dev/vda1 /dev/sda1 /dev/vda2 /dev/sda2 /dev/nvme0n1p1; do
+        mount "$p" /mnt/aa-src 2>/dev/null || continue
+        if [ -d /mnt/aa-src/etc ]; then
+            cp /tmp/aa-debug.redacted /mnt/aa-src/aa-debug.log 2>/dev/null
+            sync
+        fi
+        umount /mnt/aa-src 2>/dev/null
+        break
+    done
+}
+trap _aa_persist_log EXIT
+
 echo "[ram-installer] === PID 1 (initramfs) ==="
 
 mount -t proc proc /proc 2>/dev/null
@@ -968,12 +1006,13 @@ INSTALL_CMD="sh /root/.local/share/alpine-anywhere/alpine-anywhere --local --ins
 [ -n "$ALPINE_VERSION" ] && INSTALL_CMD="$INSTALL_CMD -V $ALPINE_VERSION"
 [ -n "$ALPINE_MIRROR" ] && INSTALL_CMD="$INSTALL_CMD -m $ALPINE_MIRROR"
 echo "[ram-installer] $INSTALL_CMD"
-# Capture the INSTALLER's exit code, not tee's. In a pipeline `rc=$?` reflects
-# the last element (tee), which is ~always 0 - so a failed A/B install would
-# report success and reboot into a possibly-unbootable disk. BusyBox ash has no
-# PIPESTATUS, so stash the real rc through a file.
-{ $INSTALL_CMD 2>&1; echo $? > /tmp/aa-install.rc; } | tee /dev/console /tmp/aa-install.log
-rc=$(cat /tmp/aa-install.rc 2>/dev/null || echo 1)
+# stdout and stderr already land in $AA_LOG (mirrored to the console), so run the
+# installer plainly and read its OWN exit code. It used to run through a pipe into
+# tee, where `rc=$?` reflects tee (~always 0) and a failed A/B install reported
+# success and rebooted into a possibly-unbootable disk; BusyBox ash has no
+# PIPESTATUS to fix that. With no pipeline the problem cannot arise.
+$INSTALL_CMD 2>&1
+rc=$?
 echo "[ram-installer] install finished rc=$rc"
 sync
 if [ "$rc" -eq 0 ]; then
@@ -993,17 +1032,10 @@ else
     # cycle on a box the operator may have no console for. After the window we
     # reboot into the source system, which an early abort has left intact, so
     # the machine comes back on its own with its log already on disk.
-    echo "[ram-installer] INSTALL FAILED rc=$rc - persisting log + staying up for ssh"
-    mkdir -p /mnt/aa-src
-    for p in /dev/vda1 /dev/sda1 /dev/vda2 /dev/sda2 /dev/nvme0n1p1; do
-        mount "$p" /mnt/aa-src 2>/dev/null || continue
-        if [ -d /mnt/aa-src/etc ]; then
-            cp /tmp/aa-install.log /mnt/aa-src/aa-installer-failure.log 2>/dev/null
-            sync
-        fi
-        umount /mnt/aa-src 2>/dev/null
-        break
-    done
+    echo "[ram-installer] INSTALL FAILED rc=$rc - persisting /aa-debug.log + holding for ssh"
+    # Explicit, not left to the EXIT trap: the bounded hold below can end in
+    # `reboot -f`, which does not unwind traps.
+    _aa_persist_log
     AA_RESCUE_SECS=${AA_RESCUE_SECS:-900}
     echo "[ram-installer] holding ${AA_RESCUE_SECS}s for ssh rescue, then rebooting into the source system"
     sleep "$AA_RESCUE_SECS"

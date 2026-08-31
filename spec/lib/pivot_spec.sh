@@ -115,11 +115,6 @@ Describe 'pivot.sh'
             The output should include "ahci"
         End
 
-        # Staying up forever after a failed install is only useful while dropbear
-        # is reachable, and the failure that gets us here is frequently the
-        # network itself. Unbounded, it turns every failure into a manual power
-        # cycle; bounded, an operator still gets a rescue window and an
-        # unreachable box returns to its intact source system on its own.
         # Measured on a Supermicro I210: the igb driver binds at 5.9 s and the
         # link only reaches "Up 1000 Mbps" at 15.1 s, while the init configured
         # the address and ran the installer (whose first act is a mirror
@@ -131,6 +126,34 @@ Describe 'pivot.sh'
             The output should include "carrier"
         End
 
+        # Everything PID 1 prints must be recoverable: on a box whose console is
+        # blank after kexec, an abort is otherwise indistinguishable from a hang.
+        It 'captures the whole init into a log and persists it as /aa-debug.log'
+            When call emit_and_cat
+            The output should include "/tmp/aa-installer.log"
+            The output should include "aa-debug.log"
+            The output should include "set -x"
+        End
+
+        # A fifo deadlocks PID 1 at line 1 when its reader fails to start, which
+        # produced no output at all: strictly worse than console-only.
+        It 'never makes PID 1 block on its own logging'
+            When call emit_and_cat
+            The output should not include "mkfifo"
+        End
+
+        # The log lands on a disk that SURVIVES the abort, and the staged install
+        # env carries an enrollment token.
+        It 'redacts secret-looking assignments before writing to disk'
+            When call emit_and_cat
+            The output should include "REDACTED"
+        End
+
+        # Staying up forever after a failed install is only useful while dropbear
+        # is reachable, and the failure that gets us here is frequently the
+        # network itself. Unbounded, it turns every failure into a manual power
+        # cycle; bounded, an operator still gets a rescue window and an
+        # unreachable box returns to its intact source system on its own.
         It 'bounds the post-failure rescue window and reboots instead of hanging'
             When call emit_and_cat
             The output should include "AA_RESCUE_SECS"
