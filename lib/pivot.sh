@@ -934,6 +934,32 @@ else
     /usr/sbin/sshd 2>/dev/null || true
 fi
 
+# Wait for the link to actually carry traffic. Gigabit autonegotiation takes
+# several seconds AFTER the interface is brought up, while the installer's first
+# act is a mirror reachability pre-check: measured on a Supermicro I210, igb
+# bound at 5.9 s and the link reached "Up 1000 Mbps" only at 15.1 s, so the check
+# fired about nine seconds too early and aborted a perfectly healthy box "before
+# any disk change". Bounded, so a genuinely dead network still fails fast rather
+# than hanging, and skipped entirely when there is no interface to wait for.
+if [ -n "$NETWORK_INTERFACE" ] && [ -e "/sys/class/net/$NETWORK_INTERFACE" ]; then
+    AA_LINK_WAIT=${AA_LINK_WAIT:-60}
+    _w=0
+    while [ "$_w" -lt "$AA_LINK_WAIT" ]; do
+        [ "$(cat "/sys/class/net/$NETWORK_INTERFACE/carrier" 2>/dev/null)" = "1" ] && break
+        _w=$((_w + 1)); sleep 1
+    done
+    echo "[ram-installer] carrier on $NETWORK_INTERFACE after ${_w}s"
+    # Carrier alone is not reachability: wait for the gateway to answer too.
+    if [ -n "$NETWORK_GATEWAY" ]; then
+        _w=0
+        while [ "$_w" -lt "$AA_LINK_WAIT" ]; do
+            ping -c 1 -W 1 "$NETWORK_GATEWAY" >/dev/null 2>&1 && break
+            _w=$((_w + 1))
+        done
+        echo "[ram-installer] gateway $NETWORK_GATEWAY answered after ${_w}s"
+    fi
+fi
+
 echo "[ram-installer] starting A/B install onto disk..."
 INSTALL_CMD="sh /root/.local/share/alpine-anywhere/alpine-anywhere --local --install-continue"
 [ "$VERBOSE" = "true" ] && INSTALL_CMD="$INSTALL_CMD -v"

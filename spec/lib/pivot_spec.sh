@@ -120,6 +120,17 @@ Describe 'pivot.sh'
         # network itself. Unbounded, it turns every failure into a manual power
         # cycle; bounded, an operator still gets a rescue window and an
         # unreachable box returns to its intact source system on its own.
+        # Measured on a Supermicro I210: the igb driver binds at 5.9 s and the
+        # link only reaches "Up 1000 Mbps" at 15.1 s, while the init configured
+        # the address and ran the installer (whose first act is a mirror
+        # reachability pre-check) around 10-12 s. The check therefore failed ~9 s
+        # before the NIC could carry a packet, and aborted a healthy machine.
+        It 'waits for the link to carry traffic before starting the install'
+            When call emit_and_cat
+            The output should include "AA_LINK_WAIT"
+            The output should include "carrier"
+        End
+
         It 'bounds the post-failure rescue window and reboots instead of hanging'
             When call emit_and_cat
             The output should include "AA_RESCUE_SECS"
