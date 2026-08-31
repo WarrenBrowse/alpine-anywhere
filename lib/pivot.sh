@@ -829,7 +829,18 @@ echo "[ram-installer] loading storage/fs modules..."
 # virtio_* first: cloud/KVM hosts (Hetzner, most VPS) present the disk + NIC as
 # virtio-blk/virtio-net, so without these the installer never sees /dev/vd*|/dev/sd*
 # or the network. The USB/NVMe/scsi set covers bare metal + Raspberry Pi.
+#
+# The ethernet and AHCI/RAID rows are what makes a PHYSICAL server work. There is
+# no udev in this initramfs, so nothing autoloads a driver by PCI id: a module
+# that is not named here is never bound, however complete the modloop is. With
+# virtio_net as the only NIC driver, a bare-metal box came up with `lo` and
+# nothing else, its static address landed nowhere, and the installer aborted on
+# its own mirror pre-check before touching the disk, with no console anyone could
+# read to say so. A modprobe of an absent module is silent and free, so listing
+# the common server NICs and storage controllers costs nothing on cloud.
 for m in virtio_pci virtio_blk virtio_scsi virtio_net \
+         igb igc e1000e e1000 ixgbe i40e tg3 bnx2 bnxt_en r8169 atlantic \
+         ahci libahci ata_piix megaraid_sas mpt3sas \
          dwc2 phy-generic xhci-pci-renesas xhci-pci xhci-hcd \
          usb-storage uas scsi_mod sd_mod \
          nvme ext4 vfat nls_cp437 nls_iso8859-1 squashfs loop crc32c; do

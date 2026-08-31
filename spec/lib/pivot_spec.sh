@@ -96,6 +96,25 @@ Describe 'pivot.sh'
             The output should include "virtio_net"
         End
 
+        # virtio_net was the ONLY network driver in the list, so on a physical
+        # server the RAM installer had no NIC at all: the modloop carries igb,
+        # nothing modprobes it, and there is no udev in there to autoload it.
+        # The installer then aborts on its own mirror pre-check, before touching
+        # the disk, with no way to say why.
+        It 'loads physical NIC drivers so a bare-metal installer has a network'
+            When call emit_and_cat
+            The output should include "igb"
+            The output should include "e1000e"
+            The output should include "ixgbe"
+        End
+
+        # Same gap on the storage side: sd_mod alone does not bind a SATA
+        # controller, and every one of these boxes boots off AHCI.
+        It 'loads the SATA/RAID controller drivers, not just sd_mod'
+            When call emit_and_cat
+            The output should include "ahci"
+        End
+
         It 'runs the A/B install-continue from the freed disk'
             When call emit_and_cat
             The output should include "--install-continue"
