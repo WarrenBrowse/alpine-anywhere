@@ -960,6 +960,13 @@ else
     # dropbear stays reachable. `exec /bin/sh` here is a trap: without a tty
     # the shell exits at once, PID 1 dies, and the kernel panic-reset boots
     # the old disk, destroying every trace.
+    #
+    # The wait is BOUNDED. Staying up is only worth anything while dropbear can
+    # be reached, and the failure that lands here is frequently the network
+    # itself, so an unbounded hold turns every such failure into a manual power
+    # cycle on a box the operator may have no console for. After the window we
+    # reboot into the source system, which an early abort has left intact, so
+    # the machine comes back on its own with its log already on disk.
     echo "[ram-installer] INSTALL FAILED rc=$rc - persisting log + staying up for ssh"
     mkdir -p /mnt/aa-src
     for p in /dev/vda1 /dev/sda1 /dev/vda2 /dev/sda2 /dev/nvme0n1p1; do
@@ -971,7 +978,12 @@ else
         umount /mnt/aa-src 2>/dev/null
         break
     done
-    while :; do sleep 3600; done
+    AA_RESCUE_SECS=${AA_RESCUE_SECS:-900}
+    echo "[ram-installer] holding ${AA_RESCUE_SECS}s for ssh rescue, then rebooting into the source system"
+    sleep "$AA_RESCUE_SECS"
+    echo "[ram-installer] rescue window over - rebooting"
+    sync
+    reboot -f
 fi
 INSTALLERINIT
     run_privileged chmod +x "${dest}/init"

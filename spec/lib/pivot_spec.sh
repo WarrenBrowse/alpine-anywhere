@@ -115,6 +115,17 @@ Describe 'pivot.sh'
             The output should include "ahci"
         End
 
+        # Staying up forever after a failed install is only useful while dropbear
+        # is reachable, and the failure that gets us here is frequently the
+        # network itself. Unbounded, it turns every failure into a manual power
+        # cycle; bounded, an operator still gets a rescue window and an
+        # unreachable box returns to its intact source system on its own.
+        It 'bounds the post-failure rescue window and reboots instead of hanging'
+            When call emit_and_cat
+            The output should include "AA_RESCUE_SECS"
+            The output should not include "while :; do sleep 3600; done"
+        End
+
         It 'runs the A/B install-continue from the freed disk'
             When call emit_and_cat
             The output should include "--install-continue"
