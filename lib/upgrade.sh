@@ -491,7 +491,32 @@ show_status() {
     [ -f "${BOOT_MNT}/cmdline.txt" ] && boot_cfg="${BOOT_MNT}/cmdline.txt"
     [ -z "$boot_cfg" ] && [ -f "${BOOT_MNT}/extlinux/extlinux.conf" ] && boot_cfg="${BOOT_MNT}/extlinux/extlinux.conf"
     boot_root=""
-    [ -n "$boot_cfg" ] && boot_root=$(sed -n 's/.*\(root=[^ ]*\).*/\1/p' "$boot_cfg" 2>/dev/null | head -n1) || true
+    case "$boot_cfg" in
+        */extlinux.conf)
+            # extlinux.conf carries BOTH slots, and the one that boots is the
+            # one DEFAULT names. Taking the first root= in the file instead
+            # reports slot A's root= whatever the bootloader will really do:
+            # before an upgrade on 2026-09-17 this line claimed slot A's
+            # PARTUUID while the box was set to boot B, which is the kind of
+            # status an operator checks precisely to avoid rebooting blind.
+            _ext_label=$(sed -n 's/^[[:space:]]*DEFAULT[[:space:]]\{1,\}\([^[:space:]]*\).*/\1/p' "$boot_cfg" 2>/dev/null | head -n1) || true
+            if [ -n "$_ext_label" ]; then
+                boot_root=$(awk -v want="$_ext_label" '
+                    $1 == "LABEL" { inlabel = ($2 == want) }
+                    inlabel && $1 == "APPEND" {
+                        for (i = 2; i <= NF; i++)
+                            if ($i ~ /^root=/) { print $i; exit }
+                    }
+                ' "$boot_cfg" 2>/dev/null) || true
+            fi
+            # A file with a single unlabelled APPEND still answers here.
+            [ -n "$boot_root" ] || boot_root=$(sed -n 's/.*\(root=[^ ]*\).*/\1/p' "$boot_cfg" 2>/dev/null | head -n1) || true
+            unset _ext_label
+            ;;
+        ?*)
+            boot_root=$(sed -n 's/.*\(root=[^ ]*\).*/\1/p' "$boot_cfg" 2>/dev/null | head -n1) || true
+            ;;
+    esac
     # GRUB-only layout: the next-boot root lives in the slot menuentry of
     # grub.cfg, selected by grub_aa_default.cfg.
     if [ -z "$boot_cfg" ] && [ -f "${BOOT_MNT}/grub/grub.cfg" ]; then

@@ -429,6 +429,51 @@ Describe 'upgrade.sh'
             The output should include "root=PARTUUID=bbbb"
             The stderr should be defined
         End
+
+        # extlinux.conf holds BOTH slots. Reading the first root= in the file
+        # reports slot A whatever the bootloader will do, which is how a box
+        # set to boot B advertised A's PARTUUID on 2026-09-17. An operator
+        # reads this line precisely to decide whether it is safe to reboot.
+        setup_extlinux() {
+            rm -rf "$BOOT_MNT/grub"
+            mkdir -p "$BOOT_MNT/extlinux"
+            {
+                echo 'DEFAULT alpine-B'
+                echo 'LABEL alpine-A'
+                echo '    APPEND root=PARTUUID=aaaa rootfstype=squashfs quiet'
+                echo 'LABEL alpine-B'
+                echo '    APPEND root=PARTUUID=bbbb rootfstype=squashfs quiet'
+            } > "$BOOT_MNT/extlinux/extlinux.conf"
+        }
+
+        It 'reports the label DEFAULT names, not the first one in the file'
+            setup_extlinux
+            When call show_status
+            The output should include "Boot slot:     B"
+            The output should include "root=PARTUUID=bbbb"
+            The output should not include "root=PARTUUID=aaaa"
+            The stderr should be defined
+        End
+
+        It 'follows DEFAULT when it points at the other slot'
+            setup_extlinux
+            sed -i.bak 's/^DEFAULT alpine-B/DEFAULT alpine-A/' "$BOOT_MNT/extlinux/extlinux.conf"
+            echo A > "$BOOT_MNT/current_slot"
+            When call show_status
+            The output should include "Boot slot:     A"
+            The output should include "root=PARTUUID=aaaa"
+            The output should not include "root=PARTUUID=bbbb"
+            The stderr should be defined
+        End
+
+        It 'still answers on a single unlabelled APPEND'
+            rm -rf "$BOOT_MNT/grub"
+            mkdir -p "$BOOT_MNT/extlinux"
+            printf 'APPEND root=PARTUUID=cccc rootfstype=squashfs\n' > "$BOOT_MNT/extlinux/extlinux.conf"
+            When call show_status
+            The output should include "root=PARTUUID=cccc"
+            The stderr should be defined
+        End
     End
 
     Describe 'Upgrade constants'
