@@ -52,6 +52,7 @@ OVERLAY_DEVICE="${OVERLAY_DEVICE:-}"      # Device for persistent overlay
 TARGET_DISK="${TARGET_DISK:-}"            # Explicit install disk (e.g. /dev/sda); empty = auto-detect
 HARDENED_MODE="${HARDENED_MODE:-false}"   # Security hardened mode
 NO_VERIFY="${NO_VERIFY:-false}"           # Skip artifact checksum verification (UNSAFE)
+IGNORE_MANIFEST="${IGNORE_MANIFEST:-false}" # upgrade: build a stock image although the system carries no build manifest
 CHECKSUM_DIR="${CHECKSUM_DIR:-}"          # Local dir of *.sha512 files (air-gapped mirror)
 VERITY_MODE="${VERITY_MODE:-auto}"        # dm-verity on slots: auto|on|off (auto = on iff hardened)
 # Verity root-hash signing (turns plain dm-verity into signature-authenticated
@@ -605,7 +606,14 @@ Arguments:
 Modes:
   (default)                      Live mode - boot Alpine in RAM, revert on reboot
   --install                      Install mode - install Alpine permanently (A/B scheme)
-  upgrade                        Upgrade to new version (atomic A/B switch)
+  upgrade                        Upgrade to new version (atomic A/B switch).
+                                   Reads /etc/alpine-anywhere/install.conf, the
+                                   manifest written into the image at build
+                                   time, so an upgrade with no flags rebuilds
+                                   the same system (same hardening, container
+                                   runtime, custom hook); any flag given still
+                                   wins, and identity (hostname, addresses) is
+                                   re-detected so a rename sticks
 
 A/B slot subcommands (run on an installed device; omit host to act locally):
   status                         Show active slot and per-slot metadata
@@ -682,6 +690,12 @@ Integrity options:
                                    in DIR (for air-gapped/pinned mirrors)
   --no-verify                    Skip artifact checksum verification (UNSAFE -
                                    only for debugging; never for a VPN host)
+  --no-manifest                  upgrade: build a STOCK image although this
+                                   system carries no build manifest. Without
+                                   it an upgrade that cannot tell what the
+                                   system was built with refuses rather than
+                                   silently dropping the container runtime and
+                                   the custom hook
   --verity                       Protect A/B root slots with dm-verity (default
                                    ON in --hardened): per-slot hash tree, root
                                    verified block-by-block at boot
@@ -868,6 +882,10 @@ parse_arguments() {
                 ;;
             --no-verify)
                 NO_VERIFY=true
+                shift
+                ;;
+            --no-manifest)
+                IGNORE_MANIFEST=true
                 shift
                 ;;
             --known-hosts)

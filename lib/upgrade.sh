@@ -441,6 +441,8 @@ run_upgrade() {
     log_info "Active slot:  $current ($(get_slot_meta "$current" VERSION || echo unknown))"
     log_info "Target slot:  $target"
 
+    assert_build_inputs_known
+
     if [ "$DRY_RUN" = "true" ]; then
         log_info "[DRY-RUN] Would build $version into slot $target and switch to it"
         umount_boot
@@ -527,4 +529,44 @@ show_status() {
         echo ""
     done
     umount_boot
+}
+
+# An upgrade must not rebuild blind.
+#
+# The build is driven by flags, and their defaults describe a stock Alpine:
+# CONTAINERS=none, CUSTOM_SCRIPT empty. On a host that exists to run
+# containers, an upgrade with no flags therefore writes a system with no
+# container runtime and none of the host's own setup into the inactive slot,
+# points the bootloader at it, and says nothing. The failure surfaces at the
+# next reboot, which is both the worst moment and the hardest to attribute.
+#
+# So: proceed when the system carries a build manifest (normal case, written by
+# write_build_manifest since manifest version 1), or when the operator passed
+# build options explicitly (a pre-manifest system being upgraded by hand, which
+# is also what writes the first manifest). Otherwise stop and say what is
+# missing. `--no-manifest` is for the case where a stock image really is what
+# is wanted.
+assert_build_inputs_known() {
+    [ "${AA_MANIFEST_LOADED:-false}" = "true" ] && {
+        log_info "Build inputs: ${AA_BUILD_MANIFEST} (containers=${CONTAINERS}, custom-script=${CUSTOM_SCRIPT:-none})"
+        return 0
+    }
+    [ "$IGNORE_MANIFEST" = "true" ] && {
+        log_warn "No build manifest, and --no-manifest was given: building a STOCK image"
+        return 0
+    }
+    if [ "$CONTAINERS" != "none" ] || [ -n "$CUSTOM_SCRIPT" ]; then
+        log_warn "No build manifest on this system; using the options given on the command line"
+        log_warn "  containers=${CONTAINERS}, custom-script=${CUSTOM_SCRIPT:-none}"
+        log_warn "  This upgrade writes one, so the next can rebuild without them"
+        return 0
+    fi
+    die "Refusing to upgrade: this system carries no build manifest (${AA_BUILD_MANIFEST}) and no build options were given.
+An upgrade rebuilds from flags, so it would write a STOCK image into the inactive
+slot: no container runtime, no custom build hook, none of this host's setup, and
+you would find out at the next reboot.
+
+Pass the options this system was installed with (see its INSTALL.md), for example:
+  --hardened --persist --data-fs btrfs --containers docker --custom-script <path>
+or --no-manifest if a stock image is genuinely what you want."
 }

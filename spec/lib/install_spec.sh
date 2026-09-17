@@ -727,6 +727,68 @@ Describe 'partition safety (mounted gate + tolerant parted)'
             The contents of file "$OR_ROOT/etc/init.d/aa-modules" should include "aa-mount-data"
         End
     End
+    Describe 'write_build_manifest()'
+        # What makes the NEXT upgrade reproducible. Identity must stay out of
+        # it: a host renamed between two upgrades has to keep its new name.
+        setup_manifest() {
+            WBM_ROOT=$(mktemp -d)
+            ALPINE_VERSION=3.24
+            ALPINE_MIRROR="https://example.invalid/alpine"
+            KERNEL_FLAVOR=lts
+            HARDENED_MODE=true
+            INIT_SYSTEM=s6
+            EXTRA_PACKAGES=""
+            PERSIST_DATA=true
+            DATA_FS=btrfs
+            ENCRYPT_DATA=false
+            UNLOCK_METHOD=ssh
+            CONTAINERS=docker
+            CONTAINER_RUNTIME=crun
+            VERITY_MODE=false
+            CUSTOM_SCRIPT=""
+            DETECTED_HOSTNAME=the-old-name
+        }
+        cleanup_manifest() { rm -rf "$WBM_ROOT"; }
+        Before 'setup_manifest'
+        After 'cleanup_manifest'
+
+        It 'records the build options an upgrade would otherwise default away'
+            When call write_build_manifest "$WBM_ROOT"
+            The status should be success
+            The stderr should include "Build manifest written"
+            The contents of file "$WBM_ROOT/etc/alpine-anywhere/install.conf" should include 'CONTAINERS="docker"'
+            The contents of file "$WBM_ROOT/etc/alpine-anywhere/install.conf" should include 'HARDENED_MODE="true"'
+            The contents of file "$WBM_ROOT/etc/alpine-anywhere/install.conf" should include 'DATA_FS="btrfs"'
+        End
+
+        It 'records no identity, so a rename survives the next upgrade'
+            When call write_build_manifest "$WBM_ROOT"
+            The status should be success
+            The stderr should include "Build manifest written"
+            The contents of file "$WBM_ROOT/etc/alpine-anywhere/install.conf" should not include "the-old-name"
+            The contents of file "$WBM_ROOT/etc/alpine-anywhere/install.conf" should not include "HOSTNAME"
+        End
+
+        It 'carries the custom hook and its digest'
+            printf '#!/bin/sh\napk add --no-cache docker\n' > "$WBM_ROOT/hook.sh"
+            CUSTOM_SCRIPT="$WBM_ROOT/hook.sh"
+            expected=$(sha256_file "$WBM_ROOT/hook.sh")
+            When call write_build_manifest "$WBM_ROOT"
+            The status should be success
+            The stderr should include "Build manifest written"
+            The contents of file "$WBM_ROOT/etc/alpine-anywhere/custom-script.sh" should include "apk add --no-cache docker"
+            The contents of file "$WBM_ROOT/etc/alpine-anywhere/install.conf" should include "CUSTOM_SCRIPT=\"/etc/alpine-anywhere/custom-script.sh\""
+            The contents of file "$WBM_ROOT/etc/alpine-anywhere/install.conf" should include "$expected"
+        End
+
+        It 'leaves the hook reference empty when there is no hook'
+            When call write_build_manifest "$WBM_ROOT"
+            The status should be success
+            The stderr should include "Build manifest written"
+            The contents of file "$WBM_ROOT/etc/alpine-anywhere/install.conf" should include 'CUSTOM_SCRIPT=""'
+            The path "$WBM_ROOT/etc/alpine-anywhere/custom-script.sh" should not be exist
+        End
+    End
 End
 
 Describe 'setup_system_ssh() authorized_keys fallback'

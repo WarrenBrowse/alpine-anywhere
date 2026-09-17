@@ -54,6 +54,34 @@ else
     exit 1
 fi
 
+# An upgrade rebuilds the system it is replacing, so it starts from that
+# system's own build manifest (written into the image at build time, see
+# write_build_manifest). Sourced HERE, before common.sh applies its defaults,
+# so `${VAR:-default}` picks these values up and a flag on the command line
+# still wins. Without it, `aa upgrade` would default CONTAINERS to none and
+# CUSTOM_SCRIPT to empty and quietly write a stock Alpine into the inactive
+# slot: the operator finds out at the reboot.
+#
+# The argument scan is deliberately crude. The real parser lives in common.sh
+# and cannot run yet, and the only thing that matters here is whether this
+# invocation is an upgrade.
+AA_BUILD_MANIFEST="${AA_BUILD_MANIFEST:-/etc/alpine-anywhere/install.conf}"
+# Read by assert_build_inputs_known in lib/upgrade.sh, which shellcheck does not
+# see from here.
+# shellcheck disable=SC2034
+AA_MANIFEST_LOADED=false
+for _aa_arg in "$@"; do
+    [ "$_aa_arg" = "upgrade" ] || continue
+    if [ -r "$AA_BUILD_MANIFEST" ]; then
+        # shellcheck disable=SC1090
+        . "$AA_BUILD_MANIFEST"
+        # shellcheck disable=SC2034
+        AA_MANIFEST_LOADED=true
+    fi
+    break
+done
+unset _aa_arg
+
 # Source all library files
 . "${LIB_DIR}/common.sh"
 . "${LIB_DIR}/ssh.sh"

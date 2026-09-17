@@ -1806,6 +1806,69 @@ VERSION=${ALPINE_VERSION}
 BUILD_DATE=$(date -Iseconds)
 ARCH=${DETECTED_ARCH}
 EOF
+
+    write_build_manifest "$root"
+}
+
+# Record, inside the image, the options this image was built with.
+#
+# An upgrade rebuilds from FLAGS: CONTAINERS defaults to `none`, CUSTOM_SCRIPT
+# to empty, and nothing on an installed system says otherwise. So
+# `aa upgrade --hostname new` on a box whose whole reason to exist is docker
+# writes a stock Alpine into the inactive slot, and the next boot comes up with
+# no container runtime and none of the host's own setup. The operator finds out
+# at the reboot, which is the worst possible moment.
+#
+# This file closes that gap: `aa upgrade` sources it before parsing its own
+# arguments, so an upgrade with no flags reproduces this system, and any flag
+# passed explicitly still wins.
+#
+# It records the BUILD and never the identity. Hostname, addresses and gateways
+# are detected fresh on every run, so a box renamed between two upgrades keeps
+# its new name instead of having the old one baked back in.
+write_build_manifest() {
+    local root="$1"
+    local dir="${root}/etc/alpine-anywhere"
+
+    mkdir -p "$dir"
+
+    # The custom hook is part of the build, so it travels with the manifest: a
+    # copy to rerun, and its digest so a drifted copy elsewhere can be told
+    # apart from the one this image was actually built with.
+    local custom_ref=""
+    local custom_sha=""
+    if [ -n "$CUSTOM_SCRIPT" ] && [ -f "$CUSTOM_SCRIPT" ]; then
+        cp "$CUSTOM_SCRIPT" "${dir}/custom-script.sh"
+        chmod 0644 "${dir}/custom-script.sh"
+        custom_ref="/etc/alpine-anywhere/custom-script.sh"
+        custom_sha=$(sha256_file "$CUSTOM_SCRIPT")
+    fi
+
+    cat > "${dir}/install.conf" << EOF
+# Written by alpine-anywhere at build time; sourced by \`aa upgrade\` before it
+# parses its arguments, so an upgrade with no flags rebuilds this exact system
+# and an explicit flag still overrides. Identity (hostname, addresses) is
+# deliberately absent: it is detected at upgrade time so a rename sticks.
+AA_MANIFEST_VERSION=1
+AA_BUILT_AT="$(date -Iseconds)"
+ALPINE_VERSION="${ALPINE_VERSION}"
+ALPINE_MIRROR="${ALPINE_MIRROR}"
+KERNEL_FLAVOR="${KERNEL_FLAVOR}"
+HARDENED_MODE="${HARDENED_MODE}"
+INIT_SYSTEM="${INIT_SYSTEM}"
+EXTRA_PACKAGES="${EXTRA_PACKAGES}"
+PERSIST_DATA="${PERSIST_DATA}"
+DATA_FS="${DATA_FS}"
+ENCRYPT_DATA="${ENCRYPT_DATA}"
+UNLOCK_METHOD="${UNLOCK_METHOD}"
+CONTAINERS="${CONTAINERS}"
+CONTAINER_RUNTIME="${CONTAINER_RUNTIME}"
+VERITY_MODE="${VERITY_MODE}"
+CUSTOM_SCRIPT="${custom_ref}"
+AA_CUSTOM_SCRIPT_SHA256="${custom_sha}"
+EOF
+    chmod 0644 "${dir}/install.conf"
+    log_info "Build manifest written to /etc/alpine-anywhere/install.conf"
 }
 
 # Setup SSH in system image

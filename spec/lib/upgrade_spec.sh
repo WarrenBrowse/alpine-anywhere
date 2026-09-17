@@ -436,4 +436,53 @@ Describe 'upgrade.sh'
             The variable MAX_BOOT_ATTEMPTS should equal 1
         End
     End
+    Describe 'assert_build_inputs_known()'
+        # The guard that stands between `aa upgrade` on a container host and a
+        # stock image in the inactive slot. Each branch is one way an operator
+        # can arrive at the upgrade.
+        setup_guard() {
+            AA_BUILD_MANIFEST=/nonexistent/install.conf
+            AA_MANIFEST_LOADED=false
+            IGNORE_MANIFEST=false
+            CONTAINERS=none
+            CUSTOM_SCRIPT=""
+        }
+        Before 'setup_guard'
+
+        It 'proceeds when the system carries a build manifest'
+            AA_MANIFEST_LOADED=true
+            CONTAINERS=docker
+            When call assert_build_inputs_known
+            The status should be success
+            The stderr should include "Build inputs"
+        End
+
+        It 'proceeds when build options were given on the command line'
+            CONTAINERS=docker
+            When call assert_build_inputs_known
+            The status should be success
+            The stderr should include "No build manifest"
+        End
+
+        It 'proceeds on a custom script alone, with no container runtime'
+            CUSTOM_SCRIPT=/tmp/hook.sh
+            When call assert_build_inputs_known
+            The status should be success
+            The stderr should include "custom-script=/tmp/hook.sh"
+        End
+
+        It 'refuses a bare upgrade on a system with no manifest'
+            When run assert_build_inputs_known
+            The status should be failure
+            The stderr should include "Refusing to upgrade"
+            The stderr should include "STOCK image"
+        End
+
+        It 'builds a stock image when the operator asks for one'
+            IGNORE_MANIFEST=true
+            When call assert_build_inputs_known
+            The status should be success
+            The stderr should include "building a STOCK image"
+        End
+    End
 End
