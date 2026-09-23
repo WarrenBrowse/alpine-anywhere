@@ -30,11 +30,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install shellcheck + shellspec
+        # A pinned release checked against its digest: the upstream installer
+        # URL serves whatever shellspec's master branch holds at run time.
+        env:
+          SHELLSPEC_VERSION: 0.28.1
+          SHELLSPEC_SHA256: 350d3de04ba61505c54eda31a3c2ee912700f1758b1a80a284bc08fd8b6c5992
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
-          if ! command -v shellspec >/dev/null 2>&1; then
-            curl -fsSL https://git.io/shellspec | sh -s -- --yes --prefix "$HOME/.local"
-          fi
+          curl -fsSL -o "$RUNNER_TEMP/shellspec-dist.tar.gz" \
+            "https://github.com/shellspec/shellspec/releases/download/${SHELLSPEC_VERSION}/shellspec-dist.tar.gz"
+          echo "${SHELLSPEC_SHA256}  $RUNNER_TEMP/shellspec-dist.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.local/lib" "$HOME/.local/bin"
+          tar xzf "$RUNNER_TEMP/shellspec-dist.tar.gz" -C "$HOME/.local/lib"
+          ln -sf "$HOME/.local/lib/shellspec/shellspec" "$HOME/.local/bin/shellspec"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       # Repo-wide: POSIX syntax + shellcheck (the whole tree is clean and gated),
       # then the full shellspec unit + integration suite. The VM harness (below)
