@@ -262,9 +262,22 @@ phase_autorollback() {
     log "after auto-rollback: running=$(running_slot) boot_slot=$(boot_slot) B_count=$(slot_field B 'Boot count')"
     expect "recovered onto slot A after auto-rollback" test "$(running_slot)" = A
     expect "boot-counter reverted the on-disk boot target to A" test "$(boot_slot)" = A
+    local fails_before="$FAIL"
     expect "failing slot B's boot counter reached 2 (the unverified retry)" \
         test "$(slot_field B 'Boot count')" = 2
+    [ "$FAIL" = "$fails_before" ] || dump_boot_state
     return 0
+}
+
+# dump_boot_state - print what the boot-guard left on disk, so a failed A/B
+# assertion can be read from the CI log instead of re-run under a debugger.
+dump_boot_state() {
+    echo "----- aa status -----" >&2
+    aa_status >&2 || true
+    echo "----- slots.meta + init-aa.log (boot partition) -----" >&2
+    vm_ssh 'mp=/mnt/aad; mkdir -p "$mp"; mount -o ro /dev/vda1 "$mp" 2>/dev/null || exit 0; \
+        cat "$mp/slots.meta"; echo "--"; tail -n 30 "$mp/init-aa.log"; umount "$mp"' >&2 2>/dev/null || true
+    echo "-------------------------------------------" >&2
 }
 
 # ---- main -------------------------------------------------------------------
