@@ -1,14 +1,14 @@
 name: vm-integration
 
-# lint: repo-wide shellcheck + the shellspec suite, on a GitHub-hosted runner.
+# lint: repo-wide shellcheck + the shellspec suite.
 #
 # vm: boots a disposable QEMU guest and runs the full install -> reboot -> A/B
 # upgrade -> rollback -> auto-rollback lifecycle (spec/integration/vm/). This is
 # the only coverage of the pivot/takeover + repartition-the-running-disk path
 # that can brick a server, so it is the gate to run before each exit-fleet bump.
-# It needs nested virtualization done right, so it runs on a self-hosted x86_64
-# runner (label `warren`) and is restricted to same-repo events: a pull request
-# from a fork never reaches the self-hosted runner.
+# It needs KVM, which the GitHub-hosted x64 Linux runner exposes once a udev
+# rule opens /dev/kvm to the runner user. It stays restricted to same-repo
+# events.
 
 on:
   push:
@@ -19,14 +19,14 @@ on:
 permissions:
   contents: read
 
-# One vm run per ref on the shared self-hosted runner; a new push cancels the old.
+# One vm run per ref; a new push cancels the old.
 concurrency:
   group: vm-integration-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install shellcheck + shellspec
@@ -53,14 +53,14 @@ jobs:
         run: make test
 
   vm:
-    # Self-hosted runner: never exposed to fork PRs. Same-repo pull requests and
-    # manual dispatch only (pushes to master run the fast lint job above; the vm
+    # Same-repo pull requests and manual dispatch only, a guard kept from the
+    # self-hosted era (pushes to master run the fast lint job above; the vm
     # gate runs via the open PR or a manual dispatch).
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' &&
        github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: [self-hosted, Linux, X64, libra]
+    runs-on: ubuntu-24.04
     needs: lint
     timeout-minutes: 60
     env:
@@ -69,15 +69,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Open /dev/kvm to the runner user
+        # The hosted image has /dev/kvm but only root and the kvm group may open
+        # it; without this the harness silently falls back to TCG, which is far
+        # slower.
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
       - name: Install QEMU + NoCloud tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils genisoimage
           ls -l /dev/kvm 2>/dev/null || echo "no /dev/kvm - harness will fall back to TCG"
 
       - name: VM lifecycle test
-        # Cache the seed image on the runner between runs (free, fast).
         run: |
-          export AA_VM_CACHE="$HOME/.cache/aa-vm"
+          export AA_VM_CACHE="$RUNNER_TEMP/aa-vm"
           mkdir -p "$AA_VM_CACHE"
           make test-vm

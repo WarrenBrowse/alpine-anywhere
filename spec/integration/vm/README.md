@@ -47,12 +47,12 @@ run is a few minutes; under **TCG** emulation (no KVM, e.g. macOS) it works but
 is slow. When QEMU is not installed the test prints `SKIP` and exits `0`, so
 `make test` stays green on dev machines.
 
-In CI (`.github/workflows/vm-integration.yml`) it runs on a self-hosted x86_64
-runner (label `warren`), restricted to same-repo pull requests and manual
-dispatch; the fast lint + shellspec job runs on a GitHub-hosted runner. This is
-the gate to run **before each exit-fleet bump**: the same logic that says
-"networking integration tests don't suffice, validate on real hardware" applied
-to the boot path.
+In CI (`.github/workflows/vm-integration.yml`) it runs on a GitHub-hosted x64
+Linux runner with KVM opened to the runner user, restricted to same-repo pull
+requests and manual dispatch; the fast lint + shellspec job runs on every push.
+This is the gate to run **before each exit-fleet bump**: the same logic that
+says "networking integration tests don't suffice, validate on real hardware"
+applied to the boot path.
 
 ## Knobs (env)
 
