@@ -330,10 +330,21 @@ run_remote_ab_install() {
         return 0
     fi
 
-    log_step "Verifying the host came back as the installed Alpine system..."
     # Drop the multiplexed master pinned to the pre-pivot session; it would poison
     # the reconnect.
     close_ssh_multiplexing 2>/dev/null || true
+
+    # An install onto a disk other than the boot disk takes no pivot and reboots
+    # nothing: the source system is still the one answering, so waiting for an
+    # installed Alpine would only ever find it and fail.
+    if [ "$(ssh_exec_capture "test -f $NO_PIVOT_MARKER && echo yes" 2>/dev/null || true)" = "yes" ]; then
+        ssh_exec_capture "rm -f $NO_PIVOT_MARKER" >/dev/null 2>&1 || true
+        log_info "Installed onto $TARGET_DISK without a pivot; the host was not rebooted. Boot that disk to activate it."
+        show_install_completion_message
+        return 0
+    fi
+
+    log_step "Verifying the host came back as the installed Alpine system..."
     # The RAM installer is headless (no SSH) and reboots into the final system, so
     # SSH only answers once the installed Alpine is up. Generous timeout: the A/B
     # build (minirootfs + apk + custom-script + mksquashfs + reboot) is slower than
@@ -381,6 +392,8 @@ run_remote_upgrade() {
 
 run_local_ab_install() {
     log_info "Running A/B installation in local mode"
+    # A marker left by an earlier run must never vouch for this one.
+    rm -f "$NO_PIVOT_MARKER" 2>/dev/null || true
 
     # Setup directories
     setup_install_dirs "$HOME"
@@ -476,6 +489,7 @@ run_local_ab_install() {
         else
             run_ab_install
         fi
+        mkdir -p "${NO_PIVOT_MARKER%/*}" && : > "$NO_PIVOT_MARKER" || true
         show_install_completion_message
         return 0
     fi

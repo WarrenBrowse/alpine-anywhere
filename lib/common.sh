@@ -50,6 +50,10 @@ INIT_SYSTEM="${INIT_SYSTEM:-}"            # Init system: openrc|s6 (empty = auto
 TARGET_SLOT="${TARGET_SLOT:-}"            # Destination/boot slot: A|B (install dest; aa switch target)
 OVERLAY_DEVICE="${OVERLAY_DEVICE:-}"      # Device for persistent overlay
 TARGET_DISK="${TARGET_DISK:-}"            # Explicit install disk (e.g. /dev/sda); empty = auto-detect
+# Left on the source host by an install onto a disk other than the boot disk.
+# Nothing reboots in that case, so the control host must not wait for an
+# installed Alpine to answer on SSH. /run is a tmpfs: a reboot clears it.
+NO_PIVOT_MARKER="/run/alpine-anywhere/installed-without-pivot"
 HARDENED_MODE="${HARDENED_MODE:-false}"   # Security hardened mode
 NO_VERIFY="${NO_VERIFY:-false}"           # Skip artifact checksum verification (UNSAFE)
 IGNORE_MANIFEST="${IGNORE_MANIFEST:-false}" # upgrade: build a stock image although the system carries no build manifest
