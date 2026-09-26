@@ -25,9 +25,11 @@ boot_slot() {
 
 # slot_field SLOT LABEL -> value of a per-slot field from `aa status` (e.g.
 # "Boot count", "Verified", "Version"). Parses the "Slot <S> ...:" block so we
-# never have to remount the boot partition ourselves.
+# never have to remount the boot partition ourselves. The "[" of "[running]" is
+# matched as the bracket expression [[] because an escaped \[ passed through
+# `awk -v` loses its backslash under gawk (Ubuntu's awk) and breaks the regexp.
 slot_field() {
-    aa_status | awk -v s="^Slot $1( |\\[|:)" -v l="$2" '
+    aa_status | awk -v s="^Slot $1( |[[]|:)" -v l="$2" '
         $0 ~ s        { inb=1; next }
         /^Slot /      { inb=0 }
         inb && index($0, l ":") {
