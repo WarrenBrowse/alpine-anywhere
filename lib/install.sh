@@ -1154,7 +1154,8 @@ bake_management_tools() {
 # /usr/local/sbin/aa-data (read data.meta, unlock, mount subvols, seed), the
 # operator commands aa-unlock / aa-snapshot, and the OpenRC boot service. The s6
 # oneshot is added by setup_s6_init. Hardened mount opts: nodev,nosuid
-# everywhere; noexec only where safe (/srv, /var/log).
+# everywhere; noexec only where safe (/srv, /var/log). /var/log itself is a
+# tmpfs mounted over @var by aa-data, so no log survives a reboot.
 setup_persistence_image() {
     local root="$1"
     log_info "Baking data-persistence (/var on ${DATA_FS}$(encrypt_enabled && echo '+LUKS'))..."
@@ -1287,6 +1288,19 @@ _seed_var() {
     [ -d /usr/share/factory/var ] || return 0
     cp -an /usr/share/factory/var/. /var/ 2>/dev/null || true
 }
+_volatile_log() {
+    # Logs never reach the data partition: /var persists, its log dir must not,
+    # so that a reboot leaves no log behind. Whatever an older image wrote
+    # there is erased before the tmpfs hides it, while no logger has it open.
+    d="${1:-/var/log}"
+    mountpoint -q "$d" 2>/dev/null && return 0
+    mkdir -p "$d" 2>/dev/null || true
+    find "$d" -mindepth 1 -delete 2>/dev/null || true
+    mount -t tmpfs -o mode=0755,nosuid,nodev,noexec,size=64m tmpfs "$d" || {
+        echo "aa-data: WARN could not mount a tmpfs on $d" >&2; return 1; }
+    [ -d /usr/share/factory/var/log ] && cp -a /usr/share/factory/var/log/. "$d"/ 2>/dev/null
+    return 0
+}
 _mount_all() {
     # /etc/fstab has the persist mounts as noauto; mount them explicitly.
     # Order matters: /var first so /var/lib/* mountpoints land on the subvol.
@@ -1297,6 +1311,7 @@ _mount_all() {
             echo "aa-data: WARN could not mount $m" >&2
     done
     _seed_var
+    _volatile_log /var/log
     touch "$READY"
 }
 _start_data_services() {

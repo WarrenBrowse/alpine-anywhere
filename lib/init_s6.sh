@@ -293,9 +293,10 @@ EOF
     if containers_enabled && container_is docker; then
         install_s6_docker_run "$hd"
         _s6_longrun "$src" docker "/usr/local/libexec/aa-s6/docker-run"
-        # Persistent log dir when the data partition exists: the logger then
-        # waits for the mount too, or it would hold an fd on the tmpfs
-        # /var/log that the @var mount shadows.
+        # With a data partition, aa-data mounts a fresh tmpfs on /var/log after
+        # @var, so the logger waits for that mount too, or it would hold an fd
+        # on the overlay's /var/log that both mounts shadow. Either way the log
+        # lives in RAM and dies with the boot.
         if [ "$PERSIST_DATA" = "true" ]; then
             _s6_logger "$src" docker /var/log/docker
             _s6_dep "$src" docker-log mount-data

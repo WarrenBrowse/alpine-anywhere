@@ -119,6 +119,40 @@ Describe 'data persistence'
             The output should include "/var/lib/docker"
         End
 
+        It 'aa-data puts /var/log in RAM once the data partition is mounted'
+            # No-log policy: nothing a logger writes may survive a reboot, so
+            # the persisted /var must never hold the logs.
+            install_aa_data_helper "$ROOT"
+            When call awk '/^_mount_all\(\)/{f=1} f&&/done/{d=NR} f&&/_volatile_log/{v=NR} f&&/^}/{exit} END{print (d && v > d) ? "after-mounts" : "missing"}' "$ROOT/usr/local/sbin/aa-data"
+            The output should eq "after-mounts"
+        End
+
+        It '_volatile_log empties what an older image persisted and mounts a tmpfs over it'
+            install_aa_data_helper "$ROOT"
+            LOG="$ROOT/varlog"; mkdir -p "$LOG/docker"; echo old > "$LOG/docker/current"; echo old > "$LOG/apk.log"
+            mountpoint() { return 1; }
+            mount() { echo "mount $*" >> "$ROOT/mount.log"; }
+            eval "$(sed -n '/^_volatile_log() {/,/^}/p' "$ROOT/usr/local/sbin/aa-data")"
+            When call _volatile_log "$LOG"
+            The status should be success
+            The path "$LOG/docker/current" should not be exist
+            The path "$LOG/apk.log" should not be exist
+            The contents of file "$ROOT/mount.log" should include "-t tmpfs"
+            The contents of file "$ROOT/mount.log" should include "$LOG"
+        End
+
+        It '_volatile_log leaves an already mounted log dir alone'
+            install_aa_data_helper "$ROOT"
+            LOG="$ROOT/varlog"; mkdir -p "$LOG"; echo live > "$LOG/current"
+            mountpoint() { return 0; }
+            mount() { echo "mount $*" >> "$ROOT/mount.log"; }
+            eval "$(sed -n '/^_volatile_log() {/,/^}/p' "$ROOT/usr/local/sbin/aa-data")"
+            When call _volatile_log "$LOG"
+            The status should be success
+            The path "$LOG/current" should be exist
+            The path "$ROOT/mount.log" should not be exist
+        End
+
         It 'aa-data resolves a tag-style root= via the squashfs mount source'
             # x86_64 slots boot root=PARTUUID=...; deriving the boot disk from
             # the raw tag yields garbage and data.meta is never found.
